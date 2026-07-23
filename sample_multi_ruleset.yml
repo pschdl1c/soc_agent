@@ -1,0 +1,69 @@
+title: Suspicious Whoami Privilege Enumeration
+id: 1a2b3c4d-0001-4e5f-8a9b-0c1d2e3f4001
+status: experimental
+description: Detects whoami.exe run with privilege/group enumeration switches - common recon step after initial access.
+author: soc_agent sample
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_img:
+    Image|endswith: '\whoami.exe'
+  selection_cli:
+    CommandLine|contains:
+      - '/priv'
+      - '/groups'
+      - '/all'
+  condition: selection_img and selection_cli
+level: low
+falsepositives:
+  - Legitimate administrative scripts checking current privileges
+tags:
+  - attack.discovery
+  - attack.t1033
+---
+title: Suspicious Net User Account Creation
+id: 1a2b3c4d-0002-4e5f-8a9b-0c1d2e3f4002
+status: experimental
+description: Detects local account creation via net.exe/net1.exe - a common persistence technique.
+author: soc_agent sample
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_img:
+    Image|endswith:
+      - '\net.exe'
+      - '\net1.exe'
+  selection_cli:
+    CommandLine|contains: 'user'
+  selection_add:
+    CommandLine|contains: '/add'
+  condition: selection_img and selection_cli and selection_add
+level: medium
+falsepositives:
+  - Legitimate account provisioning by IT administrators
+tags:
+  - attack.persistence
+  - attack.t1136.001
+---
+title: Suspicious Certutil URLCache Download
+id: 1a2b3c4d-0003-4e5f-8a9b-0c1d2e3f4003
+status: experimental
+description: Detects certutil.exe used with urlcache to download a remote payload - classic LOLBIN staging technique (T1105).
+author: soc_agent sample
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_img:
+    Image|endswith: '\certutil.exe'
+  selection_cli:
+    CommandLine|contains: 'urlcache'
+  condition: selection_img and selection_cli
+level: high
+falsepositives:
+  - Legitimate certificate management scripts using certutil
+tags:
+  - attack.command_and_control
+  - attack.t1105

@@ -1,0 +1,37 @@
+# Прямые зависимости app/ и Zircolite (см. Zircolite/requirements.txt для апстрим-версии).
+# Зафиксировано по фактически работающему окружению — см. CLAUDE.md §2.
+#
+# Установка:
+#   python -m venv .venv
+#   .venv\Scripts\Activate.ps1
+#   pip install -r requirements.txt
+#
+# Для запуска тестов дополнительно нужен requirements-dev.txt.
+
+# --- веб-сервис ---
+fastapi==0.139.2
+uvicorn==0.51.0
+pydantic==2.13.4
+python-multipart==0.0.32   # form/upload-параметры (FastAPI Form/UploadFile)
+python-dotenv==1.2.2       # чтение .env (см. app/config.py)
+
+# --- Sigma → SQL ---
+pysigma==1.4.0
+pysigma-backend-sqlite==1.2.0
+pysigma-pipeline-windows==2.0.0
+pysigma-pipeline-sysmon==2.0.0
+pyyaml==6.0.3
+
+# --- Zircolite (движок детекта, импортируется из ./Zircolite, но использует эти пакеты) ---
+orjson==3.11.9
+xxhash==3.8.1
+rich==15.0.0
+chardet==5.2.0
+RestrictedPython==8.4
+requests==2.34.2
+jinja2==3.1.6
+evtx==0.12.1
+lxml==6.1.1
+psutil==7.2.2
+urllib3==2.7.0
+py7zr==1.1.3

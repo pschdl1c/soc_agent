@@ -1,0 +1,562 @@
+"""
+Хранилище на SQLite: алерты (для анализа/агента) и сырые события (для просмотра
+аналитиком, включая те, что не вызвали ни одного правила).
+
+Обе таблицы живут в одном файле БД, но логически независимы - события просто
+хранят JSON-снимок того, что попало в движок, плюс список названий правил,
+которые на этом событии сработали (может быть пустым).
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from app.fields import HOST_FIELDS, TIME_FIELDS, first_present
+from app.filter_lang import FILTER_OPS, IS_MATCHED_FIELD, RULE_FIELD, compile_condition, resolve_json_path
+from app.models import Alert
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id TEXT PRIMARY KEY,
+    dedup_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    engine TEXT NOT NULL,
+    source_batch TEXT NOT NULL,
+    host TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    rule_title TEXT NOT NULL,
+    rule_level TEXT NOT NULL,
+    mitre_techniques TEXT NOT NULL,
+    description TEXT NOT NULL,
+    entities TEXT NOT NULL,
+    event_count INTEGER NOT NULL,
+    sample_events TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new'
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts(dedup_key);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
+CREATE INDEX IF NOT EXISTS idx_alerts_level ON alerts(rule_level);
+CREATE INDEX IF NOT EXISTS idx_alerts_batch ON alerts(source_batch);
+
+CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    source_batch TEXT NOT NULL,
+    host TEXT NOT NULL,
+    event_time TEXT,
+    ingested_at TEXT NOT NULL,
+    is_matched INTEGER NOT NULL DEFAULT 0,
+    matched_rules TEXT NOT NULL DEFAULT '[]',
+    raw_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_batch ON events(source_batch);
+CREATE INDEX IF NOT EXISTS idx_events_host ON events(host);
+CREATE INDEX IF NOT EXISTS idx_events_matched ON events(is_matched);
+CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time);
+
+-- Индекс НА ВЫРАЖЕНИИ для "горячих" полей внутри raw_json (см. filter_lang.INDEXED_JSON_FIELDS
+-- /resolve_json_path) - без него фильтр/группировка по EventID сканируют всю таблицу целиком
+-- (json_extract на каждой строке). Выражение здесь должно ТЕКСТУАЛЬНО совпадать с тем, что
+-- строит resolve_json_path, иначе планировщик SQLite индекс не подхватит.
+CREATE INDEX IF NOT EXISTS idx_events_json_eventid ON events(json_extract(raw_json, '$."EventID"'));
+"""
+
+# Ранг severity для сортировки колонки "Правило" (critical - самый высокий).
+_SEVERITY_RANK_SQL = (
+    "CASE rule_level "
+    "WHEN 'critical' THEN 5 "
+    "WHEN 'high' THEN 4 "
+    "WHEN 'medium' THEN 3 "
+    "WHEN 'low' THEN 2 "
+    "ELSE 1 END"
+)
+
+# Белые списки сортируемых полей: ключ из UI -> безопасное SQL-выражение.
+# Ввод пользователя никогда не подставляется в SQL напрямую.
+_ALERT_SORT_COLUMNS = {
+    "rule": _SEVERITY_RANK_SQL,  # сортировка по рангу severity
+    "host": "host",
+    "event_count": "event_count",
+    "status": "status",
+    "created_at": "created_at",
+}
+_EVENT_SORT_COLUMNS = {
+    "event_time": "event_time",
+    "host": "host",
+    "is_matched": "is_matched",
+}
+
+
+def _order_clause(sort_by: str | None, sort_dir: str | None, columns: dict[str, str], default: str) -> str:
+    """Строит безопасный ORDER BY только из whitelisted-выражений (для алертов)."""
+    expr = columns.get(sort_by or "", None)
+    if expr is None:
+        return default
+    direction = "ASC" if (sort_dir or "").lower() == "asc" else "DESC"
+    return f"ORDER BY {expr} {direction}"
+
+
+def _event_order(sort_by: str | None, sort_dir: str | None) -> tuple[str, list[Any]]:
+    """ORDER BY для событий: фикс-колонка из whitelist ИЛИ произвольное поле raw_json (json_extract,
+    для "горячих" полей - литерал-путь с индексом, см. resolve_json_path)."""
+    direction = "ASC" if (sort_dir or "").lower() == "asc" else "DESC"
+    if not sort_by:
+        return "ORDER BY ingested_at DESC", []
+    if sort_by in _EVENT_SORT_COLUMNS:
+        return f"ORDER BY {_EVENT_SORT_COLUMNS[sort_by]} {direction}", []
+    col_expr, col_params = resolve_json_path(sort_by)
+    return f"ORDER BY {col_expr} {direction}", col_params
+
+
+def _build_extra_filter_clause(filters: list[dict] | None) -> tuple[str, list[Any]]:
+    """
+    Собирает WHERE-фрагмент AND-ом из простых условий {field, op, value} - используется только
+    для group_cond (drill-in по выбранной группе в панели группировки), который всегда сужает
+    выборку. Свободный текстовый язык фильтра (app/filter_lang.py, поддерживает произвольную
+    вложенность and/or/not) компилируется отдельно в main.py/_parse_query_filter и приходит
+    сюда уже готовым SQL-фрагментом (см. _events_where/query_filter) - здесь его трогать не надо.
+
+    Компиляция каждого условия делегирована filter_lang.compile_condition - тот же движок,
+    что и у текстового языка фильтра, поэтому оба пути (свободный текст и drill-in по группе)
+    гарантированно ведут себя одинаково. Путь поля и значение уходят как bound-параметры.
+    """
+    if not filters:
+        return "", []
+    parts: list[str] = []
+    params: list[Any] = []
+    for f in filters:
+        field = str(f.get("field") or "").strip()
+        op = str(f.get("op") or "eq").lower()
+        value = f.get("value")
+        if not field or op not in FILTER_OPS:
+            continue
+        sql, p = compile_condition(field, op, value)
+        parts.append(sql)
+        params += p
+    if not parts:
+        return "", []
+    return "(" + " AND ".join(parts) + ")", params
+
+
+class Store:
+    """Два SQLite-соединения на один файл, с раздельными локами:
+    - self._conn / self._lock       - ТОЛЬКО запись (INSERT/UPDATE/DELETE, upsert_alerts,
+      store_events, схема при старте).
+    - self._read_conn / self._read_lock - ТОЛЬКО чтение (список/карточка алертов и событий,
+      группировка, /batches).
+
+    Раньше и то, и другое шло через одно соединение под одним общим локом - любой тяжёлый
+    запрос аналитика во вкладке "События" (группировка/фильтр по кастомному полю - full table
+    scan по json_extract, см. filter_lang.py) блокировал запись новых событий из ingest-воркера
+    на всё время своего выполнения, и наоборот. WAL-режим (включается ниже) позволяет читателям
+    не блокировать писателя и наоборот (писатели друг друга по-прежнему блокируют, но пишет
+    всегда один и тот же ingest-воркер последовательно - это не новое ограничение). Раздельные
+    соединения нужны ДОПОЛНИТЕЛЬНО к WAL, а не вместо него - одно соединение и один Lock всё
+    равно сериализовали бы всё на уровне Python, независимо от возможностей самого WAL."""
+
+    def __init__(self, db_path: str = "siem.db") -> None:
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._read_lock = threading.Lock()
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        with self._lock:
+            # WAL: читатели не блокируют писателя и наоборот (в отличие от дефолтного
+            # rollback-журнала). synchronous=NORMAL - стандартная пара к WAL: fsync на checkpoint,
+            # а не на каждый commit - заметно быстрее запись при том же практическом уровне
+            # надёжности (риск потери самых последних транзакций остаётся только при падении ОС/
+            # железа, не при падении процесса приложения - для ingest-пайплайна это приемлемо).
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
+        self._read_conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._read_conn.row_factory = sqlite3.Row
+        # query_only - страховка на уровне соединения: даже случайная попытка написать через
+        # read_conn упадёт явной ошибкой, а не тихо проскочит мимо self._lock.
+        self._read_conn.execute("PRAGMA query_only=ON")
+
+    # ------------------------------------------------------------------ Alerts
+
+    def upsert_alerts(self, alerts: list[Alert]) -> int:
+        """Дедуплицирует по dedup_key: повторное срабатывание того же правила на
+        том же хосте/сущности увеличивает счётчик существующего алерта."""
+        count = 0
+        with self._lock:
+            cur = self._conn.cursor()
+            for alert in alerts:
+                cur.execute("SELECT alert_id, event_count FROM alerts WHERE dedup_key = ?", (alert.dedup_key,))
+                existing = cur.fetchone()
+                if existing:
+                    cur.execute(
+                        "UPDATE alerts SET event_count = ?, sample_events = ? WHERE dedup_key = ?",
+                        (
+                            existing["event_count"] + alert.event_count,
+                            json.dumps(alert.sample_events, default=str),
+                            alert.dedup_key,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO alerts (
+                            alert_id, dedup_key, created_at, engine, source_batch, host,
+                            rule_id, rule_title, rule_level, mitre_techniques, description,
+                            entities, event_count, sample_events, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            alert.alert_id, alert.dedup_key, alert.created_at.isoformat(),
+                            alert.engine, alert.source_batch, alert.host,
+                            alert.rule.rule_id, alert.rule.title, alert.rule.level.value,
+                            json.dumps(alert.rule.mitre_techniques), alert.rule.description,
+                            json.dumps(alert.entities.model_dump()), alert.event_count,
+                            json.dumps(alert.sample_events, default=str), alert.status,
+                        ),
+                    )
+                count += 1
+            self._conn.commit()
+        return count
+
+    def list_alerts(
+        self,
+        source_batch: str | None = None,
+        status: str | None = None,
+        rule_level: str | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM alerts WHERE 1=1"
+        params: list[Any] = []
+        if source_batch:
+            query += " AND source_batch = ?"
+            params.append(source_batch)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if rule_level:
+            query += " AND rule_level = ?"
+            params.append(rule_level)
+        if time_from:
+            query += " AND created_at >= ?"
+            params.append(time_from)
+        if time_to:
+            query += " AND created_at <= ?"
+            params.append(time_to)
+        order = _order_clause(sort_by, sort_dir, _ALERT_SORT_COLUMNS, "ORDER BY created_at DESC")
+        query += f" {order} LIMIT ? OFFSET ?"
+        params += [limit, offset]
+
+        with self._read_lock:
+            rows = [dict(r) for r in self._read_conn.execute(query, params).fetchall()]
+        for row in rows:
+            row["mitre_techniques"] = json.loads(row["mitre_techniques"])
+            row["entities"] = json.loads(row["entities"])
+            row.pop("sample_events", None)
+        return rows
+
+    def get_alert(self, alert_id: str) -> dict[str, Any] | None:
+        with self._read_lock:
+            row = self._read_conn.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["mitre_techniques"] = json.loads(result["mitre_techniques"])
+        result["entities"] = json.loads(result["entities"])
+        result["sample_events"] = json.loads(result["sample_events"])
+        return result
+
+    def update_alert_status(self, alert_id: str, status: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("UPDATE alerts SET status = ? WHERE alert_id = ?", (status, alert_id))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    # ------------------------------------------------------------------ Events
+
+    def store_events(
+        self,
+        raw_events: list[dict[str, Any]],
+        source_batch: str,
+        matched_row_to_rules: dict[Any, list[str]],
+    ) -> int:
+        """
+        raw_events            - все события батча, как вернул ZircoliteCore (включают row_id)
+        matched_row_to_rules  - {row_id: [названия сработавших правил]} для этого же батча
+        """
+        ingested_at = datetime.now(timezone.utc).isoformat()
+        rows = []
+        for event in raw_events:
+            row_id = event.get("row_id")
+            matched = matched_row_to_rules.get(row_id, [])
+            host = first_present(event, HOST_FIELDS) or "unknown-host"
+            event_time = first_present(event, TIME_FIELDS)
+            rows.append((
+                str(uuid4()),
+                source_batch,
+                host,
+                event_time,
+                ingested_at,
+                1 if matched else 0,
+                json.dumps(matched),
+                json.dumps(event, default=str),
+            ))
+
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT INTO events (
+                    event_id, source_batch, host, event_time, ingested_at,
+                    is_matched, matched_rules, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            self._conn.commit()
+        return len(rows)
+
+    def _events_where(
+        self,
+        source_batch: str | None,
+        only_matched: bool | None,
+        time_from: str | None,
+        time_to: str | None,
+        query_filter: tuple[str, list[Any]] | None = None,
+        extra_filters: list[dict] | None = None,
+    ) -> tuple[str, list[Any]]:
+        """Общий WHERE для событий: базовые фильтры + пользовательский текстовый фильтр.
+        Пайплайн один и тот же для списка, счётчика и группировки - фильтр применяется до всего.
+
+        query_filter - уже скомпилированный (sql, params) свободного текстового языка фильтра
+        (см. app/filter_lang.py и main.py/_parse_query_filter - разбор и ошибки синтаксиса
+        живут там, сюда приходит готовый parametrized SQL-фрагмент, store.py языка не знает).
+        Отдельного параметра фильтра по хосту больше нет - при необходимости он выражается
+        через query_filter по полю raw_json (напр. "Hostname contains ...").
+
+        extra_filters - условия drill-in по выбранной группе, ВСЕГДА добавляются по AND поверх
+        query_filter независимо от логики внутри него (выбор группы должен сужать, а не менять
+        смысл пользовательского фильтра)."""
+        sql = " WHERE 1=1"
+        params: list[Any] = []
+        if source_batch:
+            sql += " AND source_batch = ?"
+            params.append(source_batch)
+        if only_matched is not None:
+            sql += " AND is_matched = ?"
+            params.append(1 if only_matched else 0)
+        # event_time хранится как есть, форматы у источников разные: EVTX даёт
+        # "YYYY-MM-DD HH:MM:SS" (пробел, без TZ), другие источники - ISO с "T" и суффиксом
+        # "Z" (напр. "...T04:13:05.650Z"). Границы из UI приходят как "наивная" ISO-строка
+        # без суффикса (см. timeParams() в index.html - специально без Z, чтобы совпадать
+        # с этим же наивным форматом и с alerts.created_at). Нормализуем event_time к тому
+        # же виду перед сравнением, иначе строковое сравнение ломается на разнице форматов.
+        if time_from:
+            sql += " AND replace(replace(event_time, ' ', 'T'), 'Z', '') >= ?"
+            params.append(time_from)
+        if time_to:
+            sql += " AND replace(replace(event_time, ' ', 'T'), 'Z', '') <= ?"
+            params.append(time_to)
+        if query_filter and query_filter[0]:
+            sql += " AND " + query_filter[0]
+            params += query_filter[1]
+        eclause, eparams = _build_extra_filter_clause(extra_filters)
+        if eclause:
+            sql += " AND " + eclause
+            params += eparams
+        return sql, params
+
+    def list_events(
+        self,
+        source_batch: str | None = None,
+        only_matched: bool | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        fields: list[str] | None = None,
+        query_filter: tuple[str, list[Any]] | None = None,
+        extra_filters: list[dict] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        # Кастом-колонки из сырого JSON: json_extract, для "горячих" полей - через литерал-путь
+        # и индекс (resolve_json_path), для остальных - как раньше, bound-параметр без индекса.
+        clean_fields = [f for f in (fields or []) if f]
+        select_cols = ["event_id", "source_batch", "host", "event_time", "ingested_at", "is_matched", "matched_rules"]
+        params: list[Any] = []
+        for i, field in enumerate(clean_fields):
+            col_expr, col_params = resolve_json_path(field)
+            select_cols.append(f"{col_expr} AS extra_{i}")
+            params += col_params
+
+        where_sql, where_params = self._events_where(
+            source_batch, only_matched, time_from, time_to, query_filter, extra_filters
+        )
+        order_sql, order_params = _event_order(sort_by, sort_dir)
+        query = f"SELECT {', '.join(select_cols)} FROM events{where_sql} {order_sql} LIMIT ? OFFSET ?"
+        params += where_params + order_params + [limit, offset]
+
+        with self._read_lock:
+            rows = [dict(r) for r in self._read_conn.execute(query, params).fetchall()]
+        for row in rows:
+            row["matched_rules"] = json.loads(row["matched_rules"])
+            row["is_matched"] = bool(row["is_matched"])
+            if clean_fields:
+                row["extra"] = {field: row.pop(f"extra_{i}", None) for i, field in enumerate(clean_fields)}
+        return rows
+
+    def group_events(
+        self,
+        group_by: str,
+        source_batch: str | None = None,
+        only_matched: bool | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+        query_filter: tuple[str, list[Any]] | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Группировка (как в MaxPatrol): для выбранного поля возвращает уникальные значения
+        и счётчики по убыванию (топ limit), а также ОБЩЕЕ число уникальных значений (может
+        быть больше limit - тогда в списке показан только срез). Фильтр применяется ДО
+        группировки. "Пусто" (поле отсутствует) - тоже отдельное уникальное значение.
+
+        group_by == "rule"/"is_matched" - те же псевдонимы результата детекта, что и в
+        filter_lang.compile_condition (не часть raw_json, см. комментарий там). "rule" -
+        многозначное поле (у события может быть 0..N сработавших правил), поэтому группировка
+        "разворачивает" matched_rules через LEFT JOIN json_each - событие с двумя правилами
+        даёт по +1 в счётчик КАЖДОГО из них, а событие без единого сработавшего правила всё
+        равно попадает в группу "(пусто)" благодаря LEFT (а не INNER) JOIN."""
+        where_sql, where_params = self._events_where(
+            source_batch, only_matched, time_from, time_to, query_filter
+        )
+        key = group_by.strip().lower()
+        bind_prefix: list[Any] = []
+        if key == IS_MATCHED_FIELD:
+            from_clause = "events"
+            gval_expr = "CASE WHEN is_matched THEN 'true' ELSE 'false' END"
+        elif key == RULE_FIELD:
+            from_clause = "events e LEFT JOIN json_each(e.matched_rules) mr"
+            gval_expr = "mr.value"
+        else:
+            from_clause = "events"
+            gval_expr, bind_prefix = resolve_json_path(group_by)
+        count_query = (
+            f"SELECT COUNT(*) AS c FROM (SELECT DISTINCT {gval_expr} AS gval "
+            f"FROM {from_clause}{where_sql})"
+        )
+        list_query = (
+            f"SELECT {gval_expr} AS gval, COUNT(*) AS c "
+            f"FROM {from_clause}{where_sql} GROUP BY gval ORDER BY c DESC LIMIT ?"
+        )
+        with self._read_lock:
+            total_groups = self._read_conn.execute(count_query, [*bind_prefix, *where_params]).fetchone()["c"]
+            rows = self._read_conn.execute(list_query, [*bind_prefix, *where_params, limit]).fetchall()
+        return {
+            "groups": [{"value": r["gval"], "count": r["c"]} for r in rows],
+            "total_groups": total_groups,
+        }
+
+    def get_event(self, event_id: str) -> dict[str, Any] | None:
+        with self._read_lock:
+            row = self._read_conn.execute("SELECT * FROM events WHERE event_id = ?", (event_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["matched_rules"] = json.loads(result["matched_rules"])
+        result["raw_json"] = json.loads(result["raw_json"])
+        result["is_matched"] = bool(result["is_matched"])
+        return result
+
+    def count_events(
+        self,
+        source_batch: str | None = None,
+        only_matched: bool | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+        query_filter: tuple[str, list[Any]] | None = None,
+        extra_filters: list[dict] | None = None,
+    ) -> int:
+        where_sql, where_params = self._events_where(
+            source_batch, only_matched, time_from, time_to, query_filter, extra_filters
+        )
+        query = f"SELECT COUNT(*) AS c FROM events{where_sql}"
+        with self._read_lock:
+            return self._read_conn.execute(query, where_params).fetchone()["c"]
+
+    # ------------------------------------------------------------------ Batches
+
+    def list_batches(self) -> list[dict[str, Any]]:
+        """Сводка по всем батчам, которые когда-либо загружались - для селектора источника в UI."""
+        query = """
+            SELECT
+                source_batch AS source_batch,
+                COUNT(*) AS event_count,
+                SUM(is_matched) AS matched_event_count,
+                MIN(ingested_at) AS first_ingested_at,
+                MAX(ingested_at) AS last_ingested_at
+            FROM events
+            GROUP BY source_batch
+            ORDER BY MAX(ingested_at) DESC
+        """
+        with self._read_lock:
+            event_rows = [dict(r) for r in self._read_conn.execute(query).fetchall()]
+            alert_counts = {
+                r["source_batch"]: r["c"]
+                for r in self._read_conn.execute(
+                    "SELECT source_batch, COUNT(*) AS c FROM alerts GROUP BY source_batch"
+                ).fetchall()
+            }
+        for row in event_rows:
+            row["alert_count"] = alert_counts.get(row["source_batch"], 0)
+        return event_rows
+
+    def delete_batch(self, source_batch: str) -> dict[str, int]:
+        """Полное удаление источника: все events И все alerts с этим source_batch (не только
+        события) - source_batch не отдельная сущность/таблица, просто общая метка на обеих
+        таблицах, поэтому "удалить источник" технически значит удалить всё с этой меткой."""
+        with self._lock:
+            events_deleted = self._conn.execute(
+                "DELETE FROM events WHERE source_batch = ?", (source_batch,)
+            ).rowcount
+            alerts_deleted = self._conn.execute(
+                "DELETE FROM alerts WHERE source_batch = ?", (source_batch,)
+            ).rowcount
+            self._conn.commit()
+        return {"events_deleted": events_deleted, "alerts_deleted": alerts_deleted}
+
+    def close(self) -> None:
+        self._conn.close()
+        self._read_conn.close()
+
+    # ------------------------------------------------------------------ Health
+
+    def health(self, detailed: bool = False) -> dict[str, Any]:
+        """Проверка живости БД для /health: пробный SELECT 1 под тем же _lock, что и вся
+        остальная работа с БД (никаких конкурирующих соединений мимо Store). detailed
+        добавляет счётчики строк и размер файла - это уже полный COUNT(*) по обеим таблицам,
+        дороже, поэтому не гоняем на каждом лёгком опросе, только по явному запросу (клик в UI)."""
+        t0 = time.time()
+        try:
+            with self._lock:
+                self._conn.execute("SELECT 1").fetchone()
+                extra: dict[str, Any] = {}
+                if detailed:
+                    extra["alerts"] = self._conn.execute("SELECT COUNT(*) AS c FROM alerts").fetchone()["c"]
+                    extra["events"] = self._conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
+        except Exception as exc:  # noqa: BLE001 - health-check не должен ронять сервис
+            return {"status": "error", "error": str(exc)}
+        if detailed:
+            try:
+                extra["size_mb"] = round(Path(self.db_path).stat().st_size / (1024 * 1024), 2)
+            except OSError:
+                pass
+        return {"status": "ok", "latency_ms": round((time.time() - t0) * 1000, 2), **extra}

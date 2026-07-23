@@ -1,0 +1,2749 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sigma mini-SIEM</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --surface: #131820;
+    --surface-2: #171d27;
+    --border: #232b36;
+    --text: #e6e9ef;
+    --muted: #7c8798;
+    --accent: #4fd1c5;
+    --accent-dim: #2a6f6a;
+    --crit: #ff5c7a;
+    --high: #ff9f43;
+    --med: #f4d35e;
+    --low: #4fa8e0;
+    --info: #5a6472;
+    --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+  }
+
+  /* Тонкие скроллбары под тёмную палитру (вместо жирных системных серых) - Firefox через
+     scrollbar-width/color, Chrome/Edge через ::-webkit-scrollbar. Трек прозрачный (сливается
+     с фоном контейнера, какой бы он ни был), ползунок - едва заметный var(--border), чуть
+     ярче var(--muted) при наведении/драге, чтобы оставаться находимым, не бросаясь в глаза. */
+  * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--border); border-radius: 8px;
+    border: 2px solid var(--surface); background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+  *::-webkit-scrollbar-corner { background: transparent; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: 0.02em; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  .health-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; background: var(--muted); flex-shrink: 0; }
+  .health-dot.ok { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .health-dot.warn { background: var(--med); box-shadow: 0 0 8px var(--med); }
+  .health-dot.bad { background: var(--crit); box-shadow: 0 0 8px var(--crit); }
+  .health-label { position: relative; color: var(--muted); font-size: 12px; display: flex; align-items: center; cursor: pointer; user-select: none; }
+  .health-label:hover { color: var(--text); }
+
+  /* Развёрнутая проверка (по клику на светофор) - попап с разбивкой по подсистемам */
+  .health-popover {
+    position: absolute; top: 100%; right: 0; margin-top: 10px; z-index: 50;
+    width: 300px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; box-shadow: 0 12px 28px -8px rgba(0,0,0,0.55);
+    font-size: 12px; text-align: left; cursor: default; color: var(--text);
+  }
+  .hc-row { display: flex; align-items: flex-start; padding: 7px 0; border-bottom: 1px solid var(--border); }
+  .hc-row:last-child { border-bottom: none; }
+  .hc-row .health-dot { margin-top: 4px; }
+  .hc-name { font-weight: 600; }
+  .hc-detail { color: var(--muted); font-size: 11px; margin-top: 2px; line-height: 1.5; }
+
+  main { display: flex; flex-direction: column; gap: 16px; padding: 16px 24px; width: 100%; max-width: none; margin: 0; }
+
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .panel-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px 0; font-weight: 600; }
+
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 10px; }
+
+  select, input[type=text], textarea {
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 7px 10px; font-family: var(--mono); font-size: 13px;
+  }
+  select:focus, input:focus, textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  textarea { width: 100%; min-height: 90px; font-size: 12px; resize: vertical; }
+  label { color: var(--muted); font-size: 12px; margin-right: 4px; }
+
+  button {
+    background: var(--accent-dim); color: var(--text); border: 1px solid var(--accent);
+    border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer; font-family: var(--sans);
+  }
+  button:hover { background: var(--accent); color: #06201e; }
+  button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
+  button.ghost:hover { color: var(--text); border-color: var(--muted); background: transparent; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .toggle-link { color: var(--accent); cursor: pointer; font-size: 12px; user-select: none; }
+
+  .switch-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
+  .switch-wrap input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch-track { position: relative; width: 34px; height: 18px; border-radius: 9px; background: var(--border); transition: background 0.15s; flex: none; }
+  .switch-thumb { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--muted); transition: left 0.15s, background 0.15s; }
+  .switch-wrap input:checked + .switch-track { background: var(--accent); }
+  .switch-wrap input:checked + .switch-track .switch-thumb { left: 18px; background: #06201e; }
+
+  .in-main-btn { border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 4px; width: 22px; height: 22px; line-height: 1; cursor: pointer; font-size: 12px; padding: 0; }
+  .in-main-btn.active { color: var(--accent); border-color: var(--accent); }
+
+  .in-main-btn:hover { color: var(--text); border-color: var(--muted); }
+
+  /* Мультиселект-фильтр по метадате (уровень/статус) во вкладке Sigma-правила - чекбоксы
+     в поповере, тот же визуальный паттерн, что и .health-popover. */
+  .filter-multiselect { position: relative; display: inline-block; }
+  .filter-popover {
+    position: absolute; top: 100%; left: 0; margin-top: 6px; z-index: 50;
+    min-width: 170px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; box-shadow: 0 12px 28px -8px rgba(0,0,0,0.55); font-size: 12px;
+  }
+  .facet-option { display: flex; align-items: center; gap: 6px; padding: 4px 2px; cursor: pointer; white-space: nowrap; }
+  .facet-option:hover { color: var(--text); }
+  .facet-actions { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); text-align: right; }
+
+  /* Полноэкранный редактор Sigma-правил (#sigma-editor-panel) - подменяет #sigma-browse-panel
+     внутри вкладки Sigma-правила целиком, switchTab/activeTab не трогает (см. openRuleEditor/
+     closeRuleEditor). Выбор рулсета+поиск для референс-списка (#rule-editor-ref-toolbar) живёт
+     СНАРУЖИ этой сетки - см. общую строку "Источник:" в разметке (`.row` с #batch-select) - там
+     он буквально на одном уровне с "Источник:/Все источники/Обновить список", а не просто
+     стилистически похож. Внутри .editor-grid остаётся 3 ряда x 2 колонки через grid-template-areas:
+       header    | refpicker    - тулбар (Назад/Новое правило/Сохранить)+выбор целевого рулсета
+                                   | список правил референса (уже выбранного в toolbar рулсета),
+                                   начинаются РОВНО на одном уровне (оба align-self:start)
+       .         | yamllabel    - пустая ячейка слева (колонка редактора) / подпись "Sigma YAML"
+                                   справа - СВОИМ рядом, а не внутри .editor-reference-yaml, чтобы
+                                   у обеих колонок следующего ряда был идентичный отступ сверху
+       editor    | refyaml      - сам редактор и просмотр Sigma YAML выбранного правила, начинаются
+                                   РОВНО на одном уровне (одинаковая высота ряда выше - см.
+                                   комментарий у .editor-yaml-label)
+     header/refpicker/yamllabel - высотой auto (по содержимому); editor/refyaml - 1fr,
+     делят всю оставшуюся высоту экрана. */
+  #sigma-editor-panel { display: flex; flex-direction: column; height: calc(100vh - 100px); }
+  /* Правая колонка - управляется тем же resize-паттерном, что и alert-detail/event-detail/
+     rule-detail (PANEL_RESIZE_CONFIG + makeResizable/setGridTrackWidth). var(--editor-ref-w)
+     ставится JS-ом НЕ на #editor-grid, а на #main-panel (см. PANEL_RESIZE_CONFIG.gridEl) - это
+     общий предок и .editor-grid, и вынесенного наружу #rule-editor-ref-toolbar, поэтому одно
+     значение переменной синхронно управляет шириной ОБОИХ (CSS custom property наследуется вниз
+     по DOM, а не только в пределах грида) без дублирования кода на resize. */
+  .editor-grid {
+    display: grid;
+    grid-template-columns: 1fr var(--editor-ref-w, 600px);
+    grid-template-rows: auto auto 1fr;
+    grid-template-areas: "header refpicker" ". yamllabel" "editor refyaml";
+    gap: 10px 14px; flex: 1 1 auto; min-height: 0;
+  }
+  @media (max-width: 1100px) { .editor-grid { grid-template-columns: 1fr; grid-template-areas: "header" "refpicker" "yamllabel" "editor" "refyaml"; } }
+
+  .editor-header-col { grid-area: header; align-self: start; }
+
+  .code-editor-wrap { grid-area: editor; position: relative; min-height: 0; }
+  .code-editor-highlight, .code-editor-input {
+    position: absolute; inset: 0; margin: 0; padding: 10px; font-family: var(--mono); font-size: 12px;
+    line-height: 1.5; white-space: pre; overflow: auto; border-radius: 6px; box-sizing: border-box;
+    tab-size: 2;
+  }
+  .code-editor-highlight { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); pointer-events: none; }
+  .code-editor-input { background: transparent; color: transparent; caret-color: var(--text); border: 1px solid transparent; resize: none; }
+  .code-editor-input:focus { outline: none; border-color: var(--accent); }
+
+  /* Список правил референса (уже выбранного в #rule-editor-ref-toolbar рулсета) - на одном уровне
+     с тулбаром (grid-area: header) слева, у'же прежнего (420px дефолт вместо 620 - раньше сюда же
+     помещались select+поиск, теперь только список). position:relative + padding-left под
+     resize-handle (тот же приём, что у .detail-panel). ВАЖНО: height (не min-height!) на
+     .ref-rule-list - без явной высоты overflow-y:auto считает "естественным" размером высоту
+     ВСЕХ строк списка нескролленными (хоть 4291 штук), и скролл внутри списка не включается. */
+  .editor-reference-pane { grid-area: refpicker; position: relative; width: auto; min-width: 320px;
+    max-width: min(90vw, 780px); padding-left: 14px; align-self: start; }
+  /* height ~120px - под 3-4 строки списка (строка ~34px), не 5-6, как раньше. */
+  .ref-rule-list { height: 120px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .ref-rule-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; cursor: pointer; font-size: 12px; border-bottom: 1px solid var(--border); }
+  .ref-rule-row:hover { background: var(--surface-2); }
+  .ref-rule-row.selected { background: var(--surface-2); outline: 1px solid var(--accent); outline-offset: -1px; }
+
+  /* Подпись "Sigma YAML" - СВОИМ рядом грида (grid-area: yamllabel), а не внутри
+     .editor-reference-yaml как раньше: там она добавляла высоту только колонке refyaml, из-за
+     чего сам просмотр YAML (pre) начинался НИЖЕ текста в .code-editor-wrap слева (тот вообще
+     без подписи). Вынесенная в отдельный ряд (с пустой ячейкой "." слева для колонки редактора)
+     подпись даёт ОБЕИМ колонкам одинаковый отступ сверху - editor и refyaml начинаются ровно
+     на одном уровне. */
+  .editor-yaml-label { grid-area: yamllabel; }
+  .editor-yaml-label .panel-title { margin: 0; }
+  /* position:relative + padding-left:14px - под второй resize-handle (editor-refyaml-handle),
+     тот же приём, что у .editor-reference-pane выше. Управляет ТЕМ ЖЕ --editor-ref-w (см.
+     makeResizable("editor-refyaml-handle", "editor-reference-pane") в конце файла) - таскать
+     можно и сверху (у списка правил), и здесь, у самого просмотра YAML/SQL, оба двигают одну
+     и ту же ширину колонки синхронно. Расширение редактора (колонка 1fr) при этом всегда идёт
+     ЗА СЧЁТ сужения этой колонки, и наоборот - гарантия самим устройством грида (1fr + фиксированная). */
+  .editor-reference-yaml { grid-area: refyaml; position: relative; padding-left: 14px; min-height: 0; display: flex; flex-direction: column; }
+  .editor-reference-yaml pre.json-block.yaml-block { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0; resize: none; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+  .tab { padding: 8px 16px; cursor: pointer; color: var(--muted); font-size: 13px; border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  .content-grid { display: grid; grid-template-columns: 1fr var(--alert-detail-w, 380px); gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .content-grid { grid-template-columns: 1fr; } }
+
+  .table-scroll { overflow-x: auto; }
+  .table-scroll table { min-width: 640px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 8px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
+  tr.data-row { cursor: pointer; }
+  tr.data-row:hover td { background: var(--surface-2); }
+  tr.selected td { background: #1a2230; }
+
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable .arrow { color: var(--accent); margin-left: 4px; font-size: 10px; }
+  th.sortable.inactive .arrow { visibility: hidden; }
+
+  .field-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 2px 6px 2px 10px; font-family: var(--mono); font-size: 11px; color: var(--accent); cursor: grab; }
+  .field-chip.base { color: var(--text); border-style: dashed; }
+  .field-chip.dragging { opacity: 0.4; }
+  .field-chip.drop-target { border-color: var(--accent); }
+  .field-chip .grip { color: var(--muted); cursor: grab; font-size: 11px; }
+  .field-chip .x { cursor: pointer; color: var(--muted); font-size: 13px; line-height: 1; padding: 0 2px; }
+  .field-chip .x:hover { color: var(--crit); }
+  #event-fields-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+  /* Строка фильтра (MaxPatrol-style query bar) */
+  .filter-box { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-top: 8px; }
+  #event-query-input { flex: 1 1 320px; min-width: 240px; }
+  #filter-error { margin-top: 8px; }
+
+  /* Развёрнутая справка по мини-языку фильтра ("Подробнее") */
+  .filter-help {
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 0 20px;
+    font-size: 12px; color: var(--text);
+  }
+  @media (max-width: 1100px) { .filter-help { grid-template-columns: 1fr; } }
+  .filter-help h5 { margin: 12px 0 4px 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .filter-help .fh-col > h5:first-child { margin-top: 0; }
+  .filter-help p { margin: 4px 0; color: var(--muted); line-height: 1.5; }
+  .filter-help ul { margin: 4px 0; padding-left: 18px; color: var(--muted); line-height: 1.6; }
+  .filter-help li { margin-bottom: 2px; }
+  .filter-help code { background: var(--surface); color: var(--accent); border-radius: 3px; padding: 1px 5px; font-family: var(--mono); }
+  .filter-help .fh-examples code { display: block; margin: 3px 0; padding: 4px 8px; color: var(--text); white-space: nowrap; overflow-x: auto; }
+
+  /* Панель группировки (как в MaxPatrol: слева агрегаторы, справа события группы).
+     Ширина резиновых колонок (группировка слева, детали справа) держится в CSS-переменных,
+     которые JS обновляет 1-в-1 с шириной самой панели (см. makeResizable/setGridTrackWidth) -
+     грид-трек всегда равен фактической ширине панели, поэтому между панелью и соседней
+     колонкой никогда нет ни пустого зазора (трек шире панели), ни наезда (трек уже панели). */
+  .events-grid { display: grid; grid-template-columns: 1fr var(--event-detail-w, 380px); gap: 16px; align-items: start; width: 100%; }
+  .events-grid.has-groups { grid-template-columns: var(--group-col-w, 280px) 1fr var(--event-detail-w, 380px); }
+  @media (max-width: 1100px) { .events-grid, .events-grid.has-groups { grid-template-columns: 1fr; } }
+  /* Панель группировки разнесена на ДВЕ вложенные коробки специально:
+     - .group-panel-wrap - живёт в гриде, отвечает за sticky-позиционирование, ширину/высоту
+       и хостит resize-handle (торчит за правый край через right:-14px) - сама НЕ обрезает
+       контент (overflow: visible), иначе обрежется сама ручка.
+     - .group-panel (внутри wrap, 100% его размера) - имеет overflow: hidden БЕЗУСЛОВНО по
+       обеим осям. Это даёт железную гарантию, что список групп не может визуально вылезти за
+       границы панели, независимо от каких-либо тонкостей авто-расчёта min-height у flex/grid
+       элементов (раньше вместо этого полагались только на min-height:0 у .group-panel как
+       грид-элемента - в теории должно было работать, но продолжало течь; overflow:hidden не
+       зависит от этой эвристики вообще, клипает содержимое всегда, engine-native).
+     height (а не max-height!) на wrap обязателен по той же причине, что и раньше: с auto-высотой
+     флекс-контейнера часть браузеров не схлопывает flex-child (.group-scroll) до скролла при
+     большом числе строк. min-height:0 на wrap - тоже подстраховка (грид-элемент). */
+  .group-panel-wrap {
+    height: calc(100vh - 32px); min-height: 0;
+    position: sticky; top: 16px;
+    width: 280px; min-width: 200px; max-width: min(70vw, 640px);
+    justify-self: start; z-index: 4;
+  }
+  .group-panel {
+    --group-value-w: 170px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 20px 10px 10px;
+    width: 100%; height: 100%; overflow: hidden;
+    box-shadow: 16px 0 28px -12px rgba(0,0,0,0.45);
+    display: flex; flex-direction: column;
+  }
+  .group-panel h4 { margin: 0 0 8px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); flex-shrink: 0; }
+  /* max-height:100% - подстраховка поверх flex:1 1 auto + min-height:0, но благодаря overflow:
+     hidden на родительском .group-panel вылезти наружу контент физически не может в любом случае. */
+  .group-scroll { overflow-x: hidden; overflow-y: auto; flex: 1 1 auto; min-height: 0; max-height: 100%; }
+
+  /* Строка-линейка для регулировки ширины колонки "значение" (аналогично таблице Событий) -
+     общая для ВСЕХ строк ширина через CSS-переменную --group-value-w, поэтому вертикальный
+     разделитель между значением и счётчиком идёт ровной линией по всему списку.
+     flex-basis (а не жёсткий width) + max-width - ячейка следует той же логике сжатия, что и
+     .gv в .group-row ниже, поэтому ручка ресайза остаётся на одной линии с реальным разделителем
+     даже когда вся панель узкая и .gv вынужденно сжался меньше --group-value-w. */
+  .group-resize-row { display: flex; }
+  .group-resize-cell {
+    flex: 0 1 var(--group-value-w); max-width: var(--group-value-w); min-width: 0;
+    height: 10px; position: relative; background: var(--surface-2); border-bottom: 1px solid var(--border);
+  }
+  .group-resize-fill { flex: 1 1 auto; height: 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
+  .group-resize-handle-bar { position: absolute; right: -5px; top: 0; bottom: 0; width: 10px; cursor: col-resize; z-index: 3; }
+  .group-resize-handle-bar::after { content: ""; position: absolute; right: 4px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+  .group-resize-handle-bar:hover::after, .group-resize-handle-bar.active::after { background: var(--accent); width: 3px; }
+
+  .group-row { display: flex; align-items: stretch; padding: 0; border-radius: 5px; cursor: pointer; font-family: var(--mono); font-size: 12px; }
+  .group-row:hover { background: var(--surface-2); }
+  .group-row.selected { background: #1a2230; outline: 1px solid var(--accent-dim); }
+  /* Длинное значение обрезаем эллипсисом (как в основной таблице Событий, см.
+     #events-table-scroll td ниже) - по scrollbar-у на каждую строку получилось бы шумно.
+     Полный текст остаётся в title (tooltip). Ширина колонки не фиксирована жёстко: задаётся
+     оптимально при создании группировки (см. computeOptimalGroupWidth в JS) под самые длинные
+     реально пришедшие значения, и остаётся общей для всех строк через --group-value-w, поэтому
+     border-right (вертикальный разделитель значение/счётчик) идёт вровень по всему списку.
+     flex: 0 1 ... (не 0 0!) - при сужении всей панели СНАЧАЛА сжимается это поле (до min-width:0,
+     дальше просто больше обрезается эллипсисом), а .gc (счётчик, см. ниже) не трогается вообще -
+     число должно быть видно всегда, даже если панель узкая. */
+  .group-row .gv {
+    flex: 0 1 var(--group-value-w); max-width: var(--group-value-w); min-width: 0;
+    white-space: nowrap; padding: 5px 8px; border-right: 1px solid var(--border);
+    display: flex; align-items: center; overflow: hidden; text-overflow: ellipsis;
+  }
+  .group-row .gc {
+    /* Правый паддинг больше левого - иначе число упирается прямо в вертикальный scrollbar
+       панели (он идёт по внешнему краю .group-scroll, вплотную к flex-end содержимому).
+       flex: 0 0 auto (не 1 1 auto!) - счётчик никогда не сжимается и не растягивается, всегда
+       ровно по ширине своего содержимого: при сужении панели ужимается только .gv (см. выше). */
+    flex: 0 0 auto; color: var(--accent); font-weight: 600;
+    padding: 5px 16px 5px 8px; display: flex; align-items: center; justify-content: flex-end;
+  }
+  .group-row .gv.null { color: var(--muted); font-style: italic; }
+
+  /* Таблица Событий: тонкие вертикальные разделители колонок + отдельная строка
+     под заголовком специально для регулировки ширины. Кликабельна ТОЛЬКО узкая
+     полоса на границе колонок (совпадает с вертикальной линией-разделителем),
+     не вся ячейка. */
+  #events-table-scroll table { table-layout: fixed; }
+  #events-table-scroll th, #events-table-scroll td { border-right: 1px solid var(--border); }
+  #events-table-scroll th:last-child, #events-table-scroll td:last-child { border-right: none; }
+  #events-table-scroll th { position: relative; overflow: hidden; text-overflow: ellipsis; }
+  #events-table-scroll td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #events-table-scroll th.col-wrap, #events-table-scroll td.col-wrap { white-space: normal; overflow: visible; text-overflow: clip; }
+  #events-table-scroll .col-resize-cell {
+    height: 12px; padding: 0; border-bottom: 1px solid var(--border);
+    background: var(--surface-2); position: relative;
+  }
+  #events-table-scroll .col-resize-handle-bar {
+    position: absolute; right: -5px; top: 0; bottom: 0; width: 10px;
+    cursor: col-resize; z-index: 3;
+  }
+  #events-table-scroll .col-resize-handle-bar::after {
+    content: ""; position: absolute; right: 4px; top: 0; bottom: 0; width: 2px;
+    background: var(--border);
+  }
+  #events-table-scroll .col-resize-handle-bar:hover::after,
+  #events-table-scroll .col-resize-handle-bar.active::after { background: var(--accent); width: 3px; }
+  input[type=datetime-local] { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 8px; font-family: var(--mono); font-size: 12px; }
+  .time-custom { display: none; gap: 6px; align-items: center; }
+  .time-custom.show { display: inline-flex; }
+
+  .sev-bar { display: inline-block; width: 4px; height: 14px; border-radius: 2px; margin-right: 8px; vertical-align: middle; }
+  .sev-critical { background: var(--crit); }
+  .sev-high { background: var(--high); }
+  .sev-medium { background: var(--med); }
+  .sev-low { background: var(--low); }
+  .sev-informational { background: var(--info); }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-family: var(--sans); }
+  .badge-new { background: #1a2230; color: var(--accent); }
+  .badge-investigating { background: #3a2e0c; color: var(--med); }
+  .badge-closed { background: #1c2622; color: var(--muted); }
+  .badge-matched { background: #2a1520; color: var(--crit); }
+  .badge-unmatched { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+
+  .empty-state { color: var(--muted); padding: 24px 8px; text-align: center; font-size: 13px; }
+  .error-state { color: var(--crit); padding: 10px; font-size: 12px; }
+
+  .detail-panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 16px 16px 20px; position: sticky; top: 16px;
+    height: calc(100vh - 32px); overflow-y: auto; overflow-anchor: none;
+    width: 380px; min-width: 300px; max-width: min(90vw, 1100px);
+    justify-self: end; z-index: 5;
+    box-shadow: -16px 0 28px -12px rgba(0,0,0,0.55);
+    display: flex; flex-direction: column;
+  }
+  /* #rule-detail (вкладка Sigma-правила) переопределяет общий .detail-panel { width: 380px } -
+     YAML+SQL читать в 380px тесно, а PANEL_RESIZE_CONFIG.defaultWidth (JS) применяется только
+     по кнопке "Сбросить ширину", не при первой загрузке страницы - без этого оверрайда
+     начальная ширина всё равно оставалась бы 380px. Держать в синхроне со значением
+     defaultWidth у "rule-detail" в PANEL_RESIZE_CONFIG. */
+  #rule-detail { width: 700px; }
+  .panel-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; flex-shrink: 0; }
+  .panel-toolbar button { font-size: 11px; padding: 4px 10px; }
+  .detail-body { overflow-y: auto; flex: 1 1 auto; }
+  .resize-handle { position: absolute; left: 0; top: 0; bottom: 0; width: 14px; cursor: ew-resize; z-index: 2; }
+  .resize-handle::after { content: ""; position: absolute; left: 6px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+  .resize-handle:hover::after, .resize-handle.active::after { background: var(--accent); }
+  /* Правее собственного вертикального scrollbar панели (тот рендерится внутри border-box
+     на её правом крае) - иначе ручка ресайза конфликтует с native-скроллом за клики. */
+  .resize-handle.right { left: auto; right: -14px; }
+  .resize-handle.right::after { left: auto; right: 6px; }
+
+  .detail-panel h3 { margin: 0 0 4px 0; font-size: 14px; }
+  .detail-panel .muted { color: var(--muted); font-size: 12px; }
+  .kv { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed var(--border); font-size: 12px; }
+  .kv span:first-child { color: var(--muted); }
+  .kv span:last-child { font-family: var(--mono); text-align: right; }
+  .tech-tag { display: inline-block; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-family: var(--mono); font-size: 11px; margin: 2px 4px 2px 0; color: var(--accent); }
+  pre.json-block { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 11px; overflow: auto; max-height: 280px; font-family: var(--mono); white-space: pre-wrap; word-break: break-all; resize: vertical; }
+  pre.json-block.raw-event { max-height: 70vh; min-height: 260px; }
+
+  /* Подсветка синтаксиса Sigma YAML (highlightYaml) - свой лёгкий построчный подсветчик, без
+     внешних библиотек, см. комментарий у функции. word-break: break-all глобального .json-block
+     ломает длинные YAML-значения посреди слова - для YAML это менее читаемо, чем горизонтальный
+     скролл, поэтому переопределяем на word-break: normal + overflow-wrap: anywhere (переносит
+     только когда совсем некуда деться, не рвёт обычные слова/токены). */
+  pre.json-block.yaml-block { word-break: normal; overflow-wrap: anywhere; max-height: 70vh; }
+  .yaml-key { color: var(--accent); }
+  .yaml-string { color: var(--low); }
+  .yaml-number { color: var(--high); }
+  .yaml-bool { color: var(--med); }
+  .yaml-comment { color: var(--muted); font-style: italic; }
+  .yaml-dash { color: var(--muted); }
+
+  .pagination { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; color: var(--muted); font-size: 12px; }
+
+  .status-select-row { display: flex; gap: 8px; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>&#9632;</span> Sigma mini-SIEM</h1>
+  <div class="health-label" id="health-label" onclick="toggleHealthDetails()">
+    <span id="health-dot" class="health-dot"></span><span id="health-text">проверка...</span>
+    <div id="health-popover" class="health-popover" style="display:none;" onclick="event.stopPropagation()"></div>
+  </div>
+</header>
+
+<main>
+
+  <div class="panel" id="main-panel">
+    <div class="tabs">
+      <div class="tab" id="tab-source" onclick="switchTab('source')">Источник данных</div>
+      <div class="tab active" id="tab-alerts" onclick="switchTab('alerts')">Алерты</div>
+      <div class="tab" id="tab-events" onclick="switchTab('events')">События</div>
+      <div class="tab" id="tab-sigma" onclick="switchTab('sigma')">Sigma-правила</div>
+    </div>
+
+    <div class="row" style="margin-bottom:14px;">
+      <label>Источник:</label>
+      <select id="batch-select"><option value="">Все источники</option></select>
+      <button type="button" class="ghost" onclick="refreshBatches(); refreshActiveTab();">Обновить список</button>
+      <!-- Выбор рулсета/поиск для референс-списка редактора правил - живёт в ОБЩЕЙ строке
+           "Источник:" (а не внутри .editor-grid), чтобы буквально быть на одном уровне с ней;
+           показывается только когда открыт редактор правил (openRuleEditor/closeRuleEditor). -->
+      <div id="rule-editor-ref-toolbar" class="row" style="display:none; margin-left:auto; width:var(--editor-ref-w, 600px); max-width:100%; box-sizing:border-box; flex:0 0 auto;">
+        <select id="rule-editor-ref-ruleset" onchange="loadEditorReferenceRules(0)" style="flex:1 1 auto; min-width:0;"></select>
+        <input type="text" id="rule-editor-ref-search" placeholder="поиск" oninput="loadEditorReferenceRules(0)" style="flex:1 1 160px; min-width:0;">
+      </div>
+    </div>
+
+    <div id="view-source" style="display:none;">
+      <div class="row">
+        <label>Файл датасета (путь на сервере):</label>
+        <input type="text" id="ingest-path" placeholder="otrf-samples/empire_dcsync_....json" style="width:340px;">
+        <label>Формат:</label>
+        <select id="ingest-type">
+          <option value="json">json</option>
+          <option value="evtx">evtx</option>
+          <option value="auditd">auditd</option>
+          <option value="sysmon_linux">sysmon_linux</option>
+          <option value="xml">xml</option>
+          <option value="csv">csv</option>
+        </select>
+        <label>Ruleset:</label>
+        <select id="ingest-ruleset">
+          <option value="">по умолчанию (merged)</option>
+        </select>
+        <label>Метка:</label>
+        <input type="text" id="ingest-label" placeholder="my-batch-name" style="width:160px;">
+        <button type="button" onclick="runIngestFile()">Прогнать файл</button>
+      </div>
+
+      <div class="row" style="margin-top:14px; border-top:1px solid var(--border); padding-top:14px;">
+        <label style="width:100%; margin-bottom:6px;">Или выбрать файл через проводник (загрузка из браузера):</label>
+      </div>
+      <div class="row">
+        <input type="file" id="ingest-upload-file">
+        <label>Формат:</label>
+        <select id="ingest-upload-type">
+          <option value="auto">определить автоматически</option>
+          <option value="json">json</option>
+          <option value="evtx">evtx</option>
+          <option value="auditd">auditd</option>
+          <option value="sysmon_linux">sysmon_linux</option>
+          <option value="xml">xml</option>
+          <option value="csv">csv</option>
+        </select>
+        <label>Ruleset:</label>
+        <select id="ingest-upload-ruleset">
+          <option value="">по умолчанию (merged)</option>
+        </select>
+        <label>Метка:</label>
+        <input type="text" id="ingest-upload-label" placeholder="необязательно" style="width:160px;">
+        <button type="button" onclick="runIngestUpload()">Загрузить и прогнать</button>
+      </div>
+      <div class="row" style="margin-top:14px;">
+        <label style="width:100%;">Или вставить события напрямую (JSON-массив) — обрабатывается основным рулсетом:</label>
+      </div>
+      <div class="row">
+        <textarea id="ingest-events-json" placeholder='[{"EventID": 4688, "Channel": "Security", "Hostname": "HOST01", "CommandLine": "..."}]'></textarea>
+      </div>
+      <div class="row">
+        <label>Метка:</label>
+        <input type="text" id="ingest-events-label" value="manual-batch" style="width:160px;">
+        <button type="button" onclick="runIngestEvents()">Прогнать события</button>
+      </div>
+      <div id="ingest-result" style="margin-top:10px; font-size:12px;"></div>
+
+      <div class="row" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
+        <label style="width:100%;">Источники данных:</label>
+      </div>
+      <div class="table-scroll" id="sources-table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Источник</th><th>События</th><th>Совпало</th><th>Алерты</th>
+              <th>Первое событие</th><th>Последнее событие</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="sources-tbody"></tbody>
+        </table>
+        <div id="sources-empty" class="empty-state" style="display:none;">Источников пока нет</div>
+      </div>
+    </div>
+
+    <div id="view-alerts">
+      <div class="row">
+        <label>Severity:</label>
+        <select id="alert-filter-level" onchange="loadAlerts()">
+          <option value="">все</option>
+          <option value="critical">critical</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+          <option value="informational">informational</option>
+        </select>
+        <label>Статус:</label>
+        <select id="alert-filter-status" onchange="loadAlerts()">
+          <option value="">все</option>
+          <option value="new">new</option>
+          <option value="investigating">investigating</option>
+          <option value="closed">closed</option>
+        </select>
+        <label>Период:</label>
+        <select id="alert-filter-time" onchange="onTimePresetChange('alert'); loadAlerts()">
+          <option value="">всё время</option>
+          <option value="15m">15 минут</option>
+          <option value="1h">1 час</option>
+          <option value="24h">24 часа</option>
+          <option value="7d">7 дней</option>
+          <option value="custom">свой интервал…</option>
+        </select>
+        <span class="time-custom" id="alert-time-custom">
+          <input type="datetime-local" id="alert-time-from" step="1" onchange="loadAlerts()">
+          <span style="color:var(--muted)">—</span>
+          <input type="datetime-local" id="alert-time-to" step="1" onchange="loadAlerts()">
+        </span>
+        <button type="button" class="ghost" onclick="loadAlerts()">Обновить</button>
+      </div>
+
+      <div class="content-grid" id="alerts-content-grid" style="margin-top:12px;">
+        <div class="table-scroll" id="alerts-table-scroll">
+          <table>
+            <thead><tr id="alerts-head-row"></tr></thead>
+            <tbody id="alerts-tbody"></tbody>
+          </table>
+          <div id="alerts-empty" class="empty-state" style="display:none;">Нет алертов для выбранных фильтров</div>
+        </div>
+        <div id="alert-detail" class="detail-panel">
+          <div class="resize-handle" id="alert-detail-handle"></div>
+          <div class="panel-toolbar">
+            <button type="button" class="ghost" onclick="resetPanelWidth('alert-detail')">&#8634; Сбросить ширину</button>
+          </div>
+          <div id="alert-detail-content" class="detail-body">
+            <p class="muted">Выбери алерт в списке слева, чтобы увидеть детали.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-events" style="display:none;">
+      <div class="row">
+        <label>Показать:</label>
+        <select id="event-filter-matched" onchange="loadEvents(0)">
+          <option value="">все</option>
+          <option value="true">только сработавшие</option>
+          <option value="false">только без срабатывания</option>
+        </select>
+        <label>Период:</label>
+        <select id="event-filter-time" onchange="onTimePresetChange('event'); loadEvents(0)">
+          <option value="">всё время</option>
+          <option value="15m">15 минут</option>
+          <option value="1h">1 час</option>
+          <option value="24h">24 часа</option>
+          <option value="7d">7 дней</option>
+          <option value="custom">свой интервал…</option>
+        </select>
+        <span class="time-custom" id="event-time-custom">
+          <input type="datetime-local" id="event-time-from" step="1" onchange="loadEvents(0)">
+          <span style="color:var(--muted)">—</span>
+          <input type="datetime-local" id="event-time-to" step="1" onchange="loadEvents(0)">
+        </span>
+        <button type="button" class="ghost" onclick="loadEvents(0)">Обновить</button>
+      </div>
+      <!-- Строка фильтра по любым полям raw_json (фильтр применяется ДО группировки) -->
+      <div class="filter-box">
+        <div class="row" style="margin-bottom:8px;">
+          <label>Фильтр:</label>
+          <input type="text" id="event-query-input" placeholder='hostname contains &quot;local&quot; and eventid = 4688'
+                 onkeydown="if(event.key==='Enter'){loadEvents(0);}">
+          <button type="button" onclick="loadEvents(0)">Применить</button>
+          <button type="button" class="ghost" onclick="clearFilters()">Сбросить фильтр</button>
+        </div>
+        <div class="row" style="margin-bottom:0; align-items:center;">
+          <div class="muted" style="font-size:11px;">
+            Синтаксис: <code>поле оператор значение</code>, логика and/or/not, группировка — скобками, строки — в кавычках.
+          </div>
+          <span class="toggle-link" id="filter-help-toggle" onclick="toggleFilterHelp()">Подробнее &#9662;</span>
+        </div>
+        <div id="filter-help" class="filter-help" style="display:none;">
+          <div class="fh-col">
+            <h5>Условие</h5>
+            <p><code>поле оператор значение</code> — поле обычно совпадает с именем поля в сыром JSON события
+              (регистрозависимо!), либо это одно из специальных полей результата детекта (см. ниже).</p>
+
+            <h5>Операторы сравнения</h5>
+            <ul>
+              <li><code>=</code> / <code>!=</code> — точное совпадение / несовпадение</li>
+              <li><code>&gt;</code> <code>&lt;</code> <code>&gt;=</code> <code>&lt;=</code> — сравнение; если значение похоже на число — сравнение числовое, иначе строковое</li>
+              <li><code>contains</code> — значение встречается как подстрока (регистрозависимо)</li>
+              <li><code>in (a, b, c)</code> — поле равно одному из значений списка (через запятую)</li>
+              <li><code>is null</code> — поля нет в событии; <code>is not null</code> — поле присутствует</li>
+            </ul>
+
+            <h5>Логика и группировка</h5>
+            <ul>
+              <li><code>and</code>, <code>or</code>, <code>not</code> — приоритет как в SQL: <code>not</code> сильнее <code>and</code>, <code>and</code> сильнее <code>or</code></li>
+              <li><code>a or b and c</code> равносильно <code>a or (b and c)</code> — если нужно наоборот, скобки обязательны: <code>(a or b) and c</code></li>
+              <li>Скобки можно вкладывать сколь угодно глубоко</li>
+            </ul>
+          </div>
+          <div class="fh-col">
+            <h5>Значения</h5>
+            <ul>
+              <li>В кавычках — <code>"текст со пробелами"</code> или <code>'текст'</code>; кавычку внутри и обратный слэш экранируют бэкслешем: <code>\"</code>, <code>\\</code></li>
+              <li>Без кавычек — одно слово без пробелов/скобок/кавычек/операторов: числа (<code>4688</code>), простые идентификаторы, хосты вида <code>a.b.local</code></li>
+            </ul>
+
+            <h5>Поля события</h5>
+            <p>Имя — как в сыром JSON конкретного источника (EVTX/Sysmon/JSON по-разному называют одно и то же:
+              <code>Hostname</code>, <code>Computer</code>, <code>host</code>...). Регистр важен. Если не уверен,
+              как называется поле — открой сырое событие (клик по строке) и посмотри ключи.</p>
+
+            <h5>Поля результата детекта (не из raw_json)</h5>
+            <ul>
+              <li><code>rule</code> — название сработавшего Sigma-правила: <code>=</code> <code>!=</code> <code>contains</code> <code>in(...)</code> <code>is null</code> (ничего не сработало) <code>is not null</code> (сработало хоть что-то). А <code>&gt;</code> <code>&lt;</code> <code>&gt;=</code> <code>&lt;=</code> у этого же поля — сравнение не имени, а <b>количества</b> сработавших правил: <code>rule &gt; 1</code> — сработало больше одного правила</li>
+              <li><code>is_matched</code> — сработало ли хоть одно правило. Только <code>=</code>/<code>!=</code>, значение <code>true</code>/<code>false</code> (или <code>1</code>/<code>0</code>)</li>
+            </ul>
+            <p>Те же имена (включая <code>rule</code>/<code>is_matched</code>) работают и в поле "Группировать по полю" —
+              клик по значению группы сужает текущий фильтр (drill-in).</p>
+          </div>
+          <div class="fh-col fh-examples">
+            <h5>Примеры</h5>
+            <ul>
+              <li><code>EventID = 4688</code></li>
+              <li><code>Hostname contains "WORKSTATION5"</code></li>
+              <li><code>EventID in (4688, 4690, 4656)</code></li>
+              <li><code>CommandLine is not null</code></li>
+              <li><code>(EventID = 4688 or EventID = 4690) and Hostname contains "DC"</code></li>
+              <li><code>is_matched = false and Hostname contains "WORKSTATION"</code></li>
+              <li><code>rule contains "HackTool" and not Hostname contains "DC"</code></li>
+              <li><code>rule &gt; 1</code> — сработало больше одного правила</li>
+            </ul>
+            <h5>Ошибки</h5>
+            <p>При неверном синтаксисе запрос не выполняется — под строкой фильтра появится точное описание
+              проблемы с позицией символа, на котором споткнулся разбор.</p>
+          </div>
+        </div>
+        <div id="filter-error" class="error-state" style="display:none;"></div>
+      </div>
+
+      <div class="row" style="margin-top:8px;">
+        <label>Fields:</label>
+        <input type="text" id="event-field-input" placeholder="напр. CommandLine" style="width:170px;" onkeydown="if(event.key==='Enter'){addEventField();}">
+        <button type="button" class="ghost" onclick="addEventField()">+ колонка</button>
+        <button type="button" class="ghost" onclick="resetColumnWidths()">&#8634; Ширины</button>
+        <span id="event-fields-chips"></span>
+      </div>
+
+      <div class="row" style="margin-top:8px;">
+        <label>Fieldset:</label>
+        <select id="fieldset-select" onchange="loadFieldset()">
+          <option value="">— выбрать —</option>
+        </select>
+        <input type="text" id="fieldset-name" placeholder="имя набора" style="width:150px;">
+        <button type="button" class="ghost" onclick="saveFieldset()">Сохранить</button>
+        <button type="button" class="ghost" onclick="deleteFieldset()">Удалить</button>
+        <button type="button" class="ghost" onclick="resetFieldset()">&#8634; Сбросить fieldset</button>
+        <span style="margin-left:14px;"></span>
+        <label>Группировать по полю:</label>
+        <input type="text" id="event-group-input" placeholder="напр. EventID, rule, is_matched" style="width:190px;" onkeydown="if(event.key==='Enter'){applyGrouping();}">
+        <button type="button" class="ghost" onclick="applyGrouping()">Группировать</button>
+        <button type="button" class="ghost" onclick="clearGrouping()">Сбросить группировку</button>
+      </div>
+
+      <div class="events-grid" id="events-grid" style="margin-top:12px;">
+        <div class="group-panel-wrap" id="group-panel-wrap" style="display:none;">
+          <div class="group-panel" id="group-panel">
+            <div class="panel-toolbar">
+              <button type="button" class="ghost" onclick="resetGroupValueWidth()">&#8634; Колонка</button>
+              <button type="button" class="ghost" onclick="resetGroupPanelWidth()">&#8634; Панель</button>
+            </div>
+            <h4 id="group-panel-title">Группировка</h4>
+            <div class="group-scroll" id="group-scroll">
+              <div class="group-resize-row">
+                <div class="group-resize-cell"><span class="group-resize-handle-bar" id="group-value-resize-handle"></span></div>
+                <div class="group-resize-fill"></div>
+              </div>
+              <div id="group-list"></div>
+            </div>
+          </div>
+          <div class="resize-handle right" id="group-panel-handle"></div>
+        </div>
+        <div class="table-scroll" id="events-table-scroll">
+          <table>
+            <thead>
+              <tr id="events-head-row"></tr>
+              <tr id="events-resize-row"></tr>
+            </thead>
+            <tbody id="events-tbody"></tbody>
+          </table>
+          <div id="events-empty" class="empty-state" style="display:none;">Нет событий для выбранных фильтров</div>
+          <div class="pagination">
+            <span id="events-page-info"></span>
+            <div>
+              <button type="button" class="ghost" id="events-prev" onclick="eventsPrev()">&larr; назад</button>
+              <button type="button" class="ghost" id="events-next" onclick="eventsNext()">вперёд &rarr;</button>
+            </div>
+          </div>
+        </div>
+        <div id="event-detail" class="detail-panel">
+          <div class="resize-handle" id="event-detail-handle"></div>
+          <div class="panel-toolbar">
+            <button type="button" class="ghost" onclick="resetPanelWidth('event-detail')">&#8634; Сбросить ширину</button>
+          </div>
+          <div id="event-detail-content" class="detail-body">
+            <p class="muted">Выбери событие в списке слева, чтобы увидеть сырые данные.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-sigma" style="display:none;">
+      <div id="sigma-browse-panel">
+        <div class="row">
+          <label>Рулсет:</label>
+          <select id="sigma-ruleset-select" onchange="loadSigmaRules(0)"></select>
+          <span class="muted" id="sigma-ruleset-meta" style="font-size:12px;"></span>
+          <button type="button" class="ghost" id="sigma-ruleset-in-main-btn" onclick="toggleCurrentRulesetInMain()"></button>
+          <button type="button" class="ghost" id="sigma-delete-ruleset-btn" style="display:none;" onclick="deleteRuleset(document.getElementById('sigma-ruleset-select').value)">Удалить рулсет</button>
+          <label class="switch-wrap">
+            <input type="checkbox" id="sigma-only-main-toggle" onchange="loadSigmaRules(0)">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            Только основной рулсет
+          </label>
+          <label>Поиск:</label>
+          <input type="text" id="sigma-query-input" placeholder="название/описание" onkeydown="if(event.key==='Enter'){loadSigmaRules(0);}">
+          <div class="filter-multiselect" id="sigma-level-filter">
+            <button type="button" class="ghost" id="sigma-level-btn" onclick="event.stopPropagation(); toggleSigmaFacetPopover('level')">Уровень: все &#9662;</button>
+            <div class="filter-popover" id="sigma-level-popover" style="display:none;" onclick="event.stopPropagation()"></div>
+          </div>
+          <div class="filter-multiselect" id="sigma-status-filter">
+            <button type="button" class="ghost" id="sigma-status-btn" onclick="event.stopPropagation(); toggleSigmaFacetPopover('status')">Статус: все &#9662;</button>
+            <div class="filter-popover" id="sigma-status-popover" style="display:none;" onclick="event.stopPropagation()"></div>
+          </div>
+          <button type="button" class="ghost" onclick="loadSigmaRules(0)">Обновить</button>
+          <button type="button" class="ghost" onclick="clearSigmaFilters()">Сбросить</button>
+        </div>
+
+        <div class="row" style="margin-top:8px;">
+          <button type="button" class="ghost" onclick="openRuleEditor('create', {})">Редактор правил</button>
+          <span class="toggle-link" id="sigma-upload-toggle" onclick="toggleSigmaUpload()">+ Загрузить рулсет &#9662;</span>
+        </div>
+
+        <div id="sigma-upload-panel" class="filter-help" style="display:none; grid-template-columns:1fr;">
+          <div class="fh-col">
+            <h5>Загрузить рулсет</h5>
+            <p>Сырой Sigma YAML (<code>title</code>/<code>logsource</code>/<code>detection</code>) — можно
+              несколько правил в одном файле (multi-document, разделены <code>---</code>). Компилируется
+              через Zircolite/pySigma перед сохранением. Встроенные рулсеты — read-only, загружать можно
+              только в свои (существующий или новый).</p>
+            <div class="row">
+              <input type="file" id="sigma-upload-file" accept=".yml,.yaml">
+            </div>
+            <div class="row" style="margin-top:6px;">
+              <label><input type="radio" name="sigma-upload-target-mode" value="existing" checked onchange="updateSigmaTargetMode('sigma-upload')"> В существующий рулсет:</label>
+              <select id="sigma-upload-target-existing"></select>
+              <label><input type="radio" name="sigma-upload-target-mode" value="new" onchange="updateSigmaTargetMode('sigma-upload')"> Новый рулсет:</label>
+              <input type="text" id="sigma-upload-target-new" placeholder="Название нового рулсета" disabled style="width:200px;">
+            </div>
+            <div class="row" style="margin-top:8px;">
+              <button type="button" onclick="runRulesetUpload()">Загрузить</button>
+            </div>
+            <div id="sigma-upload-result" style="margin-top:8px; font-size:12px;"></div>
+          </div>
+        </div>
+
+        <div class="content-grid" id="sigma-content-grid" style="margin-top:12px;">
+          <div class="table-scroll" id="sigma-table-scroll">
+            <table>
+              <thead><tr id="sigma-head-row"></tr></thead>
+              <tbody id="sigma-tbody"></tbody>
+            </table>
+            <div id="sigma-empty" class="empty-state" style="display:none;">Нет правил для выбранных фильтров</div>
+            <div class="pagination">
+              <span id="sigma-page-info"></span>
+              <div>
+                <button type="button" class="ghost" id="sigma-prev" onclick="sigmaPrev()">&larr; назад</button>
+                <button type="button" class="ghost" id="sigma-next" onclick="sigmaNext()">вперёд &rarr;</button>
+              </div>
+            </div>
+          </div>
+          <div id="rule-detail" class="detail-panel">
+            <div class="resize-handle" id="rule-detail-handle"></div>
+            <div class="panel-toolbar">
+              <button type="button" class="ghost" onclick="resetPanelWidth('rule-detail')">&#8634; Сбросить ширину</button>
+            </div>
+            <div id="rule-detail-content" class="detail-body">
+              <p class="muted">Выбери правило в списке слева, чтобы увидеть детали.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="sigma-editor-panel" style="display:none;">
+        <div class="editor-grid" id="editor-grid">
+          <div class="editor-header-col">
+            <div class="row" style="margin-bottom:10px;">
+              <button type="button" class="ghost" onclick="closeRuleEditor()">&larr; Назад к списку правил</button>
+            </div>
+            <div id="rule-editor-target-row" class="row">
+              <label><input type="radio" name="rule-editor-target-mode" value="existing" checked onchange="updateSigmaTargetMode('rule-editor')"> В существующий рулсет:</label>
+              <select id="rule-editor-target-existing"></select>
+              <label><input type="radio" name="rule-editor-target-mode" value="new" onchange="updateSigmaTargetMode('rule-editor')"> Новый рулсет:</label>
+              <input type="text" id="rule-editor-target-new" placeholder="Название нового рулсета" disabled style="width:200px;">
+            </div>
+            <div id="rule-editor-static-target" class="muted" style="display:none; font-size:12px;"></div>
+            <div class="row" style="margin-top:10px;">
+              <span style="font-size:14px;" id="rule-editor-title">Новое правило</span>
+              <button type="button" onclick="saveRuleEditor()">Сохранить</button>
+            </div>
+          </div>
+
+          <div class="editor-reference-pane" id="editor-reference-pane">
+            <div class="resize-handle" id="editor-reference-handle"></div>
+            <div id="rule-editor-ref-list-body" class="ref-rule-list"></div>
+          </div>
+
+          <div class="editor-yaml-label">
+            <p class="panel-title" id="rule-editor-ref-yaml-label">Sigma YAML</p>
+          </div>
+
+          <div class="code-editor-wrap">
+            <pre id="rule-editor-highlight" class="code-editor-highlight" aria-hidden="true"></pre>
+            <textarea id="rule-editor-yaml" class="code-editor-input" spellcheck="false" wrap="off" placeholder="title: My Rule
+id: 11111111-1111-1111-1111-111111111111
+status: experimental
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    CommandLine|contains: 'whoami'
+  condition: selection
+level: medium"></textarea>
+          </div>
+
+          <div class="editor-reference-yaml">
+            <div class="resize-handle" id="editor-refyaml-handle"></div>
+            <pre id="rule-editor-ref-yaml" class="json-block yaml-block"></pre>
+          </div>
+        </div>
+        <div id="rule-editor-result" style="margin-top:8px; font-size:12px;"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+const API = "";
+let activeTab = "alerts";
+let eventsOffset = 0;
+const eventsLimit = 50;
+let eventsTotal = 0;
+
+// loadEvents() и loadGroups() шлют запросы параллельно (loadGroups не await-ится) и без
+// отмены предыдущих: быстрая правка фильтра (например, чтобы исправить опечатку и повторно
+// нажать Enter) запускает НОВУЮ пару запросов, пока СТАРАЯ (с ошибочным синтаксисом) ещё в
+// полёте. Если старый (ошибочный) ответ приходит ПОСЛЕ нового (успешного), его catch
+// перезаписывает уже очищенную #filter-error устаревшим сообщением. eventsRequestSeq -
+// монотонный счётчик: каждый вызов loadEvents() бронирует свой номер и применяет
+// результат/ошибку только если он всё ещё самый свежий (см. mySeq в loadEvents/loadGroups).
+let eventsRequestSeq = 0;
+
+// Состояние сортировки на вкладку. by=null -> серверный дефолт (created_at/ingested_at desc).
+const alertsSort = { by: null, dir: "desc" };
+const eventsSort = { by: null, dir: "desc" };
+const sigmaSort = { by: null, dir: "asc" };
+
+// Кастом-колонки Событий (из сырого JSON), сохраняются между сессиями.
+let eventFields = [];
+try { eventFields = JSON.parse(localStorage.getItem("siem_event_fields") || "[]"); } catch (e) { eventFields = []; }
+
+// Базовые (не из raw_json) колонки Событий - всегда присутствуют, не удаляются, но теперь
+// участвуют в общем перетаскиваемом порядке наравне с кастомными полями.
+const BASE_EVENT_COLUMN_IDS = ["event_time", "host", "__rules"];
+const BASE_EVENT_COLUMNS = {
+  event_time: { key: "event_time", label: "Время" },
+  host: { key: "host", label: "Хост" },
+  __rules: { key: null, label: "Правила", wrap: true },
+};
+
+// Порядок ВСЕХ колонок Событий (базовые + кастомные вперемешку), сохраняется между сессиями.
+let columnOrder = [];
+try { columnOrder = JSON.parse(localStorage.getItem("siem_event_col_order") || "null"); } catch (e) { columnOrder = null; }
+if (!Array.isArray(columnOrder) || !columnOrder.length) {
+  columnOrder = ["event_time", "host", ...eventFields, "__rules"];
+}
+
+function persistColumnOrder() { localStorage.setItem("siem_event_col_order", JSON.stringify(columnOrder)); }
+
+// Приводит columnOrder в соответствие с eventFields: убирает кастомные поля, которых больше
+// нет в выборке, добавляет новые (перед "Правилами"), гарантирует наличие базовых колонок.
+function reconcileColumnOrder() {
+  columnOrder = columnOrder.filter(id => BASE_EVENT_COLUMN_IDS.includes(id) || eventFields.includes(id));
+  eventFields.forEach(f => {
+    if (!columnOrder.includes(f)) {
+      const rulesIdx = columnOrder.indexOf("__rules");
+      if (rulesIdx === -1) columnOrder.push(f);
+      else columnOrder.splice(rulesIdx, 0, f);
+    }
+  });
+  BASE_EVENT_COLUMN_IDS.forEach(id => { if (!columnOrder.includes(id)) columnOrder.push(id); });
+}
+reconcileColumnOrder();
+
+// Именованные наборы полей (fieldset = поля + порядок ВСЕХ колонок, включая базовые).
+// Формат хранения: {fields: [...кастомные поля], order: [...id всех колонок]}.
+// Старые записи (до этой правки) - просто массив кастомных полей, без order; распознаём
+// по Array.isArray и достраиваем order по умолчанию при загрузке.
+let fieldsets = {};
+try { fieldsets = JSON.parse(localStorage.getItem("siem_fieldsets") || "{}"); } catch (e) { fieldsets = {}; }
+
+// Ширины колонок таблицы Событий (px), ключ - id колонки; сохраняются между сессиями.
+let eventColumnWidths = {};
+try { eventColumnWidths = JSON.parse(localStorage.getItem("siem_event_col_widths") || "{}"); } catch (e) { eventColumnWidths = {}; }
+const DEFAULT_EVENT_COL_WIDTH = { event_time: 170, host: 150, __rules: 240 };
+const FALLBACK_COL_WIDTH = 200;
+
+function persistColumnWidths() { localStorage.setItem("siem_event_col_widths", JSON.stringify(eventColumnWidths)); }
+function eventColWidth(colId) { return eventColumnWidths[colId] ?? DEFAULT_EVENT_COL_WIDTH[colId] ?? FALLBACK_COL_WIDTH; }
+
+function resetColumnWidths() {
+  eventColumnWidths = {};
+  persistColumnWidths();
+  loadEvents(eventsOffset);
+}
+
+// Ширина колонки "значение" в панели группировки (px) - общая для всех строк через
+// CSS-переменную --group-value-w на .group-panel, сохраняется между сессиями.
+const DEFAULT_GROUP_VALUE_WIDTH = 170;
+const GROUP_VALUE_MIN_WIDTH = 70;
+const GROUP_VALUE_MAX_WIDTH = 380;
+let groupValueWidth = DEFAULT_GROUP_VALUE_WIDTH;
+try { groupValueWidth = parseInt(localStorage.getItem("siem_group_value_width"), 10) || DEFAULT_GROUP_VALUE_WIDTH; } catch (e) { groupValueWidth = DEFAULT_GROUP_VALUE_WIDTH; }
+
+let lastGroupValues = [];         // последние загруженные группы - нужны для пересчёта ширины по кнопке
+let groupAutoSizePending = false; // true сразу после выбора НОВОГО поля группировки - один автоподбор ширины на загрузку
+
+function applyGroupValueWidth() {
+  document.getElementById("group-panel").style.setProperty("--group-value-w", groupValueWidth + "px");
+}
+function persistGroupValueWidth() { localStorage.setItem("siem_group_value_width", String(groupValueWidth)); }
+
+// Подбирает оптимальную ширину колонки "значение" под реально пришедшие данные: измеряет текст
+// скрытым зондом с тем же шрифтом/паддингами, что и .gv, берёт максимум по всем группам и
+// зажимает в [MIN, MAX] - чтобы короткое значение (напр. EventID) не тянуло колонку на 380px,
+// а длинное (путь/командная строка) не схлопывалось до нечитаемого вида без ручного ресайза.
+function computeOptimalGroupWidth(groups) {
+  if (!groups || !groups.length) return DEFAULT_GROUP_VALUE_WIDTH;
+  const probe = document.createElement("span");
+  probe.style.cssText = "position:absolute; visibility:hidden; left:-9999px; top:-9999px; " +
+    "white-space:nowrap; font-family:var(--mono); font-size:12px; padding:5px 8px;";
+  document.body.appendChild(probe);
+  let maxWidth = 0;
+  groups.forEach(g => {
+    probe.textContent = g.value === null ? "(пусто)" : String(g.value);
+    maxWidth = Math.max(maxWidth, probe.getBoundingClientRect().width);
+  });
+  document.body.removeChild(probe);
+  return Math.max(GROUP_VALUE_MIN_WIDTH, Math.min(Math.ceil(maxWidth) + 4, GROUP_VALUE_MAX_WIDTH));
+}
+
+function resetGroupValueWidth() {
+  groupValueWidth = computeOptimalGroupWidth(lastGroupValues);
+  applyGroupValueWidth();
+  persistGroupValueWidth();
+}
+
+// Подбирает оптимальную ширину ВСЕЙ панели группировки под колонку "значение" (уже посчитана
+// выше) + колонку счётчика (под самое длинное число) + паддинги панели + запас под вертикальный
+// scrollbar, который появляется, когда групп больше, чем помещается по высоте, и "съедает"
+// часть ширины у содержимого. Без этого запаса счётчик визуально прижимался к scrollbar-у.
+function computeOptimalGroupPanelWidth(groups, valueWidth) {
+  const cfg = PANEL_RESIZE_CONFIG["group-panel-wrap"];
+  if (!groups || !groups.length) return cfg.defaultWidth;
+  const probe = document.createElement("span");
+  probe.style.cssText = "position:absolute; visibility:hidden; left:-9999px; top:-9999px; " +
+    "white-space:nowrap; font-family:var(--mono); font-size:12px; font-weight:600; padding:5px 16px 5px 8px;";
+  document.body.appendChild(probe);
+  let maxCountWidth = 0;
+  groups.forEach(g => {
+    probe.textContent = String(g.count);
+    maxCountWidth = Math.max(maxCountWidth, probe.getBoundingClientRect().width);
+  });
+  document.body.removeChild(probe);
+  const PANEL_PADDING = 30;    // padding панели: 10px слева + 20px справа
+  const BORDER = 1;            // border-right между значением и счётчиком
+  const SCROLLBAR_RESERVE = 18; // запас под вертикальный scrollbar (появляется не всегда, но зажимает контент, когда есть)
+  const total = PANEL_PADDING + valueWidth + BORDER + maxCountWidth + SCROLLBAR_RESERVE;
+  return Math.max(cfg.minWidth, Math.min(Math.ceil(total), cfg.maxWidth));
+}
+
+// Применяет ширину панели ровно так же, как ручной ресайз (makeResizable): растит/сужает
+// панель через style.width и синхронно подгоняет под неё грид-трек (setGridTrackWidth).
+function applyGroupPanelWidth(widthPx) {
+  const cfg = PANEL_RESIZE_CONFIG["group-panel-wrap"];
+  const panel = document.getElementById("group-panel-wrap");
+  panel.style.width = widthPx + "px";
+  setGridTrackWidth(cfg, widthPx);
+}
+
+// Кнопка "Панель" на панели группировки - вместо жёсткого дефолта пересчитывает
+// оптимальную ширину (и колонки, и всей панели) под уже загруженные данные.
+function resetGroupPanelWidth() {
+  groupValueWidth = computeOptimalGroupWidth(lastGroupValues);
+  applyGroupValueWidth();
+  persistGroupValueWidth();
+  applyGroupPanelWidth(computeOptimalGroupPanelWidth(lastGroupValues, groupValueWidth));
+}
+
+// Перетаскивание ручки в строке-линейке над списком групп меняет --group-value-w -
+// подхватывается CSS сразу во всех строках (общая переменная), без перерисовки списка.
+function wireGroupColumnResize() {
+  const bar = document.getElementById("group-value-resize-handle");
+  bar.addEventListener("mousedown", (startEv) => {
+    startEv.preventDefault();
+    const startX = startEv.clientX;
+    const startWidth = groupValueWidth;
+    bar.classList.add("active");
+    document.body.style.userSelect = "none";
+
+    function onMove(moveEv) {
+      groupValueWidth = Math.max(50, startWidth + (moveEv.clientX - startX));
+      applyGroupValueWidth();
+    }
+    function onUp() {
+      bar.classList.remove("active");
+      document.body.style.userSelect = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      persistGroupValueWidth();
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+// Группировка: активное поле и выбранное значение группы (drill-in).
+let groupField = null;
+let groupSelected = undefined;   // undefined = группа не выбрана; null = группа "(пусто)"
+
+// Описание колонок: key -> ключ сортировки для бэкенда (null = не сортируется).
+const ALERT_COLUMNS = [
+  { key: null, label: "" },
+  { key: "rule", label: "Правило" },
+  { key: "host", label: "Хост" },
+  { key: "event_count", label: "События" },
+  { key: "status", label: "Статус" },
+  { key: "created_at", label: "Создан" },
+];
+
+const SIGMA_COLUMNS = [
+  { key: null, id: "in_main", label: "" },
+  { key: null, label: "" },
+  { key: "title", label: "Правило" },
+  { key: "level", label: "Уровень" },
+  { key: "status", label: "Статус" },
+  { key: "author", label: "Автор" },
+];
+
+function currentBatch() {
+  return document.getElementById("batch-select").value;
+}
+
+// ---------- Сортировка ----------
+
+// Реестр состояния сортировки/перезагрузки по вкладке - вместо тернарника/if-else на каждую
+// таблицу (было только alerts/events, стало +sigma). Новая сортируемая таблица - это одна
+// строка в обоих объектах, без изменений в sortBy/thHtml.
+const SORT_STATES = { alerts: alertsSort, events: eventsSort, sigma: sigmaSort };
+const RELOAD_FNS = { alerts: loadAlerts, events: () => loadEvents(0), sigma: () => loadSigmaRules(0) };
+
+function sortBy(tab, key) {
+  if (!key) return;
+  const st = SORT_STATES[tab];
+  if (st.by === key) {
+    st.dir = st.dir === "asc" ? "desc" : "asc";
+  } else {
+    st.by = key;
+    st.dir = "asc";
+  }
+  RELOAD_FNS[tab]();
+}
+
+function thHtml(tab, col) {
+  const st = SORT_STATES[tab];
+  const isEvents = tab === "events";
+  const colId = col.id || col.key;
+  const styleAttr = isEvents ? ` style="width:${eventColWidth(colId)}px"` : "";
+  const dataAttr = isEvents ? ` data-col="${attr(colId)}"` : "";
+  const classes = [col.wrap ? "col-wrap" : ""];
+  if (!col.key) {
+    return `<th${styleAttr}${dataAttr} class="${classes.join(" ").trim()}">${escapeHtml(col.label)}</th>`;
+  }
+  const active = st.by === col.key;
+  const arrow = active ? (st.dir === "asc" ? "▲" : "▼") : "▲";
+  classes.push("sortable", active ? "" : "inactive");
+  return `<th${styleAttr}${dataAttr} class="${classes.join(" ").trim()}" onclick="sortBy('${tab}','${col.key}')">${escapeHtml(col.label)}<span class="arrow">${arrow}</span></th>`;
+}
+
+// Отдельная строка под заголовками специально для регулировки ширины колонок Событий
+// (сначала имена полей в events-head-row, потом эта строка-"линейка", потом сами события).
+// Кликабельна только узкая полоса-ручка на границе колонки (совпадает с вертикальным
+// разделителем), а не вся ячейка - иначе непонятно, какую именно границу тянешь.
+function resizeRowHtml(columns) {
+  return columns.map(col => {
+    const colId = col.id || col.key;
+    return `<td class="col-resize-cell" data-col="${attr(colId)}"><span class="col-resize-handle-bar"></span></td>`;
+  }).join("");
+}
+
+// Перетаскивание узкой полосы меняет ширину соответствующей колонки (через width на th
+// в строке заголовков - у table-layout:fixed ширину колонки задаёт первая строка таблицы).
+// Клик по этой строке никогда не триггерит сортировку - она в отдельном <tr>, конфликтов
+// с обработчиком клика на <th> нет.
+function wireColumnResize(labelRow, resizeRow) {
+  Array.from(resizeRow.children).forEach(cell => {
+    const bar = cell.querySelector(".col-resize-handle-bar");
+    const colId = cell.dataset.col;
+    bar.addEventListener("mousedown", (startEv) => {
+      startEv.preventDefault();
+      const th = Array.from(labelRow.children).find(t => t.dataset.col === colId);
+      if (!th) return;
+      const startX = startEv.clientX;
+      const startWidth = th.getBoundingClientRect().width;
+      bar.classList.add("active");
+      document.body.style.userSelect = "none";
+
+      function onMove(moveEv) {
+        const newWidth = Math.max(60, startWidth + (moveEv.clientX - startX));
+        th.style.width = newWidth + "px";
+      }
+      function onUp() {
+        bar.classList.remove("active");
+        document.body.style.userSelect = "";
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        eventColumnWidths[colId] = Math.round(th.getBoundingClientRect().width);
+        persistColumnWidths();
+      }
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  });
+}
+
+function sortParams(st, params) {
+  if (st.by) { params.set("sort_by", st.by); params.set("sort_dir", st.dir); }
+}
+
+// ---------- Временной интервал ----------
+
+function onTimePresetChange(tab) {
+  const preset = document.getElementById(`${tab}-filter-time`).value;
+  document.getElementById(`${tab}-time-custom`).classList.toggle("show", preset === "custom");
+}
+
+// В БД event_time/created_at хранятся как "наивные" строки без часового пояса (см. store.py:
+// datetime.utcnow().isoformat() для алертов, сырой таймстамп источника для событий) - и именно
+// в таком же наивном виде их показывает таблица. Поэтому границы фильтра тоже должны быть
+// наивными: без суффикса Z/offset. Раньше свой интервал уходил через `new Date(value).toISOString()`,
+// который трактует значение datetime-local picker-а как ЛОКАЛЬНОЕ время браузера и пересчитывает
+// его в UTC - в результате диапазон "уезжал" на локальный оффсет от того, что реально ввёл
+// аналитик, и фильтр либо не находил ничего, либо находил не то. Для своего интервала берём
+// значение picker-а буквально, без пересчёта. Для пресетов (15м/1ч/...) точка отсчёта - реальное
+// "сейчас", для которого toISOString() даёт корректный UTC независимо от локального оффсета;
+// просто отрезаем суффикс Z, чтобы формат совпадал с тем, что хранится в БД.
+function toNaiveIso(date) {
+  return date.toISOString().replace("Z", "");
+}
+
+// datetime-local с step="1" отдаёт "YYYY-MM-DDTHH:MM:SS", без step (старые браузеры/ввод
+// без секунд) - "YYYY-MM-DDTHH:MM". Дополняем секундами для единообразия перед отправкой.
+function padSeconds(value) {
+  return value && value.length === 16 ? value + ":00" : value;
+}
+
+// Возвращает {time_from, time_to} в "наивном" ISO (без Z) либо пустой объект для "всё время".
+function timeParams(tab) {
+  const preset = document.getElementById(`${tab}-filter-time`).value;
+  if (!preset) return {};
+  if (preset === "custom") {
+    const from = document.getElementById(`${tab}-time-from`).value;
+    const to = document.getElementById(`${tab}-time-to`).value;
+    const out = {};
+    if (from) out.time_from = padSeconds(from);
+    if (to) out.time_to = padSeconds(to);
+    return out;
+  }
+  const map = { "15m": 15 * 60e3, "1h": 3600e3, "24h": 24 * 3600e3, "7d": 7 * 24 * 3600e3 };
+  const ms = map[preset];
+  if (!ms) return {};
+  return { time_from: toNaiveIso(new Date(Date.now() - ms)) };
+}
+
+function applyTimeParams(tab, params) {
+  const t = timeParams(tab);
+  if (t.time_from) params.set("time_from", t.time_from);
+  if (t.time_to) params.set("time_to", t.time_to);
+}
+
+// ---------- Кастом-колонки Событий ----------
+
+function persistEventFields() {
+  localStorage.setItem("siem_event_fields", JSON.stringify(eventFields));
+}
+
+function addEventField() {
+  const input = document.getElementById("event-field-input");
+  const name = input.value.trim();
+  if (name && !eventFields.includes(name)) {
+    eventFields.push(name);
+    reconcileColumnOrder();
+    persistEventFields();
+    persistColumnOrder();
+    renderEventFieldChips();
+    loadEvents(0);
+  }
+  input.value = "";
+}
+
+function removeEventField(name) {
+  eventFields = eventFields.filter(f => f !== name);
+  reconcileColumnOrder();
+  persistEventFields();
+  persistColumnOrder();
+  renderEventFieldChips();
+  loadEvents(0);
+}
+
+function columnLabelFor(id) {
+  return (BASE_EVENT_COLUMNS[id] && BASE_EVENT_COLUMNS[id].label) || id;
+}
+
+// Чипы теперь показывают ВСЕ колонки таблицы (базовые + кастомные) в едином порядке -
+// двигать перетаскиванием можно любую из них. Базовые (Время/Хост/Правила) без крестика -
+// они не удаляются, только переставляются.
+function renderEventFieldChips() {
+  const box = document.getElementById("event-fields-chips");
+  box.innerHTML = columnOrder.map((id, i) => {
+    const removable = !BASE_EVENT_COLUMN_IDS.includes(id);
+    return `<span class="field-chip${removable ? "" : " base"}" draggable="true" data-idx="${i}">`
+      + `<span class="grip">⠿</span>${escapeHtml(columnLabelFor(id))}`
+      + (removable ? `<span class="x" onclick="removeEventField('${escapeAttr(id)}')">×</span>` : "")
+      + `</span>`;
+  }).join("");
+  wireChipDnD(box);
+}
+
+// Сброс к дефолтному набору колонок (только базовые, без кастомных полей) - не трогает
+// сохранённые именованные fieldset-ы, только текущий активный выбор.
+function resetFieldset() {
+  eventFields = [];
+  columnOrder = [...BASE_EVENT_COLUMN_IDS];
+  persistEventFields();
+  persistColumnOrder();
+  document.getElementById("fieldset-select").value = "";
+  renderEventFieldChips();
+  loadEvents(0);
+}
+
+// Перетаскивание чипов = смена порядка ВСЕХ колонок (columnOrder); порядок уходит в fieldset
+// при сохранении.
+let dragFromIdx = null;
+function wireChipDnD(box) {
+  box.querySelectorAll(".field-chip").forEach(chip => {
+    chip.addEventListener("dragstart", e => {
+      dragFromIdx = +chip.dataset.idx;
+      chip.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    chip.addEventListener("dragend", () => {
+      chip.classList.remove("dragging");
+      box.querySelectorAll(".field-chip").forEach(c => c.classList.remove("drop-target"));
+    });
+    chip.addEventListener("dragover", e => { e.preventDefault(); chip.classList.add("drop-target"); });
+    chip.addEventListener("dragleave", () => chip.classList.remove("drop-target"));
+    chip.addEventListener("drop", e => {
+      e.preventDefault();
+      const to = +chip.dataset.idx;
+      if (dragFromIdx === null || dragFromIdx === to) return;
+      const [moved] = columnOrder.splice(dragFromIdx, 1);
+      columnOrder.splice(to, 0, moved);
+      dragFromIdx = null;
+      persistColumnOrder();
+      renderEventFieldChips();
+      loadEvents(0);
+    });
+  });
+}
+
+// ---------- Именованные fieldset-ы (поля + порядок) ----------
+
+function persistFieldsets() { localStorage.setItem("siem_fieldsets", JSON.stringify(fieldsets)); }
+
+function renderFieldsetSelect() {
+  const sel = document.getElementById("fieldset-select");
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— выбрать —</option>' +
+    Object.keys(fieldsets).sort().map(n => `<option value="${escapeAttr(n)}">${escapeHtml(n)}</option>`).join("");
+  sel.value = prev;
+}
+
+function saveFieldset() {
+  const name = document.getElementById("fieldset-name").value.trim();
+  if (!name) { alert("Укажи имя набора"); return; }
+  fieldsets[name] = { fields: [...eventFields], order: [...columnOrder] };
+  persistFieldsets();
+  renderFieldsetSelect();
+  document.getElementById("fieldset-select").value = name;
+}
+
+function loadFieldset() {
+  const name = document.getElementById("fieldset-select").value;
+  const fs = fieldsets[name];
+  if (!name || !fs) return;
+  if (Array.isArray(fs)) {
+    // Старый формат (до введения общего порядка колонок) - только состав кастомных полей.
+    eventFields = [...fs];
+    columnOrder = ["event_time", "host", ...eventFields, "__rules"];
+  } else {
+    eventFields = [...(fs.fields || [])];
+    columnOrder = [...(fs.order || [])];
+  }
+  reconcileColumnOrder();
+  persistEventFields();
+  persistColumnOrder();
+  renderEventFieldChips();
+  loadEvents(0);
+}
+
+function deleteFieldset() {
+  const name = document.getElementById("fieldset-select").value;
+  if (!name || !fieldsets[name]) return;
+  delete fieldsets[name];
+  persistFieldsets();
+  renderFieldsetSelect();
+}
+
+// ---------- Строка фильтра (MaxPatrol-style query bar, см. app/filter_lang.py) ----------
+
+// Строку не парсим на клиенте - её разбирает и валидирует бэкенд (единственный источник
+// истины по грамматике, чтобы UI и API никогда не разошлись). Ошибку синтаксиса бэкенд
+// возвращает 400-м с человекочитаемым текстом (см. _parse_query_filter в main.py) -
+// показываем его в #filter-error как есть.
+function setFilterError(msg) {
+  const el = document.getElementById("filter-error");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.style.display = msg ? "block" : "none";
+}
+
+function toggleFilterHelp() {
+  const panel = document.getElementById("filter-help");
+  const toggle = document.getElementById("filter-help-toggle");
+  const show = panel.style.display === "none";
+  panel.style.display = show ? "grid" : "none";
+  toggle.textContent = show ? "Свернуть ▴" : "Подробнее ▾";
+}
+
+function clearFilters() {
+  document.getElementById("event-query-input").value = "";
+  setFilterError("");
+  loadEvents(0);
+}
+
+function applyFilterParams(params) {
+  const q = document.getElementById("event-query-input").value.trim();
+  if (q) params.set("query", q);
+  // Выбор группы уходит отдельным условием group_cond - оно ВСЕГДА сужает (AND),
+  // даже если в строке фильтра есть or/not.
+  if (groupField && groupSelected !== undefined) {
+    const gc = groupSelected === null
+      ? { field: groupField, op: "isnull" }
+      : { field: groupField, op: "eq", value: groupSelected };
+    params.set("group_cond", JSON.stringify(gc));
+  }
+}
+
+// ---------- Группировка (панель агрегаторов слева, как в MaxPatrol) ----------
+
+function applyGrouping() {
+  const f = document.getElementById("event-group-input").value.trim();
+  if (!f) { clearGrouping(); return; }
+  groupField = f;
+  groupSelected = undefined;
+  groupAutoSizePending = true;  // новое поле группировки - подберём ширину колонки под данные
+  document.getElementById("events-grid").classList.add("has-groups");
+  document.getElementById("group-panel-wrap").style.display = "block";
+  loadEvents(0);   // сам подтянет агрегаторы (groupField уже задан)
+}
+
+function clearGrouping() {
+  groupField = null;
+  groupSelected = undefined;
+  document.getElementById("events-grid").classList.remove("has-groups");
+  document.getElementById("group-panel-wrap").style.display = "none";
+  loadEvents(0);
+}
+
+async function loadGroups(mySeq) {
+  const listEl = document.getElementById("group-list");
+  document.getElementById("group-panel-title").textContent = groupField;
+  const params = new URLSearchParams();
+  params.set("group_by", groupField);
+  const batch = currentBatch();
+  if (batch) params.set("source_batch", batch);
+  const matched = document.getElementById("event-filter-matched").value;
+  if (matched) params.set("only_matched", matched);
+  applyTimeParams("event", params);
+  // Агрегаторы учитывают строку фильтра, но НЕ условие по самой выбранной группе.
+  const q = document.getElementById("event-query-input").value.trim();
+  if (q) params.set("query", q);
+
+  try {
+    const res = await api("/events/group?" + params.toString());
+    if (mySeq !== eventsRequestSeq) return;  // пришёл более новый запрос - этот ответ устарел
+    setFilterError("");
+    const shown = res.groups.length;
+    const total = res.total_groups;
+    const countInfo = shown < total ? `${total} (топ ${shown})` : `${total}`;
+    document.getElementById("group-panel-title").textContent = `${groupField}: ${countInfo}`;
+    lastGroupValues = res.groups;
+    if (groupAutoSizePending) {
+      // Автоподбор ширины срабатывает один раз - только при выборе НОВОГО поля группировки,
+      // а не на каждой перезагрузке (иначе сбивал бы ручной ресайз при клике по группе/фильтре).
+      // Подбираем и колонку "значение", и ширину всей панели - под реальные данные, а не дефолт.
+      groupValueWidth = computeOptimalGroupWidth(res.groups);
+      applyGroupValueWidth();
+      persistGroupValueWidth();
+      applyGroupPanelWidth(computeOptimalGroupPanelWidth(res.groups, groupValueWidth));
+      groupAutoSizePending = false;
+    }
+    listEl.innerHTML = "";
+    if (!res.groups.length) { listEl.innerHTML = '<p class="muted" style="font-size:12px;">Нет данных</p>'; return; }
+    // Строим узлы и вешаем обработчик замыканием - значение группы (число/строка/null)
+    // передаётся напрямую, без сериализации в inline-атрибут.
+    res.groups.forEach(g => {
+      const isNull = g.value === null;
+      const label = isNull ? "(пусто)" : String(g.value);
+      const row = document.createElement("div");
+      row.className = "group-row" + (groupSelected === g.value ? " selected" : "");
+      row.innerHTML = `<span class="gv ${isNull ? "null" : ""}" title="${attr(label)}">${escapeHtml(label)}</span><span class="gc">${g.count}</span>`;
+      row.addEventListener("click", () => selectGroup(g.value));
+      listEl.appendChild(row);
+    });
+  } catch (e) {
+    if (mySeq !== eventsRequestSeq) return;  // устаревшая ошибка (новый запрос уже в полёте/применён) - игнорируем
+    listEl.innerHTML = `<p class="error-state">Ошибка: ${escapeHtml(e.message)}</p>`;
+    if (e.message.includes("синтаксиса фильтра")) setFilterError(e.message);
+  }
+}
+
+function selectGroup(value) {
+  groupSelected = (groupSelected === value) ? undefined : value;  // повторный клик снимает выбор
+  loadEvents(0);   // подтянет события группы и перерисует агрегаторы с выделением
+}
+
+// Колонки таблицы Событий строятся из общего columnOrder (базовые + кастомные вперемешку).
+// Кастом-колонки сортируются по самому полю (бэкенд умеет json_extract в ORDER BY); список
+// правил ("__rules") - несколько бэйджей, обрезать эллипсисом нельзя не изувечив их - переносим.
+function eventColumns() {
+  return columnOrder.map(id => {
+    const base = BASE_EVENT_COLUMNS[id];
+    return base ? { id, ...base } : { id, key: id, label: id, field: id };
+  });
+}
+
+// event_time хранится в БД как есть - источники присылают его в разном виде
+// ("2020-10-22 04:29:46" у EVTX, "2020-11-02T04:13:05.650Z" у ECS-подобных JSON, см.
+// TIME_FIELDS в fields.py) - это НЕ трогаем, фильтр по времени сравнивает исходную строку.
+// Здесь только отображение: приводим к единому читаемому виду "YYYY-MM-DD HH:MM:SS" (без
+// разделителя T/Z и без мс/мкс) - как "Создан" у Алертов, - чтобы сразу было понятно, что
+// вводить в свой интервал (см. timeParams). Исходное значение остаётся в title (tooltip).
+function formatEventTime(value) {
+  if (!value) return "—";
+  return String(value).replace("T", " ").replace("Z", "").slice(0, 19);
+}
+
+// Ячейка строки Событий по id колонки - базовые поля берутся напрямую из события,
+// остальные - из e.extra (json_extract по имени поля, см. /events?fields=).
+function eventCellHtml(colId, e) {
+  if (colId === "event_time") {
+    return `<td title="${attr(e.event_time || "—")}">${escapeHtml(formatEventTime(e.event_time))}</td>`;
+  }
+  if (colId === "host") {
+    return `<td title="${attr(e.host)}">${escapeHtml(e.host)}</td>`;
+  }
+  if (colId === "__rules") {
+    const rulesCell = e.is_matched
+      ? e.matched_rules.map(r => `<span class="badge badge-matched">${escapeHtml(r)}</span>`).join(" ")
+      : '<span class="badge badge-unmatched">без срабатывания</span>';
+    return `<td class="col-wrap">${rulesCell}</td>`;
+  }
+  const raw = (e.extra && e.extra[colId] != null) ? String(e.extra[colId]) : "";
+  return `<td title="${attr(raw)}">${escapeHtml(raw)}</td>`;
+}
+
+async function api(path, opts) {
+  const res = await fetch(API + path, opts);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// ---------- Health: лёгкий периодический опрос + развёрнутая проверка по клику ----------
+//
+// /health теперь реальная проверка (SELECT 1 в БД, жив ли поток очереди ingest, есть ли
+// загруженный Zircolite-ruleset - см. main.py), а не просто "процесс ответил на HTTP".
+// Раньше checkHealth() вызывался один раз при загрузке страницы - если сервис падал
+// уже ПОСЛЕ открытия UI, светофор так и оставался зелёным до ручного обновления страницы.
+// Теперь опрашиваем каждые HEALTH_POLL_MS - светофор отражает текущее состояние, а не
+// снимок на момент открытия вкладки. Опрос ставится на паузу, пока вкладка не активна
+// (document.hidden), и сразу форсируется при возврате на неё - не жжём попусту в фоне.
+const HEALTH_POLL_MS = 20000;
+
+function applyHealthStatus(status) {
+  const dot = document.getElementById("health-dot");
+  const text = document.getElementById("health-text");
+  if (status === "ok") {
+    dot.className = "health-dot ok";
+    text.textContent = "сервис в норме";
+  } else if (status === "degraded") {
+    dot.className = "health-dot warn";
+    text.textContent = "есть проблемы";
+  } else {
+    dot.className = "health-dot bad";
+    text.textContent = "сервис недоступен";
+  }
+}
+
+async function checkHealth() {
+  try {
+    const res = await api("/health");
+    applyHealthStatus(res.status);
+  } catch (e) {
+    applyHealthStatus("down");
+  }
+  // Попап открыт - держим его в актуальном состоянии тем же ритмом, не только по клику.
+  if (healthDetailsOpen) loadHealthDetails();
+}
+
+function startHealthPolling() {
+  checkHealth();
+  setInterval(() => { if (!document.hidden) checkHealth(); }, HEALTH_POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkHealth(); });
+}
+
+// ---------- Развёрнутая проверка (клик по светофору) ----------
+
+let healthDetailsOpen = false;
+
+function healthDotHtml(status) {
+  const cls = status === "ok" ? "ok" : (status === "degraded" || status === "error") ? "warn" : "bad";
+  return `<span class="health-dot ${cls}"></span>`;
+}
+
+async function loadHealthDetails() {
+  const pop = document.getElementById("health-popover");
+  try {
+    const res = await api("/health?detailed=true");
+    const c = res.checks || {};
+    const rows = [];
+    if (c.db) {
+      const extra = c.db.events != null
+        ? ` · events: ${c.db.events} · alerts: ${c.db.alerts} · ${c.db.size_mb} МБ` : "";
+      rows.push(`<div class="hc-row">${healthDotHtml(c.db.status)}<div>
+        <div class="hc-name">БД</div>
+        <div class="hc-detail">${c.db.status === "ok" ? `отвечает за ${c.db.latency_ms} мс${extra}` : escapeHtml(c.db.error || "ошибка")}</div>
+      </div></div>`);
+    }
+    if (c.zircolite) {
+      rows.push(`<div class="hc-row">${healthDotHtml(c.zircolite.status)}<div>
+        <div class="hc-name">Zircolite</div>
+        <div class="hc-detail">${c.zircolite.rules_loaded} правил в ruleset-е · закэшировано наборов: ${c.zircolite.cached_rulesets}</div>
+      </div></div>`);
+    }
+    if (c.ingest_queue) {
+      const q = c.ingest_queue;
+      rows.push(`<div class="hc-row">${healthDotHtml(q.status)}<div>
+        <div class="hc-name">Очередь ingest</div>
+        <div class="hc-detail">воркер ${q.worker_alive ? "жив" : "НЕ отвечает"} · в очереди ${q.queue_size} из ${q.queue_max} · батч ${q.batch_size} / ${q.flush_interval}с</div>
+      </div></div>`);
+    }
+    pop.innerHTML = rows.join("") || '<p class="muted">Нет данных</p>';
+  } catch (e) {
+    pop.innerHTML = `<p class="error-state">Не удалось получить статус: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function toggleHealthDetails() {
+  const pop = document.getElementById("health-popover");
+  healthDetailsOpen = !healthDetailsOpen;
+  pop.style.display = healthDetailsOpen ? "block" : "none";
+  if (healthDetailsOpen) {
+    pop.innerHTML = '<p class="muted">Проверка...</p>';
+    loadHealthDetails();
+  }
+}
+
+document.addEventListener("click", (e) => {
+  if (healthDetailsOpen && !document.getElementById("health-label").contains(e.target)) {
+    healthDetailsOpen = false;
+    document.getElementById("health-popover").style.display = "none";
+  }
+});
+
+async function refreshBatches() {
+  const select = document.getElementById("batch-select");
+  const prev = select.value;
+  try {
+    const batches = await api("/batches");
+    select.innerHTML = '<option value="">Все источники</option>' + batches.map(b =>
+      `<option value="${b.source_batch}">${b.source_batch} (${b.event_count} событий, ${b.alert_count} алертов)</option>`
+    ).join("");
+    select.value = prev;
+    renderSourcesTable(batches);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// Таблица источников во вкладке "Источник данных" - тот же /batches, что уже используется для
+// заполнения общего селектора #batch-select, просто отрисован построчно с кнопкой удаления.
+function renderSourcesTable(batches) {
+  const tbody = document.getElementById("sources-tbody");
+  if (!tbody) return;  // таблица есть только в разметке вкладки "Источник данных"
+  const emptyEl = document.getElementById("sources-empty");
+  if (!batches.length) {
+    tbody.innerHTML = "";
+    emptyEl.style.display = "block";
+    return;
+  }
+  emptyEl.style.display = "none";
+  tbody.innerHTML = batches.map(b => `
+    <tr>
+      <td>${escapeHtml(b.source_batch)}</td>
+      <td>${b.event_count}</td>
+      <td>${b.matched_event_count || 0}</td>
+      <td>${b.alert_count}</td>
+      <td>${escapeHtml((b.first_ingested_at || "").slice(0, 19).replace("T", " "))}</td>
+      <td>${escapeHtml((b.last_ingested_at || "").slice(0, 19).replace("T", " "))}</td>
+      <td><button type="button" class="ghost" onclick="deleteSource('${escapeAttr(b.source_batch)}')">Удалить</button></td>
+    </tr>
+  `).join("");
+}
+
+// Удаление источника целиком - предупреждающий confirm() перед необратимым действием (тот же
+// паттерн, что уже используется для рулсетов/кастомных правил, см. deleteRuleset/deleteCustomRule).
+async function deleteSource(sourceBatch) {
+  if (!confirm(`Удалить источник "${sourceBatch}" целиком?\nБудут удалены ВСЕ его события и алерты. Действие необратимо.`)) return;
+  try {
+    await api("/batches/" + encodeURIComponent(sourceBatch), { method: "DELETE" });
+    await refreshBatches();
+    // Если удалённый источник был выбран в общем фильтре - сбрасываем выбор и перезагружаем
+    // активную вкладку, иначе она тихо продолжит показывать фильтр по уже несуществующему батчу.
+    const batchSelect = document.getElementById("batch-select");
+    if (batchSelect.value === sourceBatch) {
+      batchSelect.value = "";
+    }
+    refreshActiveTab();
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+async function runIngestFile() {
+  const resultEl = document.getElementById("ingest-result");
+  resultEl.innerHTML = '<span class="muted">Выполняется...</span>';
+  try {
+    const body = {
+      events_path: document.getElementById("ingest-path").value,
+      input_type: document.getElementById("ingest-type").value,
+      source_label: document.getElementById("ingest-label").value || undefined,
+    };
+    const ruleset = document.getElementById("ingest-ruleset").value;
+    if (ruleset) body.ruleset = ruleset;
+    const res = await api("/ingest/file", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> событий ${res.events_processed}, правил сработало ${res.rules_matched}, алертов создано ${res.alerts_created}, ${res.duration_seconds}с`;
+    await refreshBatches();
+    await refreshActiveTab();
+  } catch (e) {
+    resultEl.innerHTML = `<span class="error-state">Ошибка: ${e.message}</span>`;
+  }
+}
+
+async function runIngestUpload() {
+  const resultEl = document.getElementById("ingest-result");
+  const fileInput = document.getElementById("ingest-upload-file");
+  if (!fileInput.files.length) {
+    resultEl.innerHTML = '<span class="error-state">Сначала выбери файл</span>';
+    return;
+  }
+  resultEl.innerHTML = '<span class="muted">Загрузка и обработка...</span>';
+  try {
+    const formData = new FormData();
+    formData.append("file", fileInput.files[0]);
+    formData.append("input_type", document.getElementById("ingest-upload-type").value);
+    const ruleset = document.getElementById("ingest-upload-ruleset").value;
+    if (ruleset) formData.append("ruleset", ruleset);
+    const label = document.getElementById("ingest-upload-label").value;
+    if (label) formData.append("source_label", label);
+
+    const res = await api("/ingest/upload", { method: "POST", body: formData });
+    resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> событий ${res.events_processed}, правил сработало ${res.rules_matched}, алертов создано ${res.alerts_created}, ${res.duration_seconds}с`;
+    await refreshBatches();
+    await refreshActiveTab();
+  } catch (e) {
+    resultEl.innerHTML = `<span class="error-state">Ошибка: ${e.message}</span>`;
+  }
+}
+
+async function runIngestEvents() {
+  const resultEl = document.getElementById("ingest-result");
+  resultEl.innerHTML = '<span class="muted">Выполняется...</span>';
+  try {
+    const raw = document.getElementById("ingest-events-json").value;
+    const events = JSON.parse(raw);
+    const body = { events: events, source_label: document.getElementById("ingest-events-label").value || "manual-batch" };
+    const res = await api("/ingest/events", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> событий ${res.events_processed}, правил сработало ${res.rules_matched}, алертов создано ${res.alerts_created}, ${res.duration_seconds}с`;
+    await refreshBatches();
+    await refreshActiveTab();
+  } catch (e) {
+    resultEl.innerHTML = `<span class="error-state">Ошибка: ${e.message}</span>`;
+  }
+}
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById("tab-source").classList.toggle("active", tab === "source");
+  document.getElementById("tab-alerts").classList.toggle("active", tab === "alerts");
+  document.getElementById("tab-events").classList.toggle("active", tab === "events");
+  document.getElementById("tab-sigma").classList.toggle("active", tab === "sigma");
+  document.getElementById("view-source").style.display = tab === "source" ? "block" : "none";
+  document.getElementById("view-alerts").style.display = tab === "alerts" ? "block" : "none";
+  document.getElementById("view-events").style.display = tab === "events" ? "block" : "none";
+  document.getElementById("view-sigma").style.display = tab === "sigma" ? "block" : "none";
+  refreshActiveTab();
+}
+
+function refreshActiveTab() {
+  if (activeTab === "alerts") loadAlerts();
+  else if (activeTab === "events") loadEvents(eventsOffset);
+  else if (activeTab === "sigma") loadSigmaRules(0);
+  // вкладка "source" ничего не подгружает - там только формы ingest
+}
+
+// ---------- Alerts ----------
+
+function sevBar(level) { return `<span class="sev-bar sev-${level}"></span>`; }
+
+async function loadAlerts() {
+  const tbody = document.getElementById("alerts-tbody");
+  const emptyEl = document.getElementById("alerts-empty");
+  document.getElementById("alerts-head-row").innerHTML = ALERT_COLUMNS.map(c => thHtml("alerts", c)).join("");
+  const params = new URLSearchParams();
+  const batch = currentBatch();
+  if (batch) params.set("source_batch", batch);
+  const level = document.getElementById("alert-filter-level").value;
+  if (level) params.set("rule_level", level);
+  const status = document.getElementById("alert-filter-status").value;
+  if (status) params.set("status", status);
+  applyTimeParams("alert", params);
+  sortParams(alertsSort, params);
+
+  try {
+    const alerts = await api("/alerts?" + params.toString());
+    if (alerts.length === 0) {
+      // className/textContent сбрасываем явно - иначе тут остаётся "error-state"/текст ошибки
+      // от ПРЕДЫДУЩЕГО неудачного запроса (catch ниже их выставляет, а тут никто не возвращал
+      // обратно): пустой результат после ошибки визуально выглядел так, будто ошибка ещё жива.
+      tbody.innerHTML = "";
+      emptyEl.className = "empty-state";
+      emptyEl.textContent = "Нет алертов для выбранных фильтров";
+      emptyEl.style.display = "block";
+      return;
+    }
+    emptyEl.style.display = "none";
+    tbody.innerHTML = alerts.map(a => `
+      <tr class="data-row" data-id="${a.alert_id}" onclick="selectAlert('${a.alert_id}')">
+        <td>${sevBar(a.rule_level)}</td>
+        <td>${a.rule_title}</td>
+        <td>${a.host}</td>
+        <td>${a.event_count}</td>
+        <td><span class="badge badge-${a.status}">${a.status}</span></td>
+        <td>${a.created_at.slice(0,19).replace("T"," ")}</td>
+      </tr>
+    `).join("");
+  } catch (e) {
+    tbody.innerHTML = "";
+    emptyEl.style.display = "block";
+    emptyEl.className = "error-state";
+    emptyEl.textContent = "Ошибка загрузки: " + e.message;
+  }
+}
+
+async function selectAlert(id) {
+  const scrollY = window.scrollY;
+  document.querySelectorAll("#alerts-tbody tr").forEach(tr => tr.classList.toggle("selected", tr.dataset.id === id));
+  const content = document.getElementById("alert-detail-content");
+  content.style.opacity = "0.45";
+  try {
+    const a = await api("/alerts/" + id);
+    const techs = a.mitre_techniques.map(t => `<span class="tech-tag">${t}</span>`).join(" ") || '<span class="muted">—</span>';
+    const ent = a.entities;
+    content.innerHTML = `
+      <h3>${sevBar(a.rule_level)}${a.rule_title}</h3>
+      <p class="muted">${a.description || "без описания"}</p>
+      <div style="margin:10px 0;">${techs}</div>
+      <div class="kv"><span>Хост</span><span>${a.host}</span></div>
+      <div class="kv"><span>Источник</span><span>${a.source_batch}</span></div>
+      <div class="kv"><span>Событий</span><span>${a.event_count}</span></div>
+      <div class="kv"><span>Пользователи</span><span>${(ent.users||[]).join(", ") || "—"}</span></div>
+      <div class="kv"><span>IP (src)</span><span>${(ent.src_ips||[]).join(", ") || "—"}</span></div>
+      <div class="kv"><span>Процессы</span><span>${(ent.processes||[]).join(", ") || "—"}</span></div>
+      <div class="status-select-row">
+        <select id="status-select-${a.alert_id}">
+          <option value="new" ${a.status==="new"?"selected":""}>new</option>
+          <option value="investigating" ${a.status==="investigating"?"selected":""}>investigating</option>
+          <option value="closed" ${a.status==="closed"?"selected":""}>closed</option>
+        </select>
+        <button type="button" onclick="updateStatus('${a.alert_id}')">Сохранить статус</button>
+      </div>
+      <p class="panel-title" style="margin-top:14px;">Сэмпл событий (${a.sample_events.length})</p>
+      <pre class="json-block">${escapeHtml(JSON.stringify(a.sample_events, null, 2))}</pre>
+    `;
+  } catch (e) {
+    content.innerHTML = `<p class="error-state">Ошибка: ${e.message}</p>`;
+  } finally {
+    content.style.opacity = "1";
+  }
+  requestAnimationFrame(() => window.scrollTo(0, scrollY));
+}
+
+async function updateStatus(id) {
+  const status = document.getElementById("status-select-" + id).value;
+  try {
+    await api("/alerts/" + id + "/status", { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify({status}) });
+    await loadAlerts();
+    await selectAlert(id);
+  } catch (e) {
+    alert("Не удалось обновить статус: " + e.message);
+  }
+}
+
+// ---------- Events ----------
+
+async function loadEvents(offset) {
+  eventsOffset = offset;
+  const mySeq = ++eventsRequestSeq;   // см. комментарий у объявления eventsRequestSeq
+  // Свежий запрос (offset 0 = смена фильтра/времени/батча/сортировки) обновляет и агрегаторы,
+  // т.к. счётчики групп зависят от фильтра. Пагинация (offset>0) панель не трогает.
+  if (groupField && offset === 0) loadGroups(mySeq);
+  const tbody = document.getElementById("events-tbody");
+  const emptyEl = document.getElementById("events-empty");
+  const columns = eventColumns();
+  const headRow = document.getElementById("events-head-row");
+  const resizeRow = document.getElementById("events-resize-row");
+  headRow.innerHTML = columns.map(c => thHtml("events", c)).join("");
+  resizeRow.innerHTML = resizeRowHtml(columns);
+  wireColumnResize(headRow, resizeRow);
+  const params = new URLSearchParams();
+  const batch = currentBatch();
+  if (batch) params.set("source_batch", batch);
+  const matched = document.getElementById("event-filter-matched").value;
+  if (matched) params.set("only_matched", matched);
+  applyTimeParams("event", params);
+  applyFilterParams(params);
+  sortParams(eventsSort, params);
+  if (eventFields.length) params.set("fields", eventFields.join(","));
+  params.set("limit", eventsLimit);
+  params.set("offset", offset);
+
+  try {
+    const res = await api("/events?" + params.toString());
+    if (mySeq !== eventsRequestSeq) return;  // пришёл более новый запрос - этот ответ устарел
+    setFilterError("");
+    eventsTotal = res.total;
+    if (res.events.length === 0) {
+      // className/textContent сбрасываем явно - иначе тут остаётся "error-state"/текст ошибки
+      // от ПРЕДЫДУЩЕГО неудачного запроса (catch ниже их выставляет, а тут никто не возвращал
+      // обратно): пустой результат после ошибки визуально выглядел так, будто ошибка ещё жива,
+      // хотя сам запрос уже успешно выполнился (именно это и было в сообщении пользователя).
+      tbody.innerHTML = "";
+      emptyEl.className = "empty-state";
+      emptyEl.textContent = "Нет событий для выбранных фильтров";
+      emptyEl.style.display = "block";
+    } else {
+      emptyEl.style.display = "none";
+      tbody.innerHTML = res.events.map(e => {
+        const cells = columnOrder.map(id => eventCellHtml(id, e)).join("");
+        return `
+        <tr class="data-row" data-id="${e.event_id}" onclick="selectEvent('${e.event_id}')">
+          ${cells}
+        </tr>`;
+      }).join("");
+    }
+    const from = eventsTotal === 0 ? 0 : offset + 1;
+    const to = Math.min(offset + eventsLimit, eventsTotal);
+    document.getElementById("events-page-info").textContent = `${from}-${to} из ${eventsTotal}`;
+    document.getElementById("events-prev").disabled = offset === 0;
+    document.getElementById("events-next").disabled = offset + eventsLimit >= eventsTotal;
+  } catch (e) {
+    if (mySeq !== eventsRequestSeq) return;  // устаревшая ошибка (новый запрос уже в полёте/применён) - игнорируем
+    tbody.innerHTML = "";
+    emptyEl.style.display = "block";
+    emptyEl.className = "error-state";
+    emptyEl.textContent = "Ошибка загрузки: " + e.message;
+    if (e.message.includes("синтаксиса фильтра")) setFilterError(e.message);
+  }
+}
+
+function eventsPrev() { if (eventsOffset - eventsLimit >= 0) loadEvents(eventsOffset - eventsLimit); }
+function eventsNext() { if (eventsOffset + eventsLimit < eventsTotal) loadEvents(eventsOffset + eventsLimit); }
+
+async function selectEvent(id) {
+  const scrollY = window.scrollY;
+  document.querySelectorAll("#events-tbody tr").forEach(tr => tr.classList.toggle("selected", tr.dataset.id === id));
+  const content = document.getElementById("event-detail-content");
+  content.style.opacity = "0.45";
+  try {
+    const e = await api("/events/" + id);
+    const rules = e.matched_rules.length ? e.matched_rules.map(r => `<span class="tech-tag">${r}</span>`).join(" ") : '<span class="muted">не вызвало срабатывания правил</span>';
+    content.innerHTML = `
+      <h3>${e.host}</h3>
+      <p class="muted" title="${attr(e.event_time || "")}">${e.event_time ? escapeHtml(formatEventTime(e.event_time)) : "время не определено"}</p>
+      <div style="margin:10px 0;">${rules}</div>
+      <div class="kv"><span>Источник</span><span>${e.source_batch}</span></div>
+      <p class="panel-title" style="margin-top:14px;">Сырое событие</p>
+      <pre class="json-block raw-event">${escapeHtml(JSON.stringify(e.raw_json, null, 2))}</pre>
+    `;
+  } catch (e) {
+    content.innerHTML = `<p class="error-state">Ошибка: ${e.message}</p>`;
+  } finally {
+    content.style.opacity = "1";
+  }
+  requestAnimationFrame(() => window.scrollTo(0, scrollY));
+}
+
+// ---------- Sigma-правила ----------
+
+// Лёгкая построчная подсветка синтаксиса YAML - НЕ полноценный парсер (Sigma-правила простые:
+// вложенные map/list, скалярные значения, редко что-то экзотичнее), поэтому построчных regex
+// достаточно и не тянем внешнюю библиотеку. Экранируем HTML ПЕРВЫМ шагом (yaml_text - текст
+// пользовательского custom-правила, потенциально untrusted) и только потом раскрашиваем -
+// иначе '<'/'&' в значении сломали бы разметку или того хуже. Известное упрощение: '#' внутри
+// кавычек ошибочно считается началом комментария (полноценный YAML-токенайзер сюда избыточен).
+function highlightYamlLine(line) {
+  const escaped = escapeHtml(line);
+  const hashIdx = escaped.indexOf("#");
+  let code = escaped, comment = "";
+  if (hashIdx !== -1) {
+    code = escaped.slice(0, hashIdx);
+    comment = `<span class="yaml-comment">${escaped.slice(hashIdx)}</span>`;
+  }
+  // Строки - ПЕРВЫМ делом, пока code ещё plain-текст без вставленных <span class="...">: этот
+  // паттерн ищет пары кавычек ГЛОБАЛЬНО по всей строке (/g, без привязки к позиции) - если бы
+  // он шёл после key/dash/number/bool, он бы принял их же атрибут class="yaml-key" за YAML-
+  // строковый литерал (те тоже в кавычках) и сломал разметку. Остальные паттерны ниже все
+  // привязаны к конкретной позиции (^ - начало строки, $ - конец) и друг другу не мешают.
+  code = code.replace(/('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g, m => `<span class="yaml-string">${m}</span>`);
+  code = code.replace(/^(\s*(?:-\s+)?)([A-Za-z0-9_.|-]+)(:)(\s|$)/, (m, indent, key, colon, tail) =>
+    `${indent}<span class="yaml-key">${key}</span>${colon}${tail}`);
+  code = code.replace(/^(\s*)(-)(\s)/, (m, indent, dash, sp) =>
+    `${indent}<span class="yaml-dash">${dash}</span>${sp}`);
+  code = code.replace(/(:\s+)(-?\d+(?:\.\d+)?)\s*$/, (m, pre, num) => `${pre}<span class="yaml-number">${num}</span>`);
+  code = code.replace(/(:\s+)(true|false|null)\s*$/i, (m, pre, val) => `${pre}<span class="yaml-bool">${val}</span>`);
+  return code + comment;
+}
+
+function highlightYaml(text) {
+  return text.split("\n").map(highlightYamlLine).join("\n");
+}
+
+let sigmaOffset = 0;
+const sigmaLimit = 50;
+let sigmaTotal = 0;
+let sigmaRequestSeq = 0;   // тот же приём, что eventsRequestSeq - игнорируем устаревшие ответы
+let rulesetCatalog = [];  // кэш последнего GET /rulesets - для optgroup-меток и метаданных рулсета
+let ruleEditorMode = null;   // "create" | "edit" - см. openRuleEditor
+let ruleEditorTarget = null; // {ruleset, ruleId} - только в режиме edit, куда сохранять PUT
+let currentSigmaRule = null; // {ruleset, ruleId, yamlText} последнего открытого в детейл-панели
+                              // custom-правила - кнопка "Редактировать" ссылается на переменную
+                              // по имени (не встраивает YAML текстом в onclick-атрибут): сырой
+                              // YAML почти всегда содержит и '...', и "..." одновременно, а
+                              // onclick='...' в одинарных кавычках ломается на первой же
+                              // одинарной кавычке ВНУТРИ значения - JSON.stringify тут не
+                              // спасает, он не экранирует символ ' (не служебный в JSON).
+
+// includeMain - добавить пункт "Основной рулсет" первым (только для ingest-селекторов,
+// не для sigma-ruleset-select - там main не просматривается напрямую, см. toggle-фильтр ниже).
+function rulesetOptionsHtml(catalog, opts) {
+  opts = opts || {};
+  const groups = { builtin: [], custom: [] };
+  catalog.forEach(r => { if (r.category !== "main") (groups[r.category] || groups.builtin).push(r); });
+  const labels = { builtin: "Встроенные", custom: "Свои рулсеты" };
+  let html = "";
+  if (opts.includeMain) {
+    const mainEntry = catalog.find(r => r.category === "main");
+    if (mainEntry) {
+      html += `<option value="${attr(mainEntry.path)}">⭐ ${escapeHtml(mainEntry.name)} (${mainEntry.rule_count})</option>`;
+    }
+  }
+  html += ["builtin", "custom"].map(cat => {
+    if (!groups[cat].length) return "";
+    const opts2 = groups[cat].map(r =>
+      `<option value="${attr(r.path)}">${escapeHtml(r.name)} (${r.rule_count})</option>`
+    ).join("");
+    return `<optgroup label="${labels[cat]}">${opts2}</optgroup>`;
+  }).join("");
+  return html;
+}
+
+// Заполняет и селекты ingest-форм ("Источник данных"), и селектор рулсета на вкладке
+// Sigma-правил, и селекторы "существующий рулсет" в панелях upload/своё правило - один
+// источник истины (GET /rulesets) вместо захардкоженных <option>. Вызывается при
+// инициализации и после любого изменения каталога (upload/delete рулсета, добавление/
+// удаление своего правила, переключение состава основного рулсета).
+async function refreshRulesetOptions() {
+  try {
+    rulesetCatalog = await api("/rulesets");
+  } catch (e) {
+    console.error(e);
+    return;
+  }
+  // "Основной рулсет" теперь доступен для выбора и в ingest-формах, и в самом селекторе
+  // вкладки Sigma-правила (просмотр только его состава, см. loadSigmaRules/selectSigmaRule).
+  const optionsHtml = rulesetOptionsHtml(rulesetCatalog, { includeMain: true });
+
+  ["ingest-ruleset", "ingest-upload-ruleset"].forEach(id => {
+    const select = document.getElementById(id);
+    const prev = select.value;
+    select.innerHTML = '<option value="">по умолчанию (merged)</option>' + optionsHtml;
+    select.value = prev;
+  });
+
+  const sigmaSelect = document.getElementById("sigma-ruleset-select");
+  const prevSigma = sigmaSelect.value;
+  sigmaSelect.innerHTML = optionsHtml;
+  if (prevSigma && rulesetCatalog.some(r => r.path === prevSigma)) {
+    sigmaSelect.value = prevSigma;
+  } else {
+    const browsable = rulesetCatalog.filter(r => r.category !== "main");
+    if (browsable.length) {
+      // Первая загрузка (ничего ещё не выбрано) - по умолчанию открываем merged built-in,
+      // если он есть, иначе первый доступный, чтобы таблица не была пустой сразу при открытии вкладки.
+      const defaultEntry = browsable.find(r => r.path.endsWith("rules_windows_merged.json")) || browsable[0];
+      sigmaSelect.value = defaultEntry.path;
+    }
+  }
+
+  const customOnly = rulesetCatalog.filter(r => r.category === "custom");
+  const customOptionsHtml = customOnly.map(r => `<option value="${attr(r.path)}">${escapeHtml(r.name)} (${r.rule_count})</option>`).join("");
+  ["sigma-upload-target-existing", "rule-editor-target-existing"].forEach(id => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = customOptionsHtml;
+    if (customOnly.some(r => r.path === prev)) sel.value = prev;
+  });
+
+  // Селектор рулсета в референс-панели редактора (loadEditorReferenceRules) - тот же полный
+  // каталог, что и sigma-ruleset-select, значение переустанавливает openRuleEditor при открытии.
+  const refSelect = document.getElementById("rule-editor-ref-ruleset");
+  if (refSelect) {
+    const prevRef = refSelect.value;
+    refSelect.innerHTML = optionsHtml;
+    if (prevRef && rulesetCatalog.some(r => r.path === prevRef)) refSelect.value = prevRef;
+  }
+
+  updateSigmaRulesetMeta();
+}
+
+function updateSigmaRulesetMeta() {
+  const path = document.getElementById("sigma-ruleset-select").value;
+  const entry = rulesetCatalog.find(r => r.path === path);
+  const isMainView = !!entry && entry.category === "main";
+
+  document.getElementById("sigma-ruleset-meta").textContent = entry
+    ? isMainView ? `${entry.rule_count} правил` : `${entry.rule_count} правил, ${(entry.size_bytes / 1024).toFixed(0)} КБ`
+    : "";
+  document.getElementById("sigma-delete-ruleset-btn").style.display = entry && entry.deletable ? "inline-block" : "none";
+
+  // "Добавить рулсет в основной" не имеет смысла для самого "Основного рулсета" - скрываем.
+  const mainBtn = document.getElementById("sigma-ruleset-in-main-btn");
+  if (entry && !isMainView) {
+    const inMain = entry.main_status === "full";
+    mainBtn.style.display = "inline-block";
+    mainBtn.textContent = inMain ? "✓ В основном рулсете" : "+ Добавить рулсет в основной";
+    mainBtn.className = inMain ? "ghost" : "";
+  } else {
+    mainBtn.style.display = "none";
+  }
+
+  // "Только основной рулсет" бессмысленен при просмотре самого main (уже и так только он).
+  const onlyMainToggle = document.getElementById("sigma-only-main-toggle");
+  onlyMainToggle.disabled = isMainView;
+  if (isMainView) onlyMainToggle.checked = false;
+  const wrap = onlyMainToggle.closest(".switch-wrap");
+  if (wrap) wrap.style.opacity = isMainView ? "0.5" : "1";
+}
+
+// ---------- Фильтр по метадате (уровень/статус) - мультиселект-поповер ----------
+// Значения захардкожены (уровень - весь LEVEL_ORDER из rules_catalog.py, статус - полный
+// набор из Sigma-спеки), а не собираются динамически из текущего рулсета - список должен
+// быть стабильным при переключении рулсета/поиске, а не "прыгать" вместе с результатами.
+const SIGMA_FACETS = {
+  level: ["critical", "high", "medium", "low", "informational"],
+  status: ["stable", "test", "experimental", "deprecated", "unsupported"],
+};
+const SIGMA_FACET_TITLES = { level: "Уровень", status: "Статус" };
+let sigmaFacetSelected = { level: new Set(), status: new Set() };
+let sigmaFacetOpen = null; // "level" | "status" | null
+
+function sigmaFacetButtonLabel(facet) {
+  const sel = sigmaFacetSelected[facet];
+  const title = SIGMA_FACET_TITLES[facet];
+  if (sel.size === 0) return `${title}: все`;
+  if (sel.size <= 2) return `${title}: ${[...sel].join(", ")}`;
+  return `${title}: ${sel.size}`;
+}
+
+function renderSigmaFacetButton(facet) {
+  document.getElementById(`sigma-${facet}-btn`).innerHTML = escapeHtml(sigmaFacetButtonLabel(facet)) + " &#9662;";
+}
+
+function renderSigmaFacetPopover(facet) {
+  const pop = document.getElementById(`sigma-${facet}-popover`);
+  const sel = sigmaFacetSelected[facet];
+  pop.innerHTML = SIGMA_FACETS[facet].map(v => `
+    <label class="facet-option">
+      <input type="checkbox" value="${escapeAttr(v)}" ${sel.has(v) ? "checked" : ""} onchange="toggleSigmaFacetValue('${facet}','${escapeAttr(v)}', this.checked)">
+      ${escapeHtml(v)}
+    </label>
+  `).join("") + `<div class="facet-actions"><button type="button" class="ghost" onclick="clearSigmaFacet('${facet}')">Сбросить</button></div>`;
+}
+
+function toggleSigmaFacetPopover(facet) {
+  const wasOpen = sigmaFacetOpen === facet;
+  ["level", "status"].forEach(f => { document.getElementById(`sigma-${f}-popover`).style.display = "none"; });
+  if (wasOpen) { sigmaFacetOpen = null; return; }
+  renderSigmaFacetPopover(facet);
+  document.getElementById(`sigma-${facet}-popover`).style.display = "block";
+  sigmaFacetOpen = facet;
+}
+
+function toggleSigmaFacetValue(facet, value, checked) {
+  if (checked) sigmaFacetSelected[facet].add(value); else sigmaFacetSelected[facet].delete(value);
+  renderSigmaFacetButton(facet);
+  loadSigmaRules(0);
+}
+
+function clearSigmaFacet(facet) {
+  sigmaFacetSelected[facet].clear();
+  renderSigmaFacetButton(facet);
+  renderSigmaFacetPopover(facet);
+  loadSigmaRules(0);
+}
+
+document.addEventListener("click", (e) => {
+  if (sigmaFacetOpen && !document.getElementById(`sigma-${sigmaFacetOpen}-filter`).contains(e.target)) {
+    document.getElementById(`sigma-${sigmaFacetOpen}-popover`).style.display = "none";
+    sigmaFacetOpen = null;
+  }
+});
+
+async function loadSigmaRules(offset) {
+  sigmaOffset = offset;
+  const mySeq = ++sigmaRequestSeq;
+  updateSigmaRulesetMeta();
+  const ruleset = document.getElementById("sigma-ruleset-select").value;
+  const tbody = document.getElementById("sigma-tbody");
+  const emptyEl = document.getElementById("sigma-empty");
+  const headRow = document.getElementById("sigma-head-row");
+  headRow.innerHTML = SIGMA_COLUMNS.map(c => thHtml("sigma", c)).join("");
+
+  if (!ruleset) {
+    tbody.innerHTML = "";
+    emptyEl.className = "empty-state";
+    emptyEl.textContent = "Выбери рулсет выше";
+    emptyEl.style.display = "block";
+    document.getElementById("sigma-page-info").textContent = "";
+    document.getElementById("sigma-prev").disabled = true;
+    document.getElementById("sigma-next").disabled = true;
+    return;
+  }
+
+  const params = new URLSearchParams();
+  params.set("ruleset", ruleset);
+  const q = document.getElementById("sigma-query-input").value.trim();
+  if (q) params.set("q", q);
+  const onlyMain = document.getElementById("sigma-only-main-toggle").checked;
+  if (onlyMain) params.set("only_main", "true");
+  if (sigmaFacetSelected.level.size) params.set("level", [...sigmaFacetSelected.level].join(","));
+  if (sigmaFacetSelected.status.size) params.set("status", [...sigmaFacetSelected.status].join(","));
+  sortParams(sigmaSort, params);
+  params.set("limit", sigmaLimit);
+  params.set("offset", offset);
+
+  try {
+    const res = await api("/rulesets/rules?" + params.toString());
+    if (mySeq !== sigmaRequestSeq) return;  // пришёл более новый запрос - этот ответ устарел
+    sigmaTotal = res.total;
+    if (res.rules.length === 0) {
+      tbody.innerHTML = "";
+      emptyEl.className = "empty-state";
+      emptyEl.textContent = "Нет правил для выбранных фильтров";
+      emptyEl.style.display = "block";
+    } else {
+      emptyEl.style.display = "none";
+      // При просмотре "Основного рулсета" каждая строка несёт свой настоящий source_ruleset
+      // (main - виртуальный список из нескольких реальных рулсетов сразу) - клик/кнопка
+      // должны бить по нему, а не по значению селектора ("main").
+      tbody.innerHTML = res.rules.map(r => {
+        const rowRuleset = r.source_ruleset || ruleset;
+        return `
+        <tr class="data-row" data-id="${attr(r.id || "")}" onclick="selectSigmaRule('${escapeAttr(r.id || "")}', '${escapeAttr(rowRuleset)}')">
+          <td><button type="button" class="in-main-btn${r.in_main ? " active" : ""}" title="${r.in_main ? "Убрать из основного рулсета" : "Добавить в основной рулсет"}" onclick="event.stopPropagation(); toggleRuleInMain('${escapeAttr(rowRuleset)}','${escapeAttr(r.id || "")}', ${r.in_main ? "false" : "true"})">${r.in_main ? "✓" : "+"}</button></td>
+          <td>${sevBar(r.level)}</td>
+          <td>${escapeHtml(r.title || "")}</td>
+          <td>${escapeHtml(r.level || "")}</td>
+          <td>${escapeHtml(r.status || "")}</td>
+          <td>${escapeHtml(r.author || "")}</td>
+        </tr>
+      `;
+      }).join("");
+    }
+    const from = sigmaTotal === 0 ? 0 : offset + 1;
+    const to = Math.min(offset + sigmaLimit, sigmaTotal);
+    document.getElementById("sigma-page-info").textContent = `${from}-${to} из ${sigmaTotal}`;
+    document.getElementById("sigma-prev").disabled = offset === 0;
+    document.getElementById("sigma-next").disabled = offset + sigmaLimit >= sigmaTotal;
+  } catch (e) {
+    if (mySeq !== sigmaRequestSeq) return;
+    tbody.innerHTML = "";
+    emptyEl.style.display = "block";
+    emptyEl.className = "error-state";
+    emptyEl.textContent = "Ошибка загрузки: " + e.message;
+  }
+}
+
+function sigmaPrev() { if (sigmaOffset - sigmaLimit >= 0) loadSigmaRules(sigmaOffset - sigmaLimit); }
+function sigmaNext() { if (sigmaOffset + sigmaLimit < sigmaTotal) loadSigmaRules(sigmaOffset + sigmaLimit); }
+
+function clearSigmaFilters() {
+  document.getElementById("sigma-query-input").value = "";
+  document.getElementById("sigma-only-main-toggle").checked = false;
+  sigmaFacetSelected.level.clear();
+  sigmaFacetSelected.status.clear();
+  renderSigmaFacetButton("level");
+  renderSigmaFacetButton("status");
+  loadSigmaRules(0);
+}
+
+async function toggleRuleInMain(ruleset, ruleId, include) {
+  try {
+    await api("/main-ruleset/rules", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ruleset, rule_id: ruleId, include }),
+    });
+    await refreshRulesetOptions();
+    loadSigmaRules(sigmaOffset);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+async function toggleCurrentRulesetInMain() {
+  const ruleset = document.getElementById("sigma-ruleset-select").value;
+  const entry = rulesetCatalog.find(r => r.path === ruleset);
+  if (!entry) return;
+  const include = entry.main_status !== "full";
+  try {
+    await api("/main-ruleset/rulesets", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ruleset, include }),
+    });
+    await refreshRulesetOptions();
+    loadSigmaRules(sigmaOffset);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+// prefix - "sigma-upload" или "rule-editor" (общий обработчик radio "существующий/новый рулсет").
+function updateSigmaTargetMode(prefix) {
+  const mode = document.querySelector(`input[name="${prefix}-target-mode"]:checked`).value;
+  document.getElementById(`${prefix}-target-existing`).disabled = mode !== "existing";
+  document.getElementById(`${prefix}-target-new`).disabled = mode !== "new";
+}
+
+function toggleSigmaUpload() {
+  const panel = document.getElementById("sigma-upload-panel");
+  const toggle = document.getElementById("sigma-upload-toggle");
+  const show = panel.style.display === "none";
+  panel.style.display = show ? "grid" : "none";
+  toggle.textContent = show ? "Свернуть ▴" : "+ Загрузить рулсет ▾";
+}
+
+// Живая подсветка синтаксиса в РЕДАКТИРУЕМОМ поле - без внешних библиотек: прозрачный textarea
+// (#rule-editor-yaml, виден только каретой через caret-color) поверх <pre> с тем же
+// highlightYaml(), что уже используется для read-only показа. Оба слоя - .code-editor-input/
+// .code-editor-highlight - должны иметь идентичные font/line-height/padding/box-sizing (см.
+// CSS), иначе текст и подсветка разъедутся. Плюс "\n" в конце highlight - без него высота
+// последней пустой строки схлопывается и курсор туда "проваливается" визуально ниже подсветки.
+function syncRuleEditorHighlight() {
+  const ta = document.getElementById("rule-editor-yaml");
+  document.getElementById("rule-editor-highlight").innerHTML = highlightYaml(ta.value) + "\n";
+}
+function syncRuleEditorScroll() {
+  const ta = document.getElementById("rule-editor-yaml");
+  const hl = document.getElementById("rule-editor-highlight");
+  hl.scrollTop = ta.scrollTop;
+  hl.scrollLeft = ta.scrollLeft;
+}
+
+// mode - "create" (новое правило, показывает выбор целевого рулсета) или "edit" (правка
+// существующего - рулсет фиксирован, показывается статичной строкой). ctx: для create - {},
+// для edit - {ruleset, ruleId, yamlText}. Открывает ПОЛНОЭКРАННЫЙ вид (подменяет
+// #sigma-browse-panel внутри вкладки, не отдельная модалка/вкладка) - см. closeRuleEditor.
+function openRuleEditor(mode, ctx) {
+  ruleEditorMode = mode;
+  document.getElementById("rule-editor-title").textContent = mode === "edit" ? "Редактирование правила" : "Новое правило";
+  document.getElementById("rule-editor-target-row").style.display = mode === "create" ? "flex" : "none";
+  const staticTarget = document.getElementById("rule-editor-static-target");
+  let refRuleset;
+  if (mode === "edit") {
+    ruleEditorTarget = { ruleset: ctx.ruleset, ruleId: ctx.ruleId };
+    const entry = rulesetCatalog.find(r => r.path === ctx.ruleset);
+    staticTarget.textContent = `Рулсет: ${entry ? entry.name : ctx.ruleset}`;
+    staticTarget.style.display = "block";
+    refRuleset = ctx.ruleset;
+  } else {
+    ruleEditorTarget = null;
+    staticTarget.style.display = "none";
+    updateSigmaTargetMode("rule-editor");
+    refRuleset = document.getElementById("sigma-ruleset-select").value || (rulesetCatalog[0] && rulesetCatalog[0].path);
+  }
+  document.getElementById("rule-editor-yaml").value = ctx.yamlText || "";
+  document.getElementById("rule-editor-result").innerHTML = "";
+  syncRuleEditorHighlight();
+
+  document.getElementById("sigma-browse-panel").style.display = "none";
+  document.getElementById("sigma-editor-panel").style.display = "flex";
+  document.getElementById("rule-editor-ref-toolbar").style.display = "flex";
+
+  const refSelect = document.getElementById("rule-editor-ref-ruleset");
+  refSelect.innerHTML = rulesetOptionsHtml(rulesetCatalog, { includeMain: true });
+  if (refRuleset) refSelect.value = refRuleset;
+  loadEditorReferenceRules(0);
+  if (mode === "edit") {
+    selectEditorReferenceRule(ctx.ruleId, ctx.ruleset);
+  } else {
+    document.getElementById("rule-editor-ref-yaml").innerHTML = "";
+  }
+}
+
+function closeRuleEditor() {
+  document.getElementById("sigma-editor-panel").style.display = "none";
+  document.getElementById("sigma-browse-panel").style.display = "block";
+  document.getElementById("rule-editor-ref-toolbar").style.display = "none";
+}
+
+// Референс-панель редактора (справа) - список правил выбранного рулсета сверху, их
+// Sigma YAML (или SQL для builtin, у которых исходного YAML нет) снизу. Полностью независима
+// от того, что редактируется слева - клик по строке НЕ трогает #rule-editor-yaml.
+async function loadEditorReferenceRules(offset) {
+  const ruleset = document.getElementById("rule-editor-ref-ruleset").value;
+  const listBody = document.getElementById("rule-editor-ref-list-body");
+  if (!ruleset) { listBody.innerHTML = ""; return; }
+  const params = new URLSearchParams({ ruleset, limit: 200, offset });
+  const q = document.getElementById("rule-editor-ref-search").value.trim();
+  if (q) params.set("q", q);
+  try {
+    const res = await api("/rulesets/rules?" + params.toString());
+    // При просмотре "Основного рулсета" (ruleset === "main") каждая строка несёт свой настоящий
+    // source_ruleset (main - виртуальный список из нескольких реальных рулсетов сразу) - клик
+    // должен бить по нему, а не по значению селектора "main" (см. тот же приём в loadSigmaRules) -
+    // иначе /rulesets/rule?ruleset=main&... 404-ится, там нет такого реального рулсета.
+    listBody.innerHTML = res.rules.map(r => {
+      const rowRuleset = r.source_ruleset || ruleset;
+      return `
+      <div class="ref-rule-row" data-id="${attr(r.id || "")}" onclick="selectEditorReferenceRule('${escapeAttr(r.id || "")}', '${escapeAttr(rowRuleset)}')">
+        ${sevBar(r.level)}<span>${escapeHtml(r.title || "")}</span>
+      </div>
+    `;
+    }).join("") || '<p class="muted" style="padding:8px;">Нет правил</p>';
+  } catch (e) {
+    listBody.innerHTML = `<p class="error-state" style="padding:8px;">${e.message}</p>`;
+  }
+}
+
+async function selectEditorReferenceRule(ruleId, ruleset) {
+  document.querySelectorAll("#rule-editor-ref-list-body .ref-rule-row")
+    .forEach(el => el.classList.toggle("selected", el.dataset.id === ruleId));
+  const yamlEl = document.getElementById("rule-editor-ref-yaml");
+  const labelEl = document.getElementById("rule-editor-ref-yaml-label");
+  try {
+    const params = new URLSearchParams({ ruleset, rule_id: ruleId });
+    const r = await api("/rulesets/rule?" + params.toString());
+    if (r.yaml_text) {
+      labelEl.textContent = "Sigma YAML";
+      yamlEl.innerHTML = highlightYaml(r.yaml_text);
+    } else {
+      labelEl.textContent = "SQL (у встроенных правил нет исходного YAML)";
+      yamlEl.innerHTML = escapeHtml(Array.isArray(r.rule) ? r.rule.join("\n") : String(r.rule || ""));
+    }
+  } catch (e) {
+    yamlEl.innerHTML = `<span class="error-state">${e.message}</span>`;
+  }
+}
+
+async function saveRuleEditor() {
+  const resultEl = document.getElementById("rule-editor-result");
+  const yamlText = document.getElementById("rule-editor-yaml").value;
+  if (!yamlText.trim()) {
+    resultEl.innerHTML = '<span class="error-state">Вставь текст правила</span>';
+    return;
+  }
+  try {
+    let res;
+    if (ruleEditorMode === "edit") {
+      const params = new URLSearchParams({ ruleset: ruleEditorTarget.ruleset });
+      res = await api(`/rules/custom/${encodeURIComponent(ruleEditorTarget.ruleId)}?${params.toString()}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ yaml_text: yamlText }),
+      });
+      resultEl.innerHTML = `<span style="color:var(--accent)">Сохранено:</span> "${escapeHtml(res.title)}"`;
+      await refreshRulesetOptions();
+      loadSigmaRules(sigmaOffset);
+      selectSigmaRule(res.id, ruleEditorTarget.ruleset);
+    } else {
+      const target = readSigmaTarget("rule-editor", resultEl);
+      if (!target) return;
+      res = await api("/rules/custom", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ yaml_text: yamlText, ...target }),
+      });
+      resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> "${escapeHtml(res.title)}" скомпилировано и сохранено`;
+      document.getElementById("rule-editor-target-new").value = "";
+      await refreshRulesetOptions();
+      document.getElementById("sigma-ruleset-select").value = res.ruleset_path;
+      loadSigmaRules(0);
+    }
+    setTimeout(closeRuleEditor, 700);   // короткая пауза, чтобы пользователь увидел "Сохранено"/"Готово"
+  } catch (e) {
+    resultEl.innerHTML = `<span class="error-state">Ошибка: ${e.message}</span>`;
+  }
+}
+
+async function selectSigmaRule(ruleId, ruleset) {
+  document.querySelectorAll("#sigma-tbody tr").forEach(tr => tr.classList.toggle("selected", tr.dataset.id === ruleId));
+  const content = document.getElementById("rule-detail-content");
+  content.style.opacity = "0.45";
+  try {
+    const params = new URLSearchParams({ ruleset, rule_id: ruleId });
+    const r = await api("/rulesets/rule?" + params.toString());
+    const tags = (r.tags || []).map(t => `<span class="tech-tag">${escapeHtml(t)}</span>`).join(" ") || '<span class="muted">—</span>';
+    const fp = (r.falsepositives || []).join("; ") || "—";
+    const sqlText = Array.isArray(r.rule) ? r.rule.join("\n") : String(r.rule || "");
+    const rulesetEntry = rulesetCatalog.find(x => x.path === ruleset);
+    const isCustom = rulesetEntry && rulesetEntry.category === "custom";
+    currentSigmaRule = isCustom ? { ruleset, ruleId: r.id, yamlText: r.yaml_text || "" } : null;
+    const editBtn = isCustom
+      ? `<button type="button" style="margin-top:10px; margin-right:8px;" onclick="openRuleEditor('edit', currentSigmaRule)">Редактировать</button>`
+      : "";
+    const deleteBtn = isCustom
+      ? `<button type="button" class="ghost" style="margin-top:10px;" onclick="deleteCustomRule('${escapeAttr(r.id)}', '${escapeAttr(ruleset)}')">Удалить правило</button>`
+      : "";
+    // yaml_text приходит от бэкенда ТОЛЬКО для своих правил (custom_rulesets/<id>) - там
+    // хранится настоящий исходный YAML-файл. У встроенных рулсетов исходного YAML нет и не
+    // было никогда (только уже скомпилированный SQL), поэтому секция просто не рендерится.
+    const yamlSection = r.yaml_text
+      ? `<p class="panel-title" style="margin-top:14px;">Sigma YAML</p>
+         <pre class="json-block yaml-block">${highlightYaml(r.yaml_text)}</pre>`
+      : "";
+    content.innerHTML = `
+      <h3>${sevBar(r.level)}${escapeHtml(r.title || "")}</h3>
+      <p class="muted">${escapeHtml(r.description || "без описания")}</p>
+      <div style="margin:10px 0;">${tags}</div>
+      <div class="kv"><span>Статус</span><span>${escapeHtml(r.status || "—")}</span></div>
+      <div class="kv"><span>Автор</span><span>${escapeHtml(r.author || "—")}</span></div>
+      <div class="kv"><span>Канал</span><span>${(r.channel || []).join(", ") || "—"}</span></div>
+      <div class="kv"><span>EventID</span><span>${(r.eventid || []).join(", ") || "—"}</span></div>
+      <div class="kv"><span>False positives</span><span>${escapeHtml(fp)}</span></div>
+      ${editBtn}${deleteBtn}
+      ${yamlSection}
+      <p class="panel-title" style="margin-top:14px;">SQL</p>
+      <pre class="json-block">${escapeHtml(sqlText)}</pre>
+    `;
+  } catch (e) {
+    content.innerHTML = `<p class="error-state">Ошибка: ${e.message}</p>`;
+  } finally {
+    content.style.opacity = "1";
+  }
+}
+
+// prefix - "sigma-upload" или "rule-editor". Возвращает {ruleset} либо {new_ruleset_name},
+// либо null (и пишет сообщение об ошибке в resultEl), если выбор не заполнен.
+function readSigmaTarget(prefix, resultEl) {
+  const mode = document.querySelector(`input[name="${prefix}-target-mode"]:checked`).value;
+  if (mode === "new") {
+    const name = document.getElementById(`${prefix}-target-new`).value.trim();
+    if (!name) {
+      resultEl.innerHTML = '<span class="error-state">Укажи название нового рулсета</span>';
+      return null;
+    }
+    return { new_ruleset_name: name };
+  }
+  const ruleset = document.getElementById(`${prefix}-target-existing`).value;
+  if (!ruleset) {
+    resultEl.innerHTML = '<span class="error-state">Выбери существующий рулсет (или переключись на "новый")</span>';
+    return null;
+  }
+  return { ruleset };
+}
+
+async function runRulesetUpload() {
+  const resultEl = document.getElementById("sigma-upload-result");
+  const fileInput = document.getElementById("sigma-upload-file");
+  if (!fileInput.files.length) {
+    resultEl.innerHTML = '<span class="error-state">Сначала выбери файл</span>';
+    return;
+  }
+  const target = readSigmaTarget("sigma-upload", resultEl);
+  if (!target) return;
+  resultEl.innerHTML = '<span class="muted">Загрузка...</span>';
+  try {
+    const formData = new FormData();
+    formData.append("file", fileInput.files[0]);
+    if (target.ruleset) formData.append("ruleset", target.ruleset);
+    if (target.new_ruleset_name) formData.append("new_ruleset_name", target.new_ruleset_name);
+    const res = await api("/rulesets/upload", { method: "POST", body: formData });
+    resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> ${escapeHtml(res.name)} (${res.rule_count} правил)`;
+    fileInput.value = "";
+    document.getElementById("sigma-upload-target-new").value = "";
+    await refreshRulesetOptions();
+    document.getElementById("sigma-ruleset-select").value = res.path;
+    loadSigmaRules(0);
+  } catch (e) {
+    resultEl.innerHTML = `<span class="error-state">Ошибка: ${e.message}</span>`;
+  }
+}
+
+async function deleteRuleset(path) {
+  if (!path || !confirm("Удалить рулсет и все его правила из каталога?")) return;
+  try {
+    await api("/rulesets?" + new URLSearchParams({ ruleset: path }).toString(), { method: "DELETE" });
+    await refreshRulesetOptions();
+    loadSigmaRules(0);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+async function deleteCustomRule(ruleId, ruleset) {
+  if (!confirm("Удалить это правило?")) return;
+  try {
+    const params = new URLSearchParams({ ruleset });
+    await api("/rules/custom/" + encodeURIComponent(ruleId) + "?" + params.toString(), { method: "DELETE" });
+    document.getElementById("rule-detail-content").innerHTML =
+      '<p class="muted">Выбери правило в списке слева, чтобы увидеть детали.</p>';
+    await refreshRulesetOptions();
+    loadSigmaRules(0);
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+// Боковые панели (детали алерта/события, группировка) растут/сужаются через style.width;
+// их грид-колонка держится не жёстким px, а CSS-переменной (gridVar на gridEl), которую JS
+// всегда синхронизирует с фактической шириной панели - трек грида в точности равен панели,
+// поэтому нет ни пустого зазора при сужении (трек шире панели), ни наезда при расширении
+// (трек уже панели): раньше трек был фиксирован в CSS, а компенсировался только отступом
+// у table-scroll при РОСТЕ панели - при сужении ниже дефолта отступ не мог стать отрицательным
+// и в гриде оставалась пустая полоса между панелью и соседней колонкой.
+// anchor "end"   - панель справа (детали), тянем влево.
+// anchor "start" - панель слева (группировка), тянем вправо.
+const PANEL_RESIZE_CONFIG = {
+  "alert-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "alerts-content-grid", gridVar: "--alert-detail-w" },
+  "event-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "events-grid", gridVar: "--event-detail-w" },
+  "group-panel-wrap": { defaultWidth: 280, minWidth: 200, maxWidth: 640, anchor: "start", gridEl: "events-grid", gridVar: "--group-col-w" },
+  // gridVar переиспользует имя "--alert-detail-w" - переменная резолвится per-element (JS пишет
+  // её как inline style конкретного грид-элемента), поэтому одно и то же имя у #sigma-content-grid
+  // и #alerts-content-grid работает независимо, новый CSS-класс не нужен (см. .content-grid).
+  "rule-detail": { defaultWidth: 700, minWidth: 300, maxWidth: 900, anchor: "end", gridEl: "sigma-content-grid", gridVar: "--alert-detail-w" },
+  // gridEl - #main-panel (общий предок и .editor-grid, и вынесенного в строку "Источник:"
+  // #rule-editor-ref-toolbar), а НЕ #editor-grid - иначе CSS-переменная не дотягивалась бы до
+  // toolbar, живущего выше editor-grid по DOM (см. комментарий у .editor-grid).
+  "editor-reference-pane": { defaultWidth: 600, minWidth: 320, maxWidth: 780, anchor: "end", gridEl: "main-panel", gridVar: "--editor-ref-w" },
+};
+
+function setGridTrackWidth(cfg, widthPx) {
+  const grid = document.getElementById(cfg.gridEl);
+  if (grid) grid.style.setProperty(cfg.gridVar, widthPx + "px");
+}
+
+function makeResizable(handleId, panelId) {
+  const cfg = PANEL_RESIZE_CONFIG[panelId];
+  const handle = document.getElementById(handleId);
+  const panel = document.getElementById(panelId);
+
+  handle.addEventListener("mousedown", (startEv) => {
+    startEv.preventDefault();
+    const startX = startEv.clientX;
+    const startWidth = panel.getBoundingClientRect().width;
+    handle.classList.add("active");
+    document.body.style.userSelect = "none";
+
+    function onMove(moveEv) {
+      const delta = cfg.anchor === "end" ? (startX - moveEv.clientX) : (moveEv.clientX - startX);
+      const maxWidth = cfg.maxWidth || Math.min(window.innerWidth * 0.9, 1100);
+      const newWidth = Math.max(cfg.minWidth, Math.min(startWidth + delta, maxWidth));
+      panel.style.width = newWidth + "px";
+      setGridTrackWidth(cfg, newWidth);
+    }
+    function onUp() {
+      handle.classList.remove("active");
+      document.body.style.userSelect = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+function resetPanelWidth(panelId) {
+  const cfg = PANEL_RESIZE_CONFIG[panelId];
+  document.getElementById(panelId).style.width = cfg.defaultWidth + "px";
+  setGridTrackWidth(cfg, cfg.defaultWidth);
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+}
+
+function escapeAttr(str) {
+  return String(str).replace(/['"\\]/g, "\\$&");
+}
+
+// Экранирование для значения HTML-атрибута (value="...", title="...").
+function attr(str) {
+  return String(str).replace(/[&"<>]/g, c => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
+document.getElementById("batch-select").addEventListener("change", refreshActiveTab);
+
+// Синхронизация overlay-подсветки (#rule-editor-highlight) с живым вводом в #rule-editor-yaml -
+// см. syncRuleEditorHighlight/syncRuleEditorScroll. Tab вставляет 2 пробела вместо перевода
+// фокуса - Sigma YAML чувствителен к отступам, нативное поведение Tab в textarea тут мешает.
+const ruleEditorTextarea = document.getElementById("rule-editor-yaml");
+ruleEditorTextarea.addEventListener("input", syncRuleEditorHighlight);
+ruleEditorTextarea.addEventListener("scroll", syncRuleEditorScroll);
+ruleEditorTextarea.addEventListener("keydown", e => {
+  if (e.key !== "Tab") return;
+  e.preventDefault();
+  const { selectionStart: s, selectionEnd: eEnd, value } = ruleEditorTextarea;
+  ruleEditorTextarea.value = value.slice(0, s) + "  " + value.slice(eEnd);
+  ruleEditorTextarea.selectionStart = ruleEditorTextarea.selectionEnd = s + 2;
+  syncRuleEditorHighlight();
+});
+
+makeResizable("alert-detail-handle", "alert-detail");
+makeResizable("event-detail-handle", "event-detail");
+makeResizable("group-panel-handle", "group-panel-wrap");
+makeResizable("rule-detail-handle", "rule-detail");
+makeResizable("editor-reference-handle", "editor-reference-pane");
+// Второй хэндл на границе editor/refyaml - управляет ТОЙ ЖЕ колонкой (см. комментарий у
+// .editor-reference-yaml в CSS), просто удобнее тянуть прямо на границе с самим редактором.
+makeResizable("editor-refyaml-handle", "editor-reference-pane");
+// rule-detail/editor-reference-pane имеют defaultWidth, ОТЛИЧНЫЙ от общего фолбэка var(...,380px)
+// в CSS grid-template-columns их грида (см. комментарии у #rule-detail/.editor-reference-pane) -
+// без явного resetPanelWidth тут грид-трек остался бы 380px, а сама панель отрисовалась бы шире
+// заданного треку места и наезжала на соседнюю колонку (ловили визуально: ~300px таблицы
+// правил перекрывались панелью просмотра). alert-detail/event-detail/group-panel-wrap этого
+// не требуют - их defaultWidth совпадает с фолбэком.
+resetPanelWidth("rule-detail");
+resetPanelWidth("editor-reference-pane");
+wireGroupColumnResize();
+applyGroupValueWidth();
+
+startHealthPolling();
+refreshBatches();
+refreshRulesetOptions();
+renderEventFieldChips();
+renderFieldsetSelect();
+loadAlerts();
+</script>
+
+</body>
+</html>
