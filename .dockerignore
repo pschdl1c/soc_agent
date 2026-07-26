@@ -1,0 +1,35 @@
+# Внешние клоны со своим .git (не нужны в build-контексте - Zircolite клонируется заново
+# внутри Dockerfile на зафиксированном теге, artifacts вообще не нужен в образе; исключаем,
+# чтобы не гонять лишние сотни МБ/1ГБ+ в контекст сборки, см. CLAUDE.md §1/§6).
+/Zircolite/
+/artifacts/
+
+# Виртуальное окружение / Python-мусор
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# БД и runtime-данные (монтируются как volume, см. docker-compose.yml)
+*.db
+*.db-shm
+*.db-wal
+uploads/
+custom_rulesets/
+/data/
+
+# Секреты/локальный конфиг
+.env
+
+# Git/IDE/тесты/документация - не нужны внутри образа
+.git/
+.idea/
+.vscode/
+.pytest_cache/
+tests/
+docs/
+README.md
+CLAUDE.md
+todo.txt
+pic.PNG
+sample_multi_ruleset.yml

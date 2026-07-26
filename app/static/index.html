@@ -2375,6 +2375,35 @@ function syncRuleEditorScroll() {
 // существующего - рулсет фиксирован, показывается статичной строкой). ctx: для create - {},
 // для edit - {ruleset, ruleId, yamlText}. Открывает ПОЛНОЭКРАННЫЙ вид (подменяет
 // #sigma-browse-panel внутри вкладки, не отдельная модалка/вкладка) - см. closeRuleEditor.
+// UUID4 в стандартном Sigma-формате (с дефисами) - pySigma парсит 'id' через uuid.UUID(),
+// который требует именно hex-символы (с дефисами или без - не принципиально, но дефисы это
+// формат, в котором сообщество пишет Sigma-правила, и наш бэкенд их разрешает - _SAFE_ID_RE
+// не про валидность uuid, а только про безопасность имени файла <id>.yml). Префилл нужен,
+// чтобы аналитик, копируя существующее правило как черновик, не унёс с собой чужой id -
+// см. _find_rule_id_owner в app/rules_catalog.py (реальная защита от коллизий - там,
+// это лишь снижает шанс в неё упереться).
+function generateRuleId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const hex = () => Math.floor(Math.random() * 16).toString(16);
+  const block = (n) => Array.from({ length: n }, hex).join("");
+  return `${block(8)}-${block(4)}-4${block(3)}-${"89ab"[Math.floor(Math.random() * 4)]}${block(3)}-${block(12)}`;
+}
+
+function newRuleTemplate() {
+  return `title:
+id: ${generateRuleId()}
+status: experimental
+logsource:
+  category:
+  product:
+detection:
+  selection:
+
+  condition: selection
+level: medium
+`;
+}
+
 function openRuleEditor(mode, ctx) {
   ruleEditorMode = mode;
   document.getElementById("rule-editor-title").textContent = mode === "edit" ? "Редактирование правила" : "Новое правило";
@@ -2393,7 +2422,7 @@ function openRuleEditor(mode, ctx) {
     updateSigmaTargetMode("rule-editor");
     refRuleset = document.getElementById("sigma-ruleset-select").value || (rulesetCatalog[0] && rulesetCatalog[0].path);
   }
-  document.getElementById("rule-editor-yaml").value = ctx.yamlText || "";
+  document.getElementById("rule-editor-yaml").value = ctx.yamlText || (mode === "create" ? newRuleTemplate() : "");
   document.getElementById("rule-editor-result").innerHTML = "";
   syncRuleEditorHighlight();
 
@@ -2589,6 +2618,10 @@ async function runRulesetUpload() {
     if (target.new_ruleset_name) formData.append("new_ruleset_name", target.new_ruleset_name);
     const res = await api("/rulesets/upload", { method: "POST", body: formData });
     resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> ${escapeHtml(res.name)} (${res.rule_count} правил)`;
+    if (res.collisions && res.collisions.length) {
+      const rows = res.collisions.map(c => `<li>${escapeHtml(c.id)}.yml "${escapeHtml(c.title || "")}" - id уже занят правилом "${escapeHtml(c.conflict_title || "")}" в рулсете ${escapeHtml(c.conflict_ruleset)}; НЕ добавлено</li>`).join("");
+      resultEl.innerHTML += `<div class="error-state" style="margin-top:6px;">Пропущено из-за конфликта id (${res.collisions.length}):<ul style="margin:4px 0 0 18px; padding:0;">${rows}</ul></div>`;
+    }
     fileInput.value = "";
     document.getElementById("sigma-upload-target-new").value = "";
     await refreshRulesetOptions();

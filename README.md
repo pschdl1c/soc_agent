@@ -17,6 +17,7 @@
 - [Установка](#установка)
 - [Запуск](#запуск)
 - [Конфигурация (.env)](#конфигурация-env)
+- [Docker](#docker)
 - [Тесты](#тесты)
 - [Быстрый старт: первый прогон логов](#быстрый-старт-первый-прогон-логов)
 - [Архитектура и поток данных](#архитектура-и-поток-данных)
@@ -128,11 +129,58 @@ copy .env.example .env
 | `SIEM_DB_PATH` | `<корень>/siem.db` | Путь к файлу SQLite |
 | `SIEM_ZIRCOLITE_CONFIG_PATH` | `<корень>/Zircolite/config/config.yaml` | Конфиг движка Zircolite |
 | `SIEM_DEFAULT_RULESET_PATH` | `<корень>/Zircolite/rules/rules_windows_merged.json` | Рулсет по умолчанию для `/ingest/file`·`/ingest/upload` без явного `ruleset` |
-| `SIEM_UPLOADS_DIR` | `<корень>/uploads` | Куда сохраняются файлы, загруженные через UI |
+| `SIEM_UPLOADS_DIR` | `<корень>/data/uploads` | Куда сохраняются файлы, загруженные через UI |
 | `SIEM_HOST` / `SIEM_PORT` | `127.0.0.1` / `8000` | Используются только при `python -m app.main`; для `uvicorn app.main:app` хост/порт задаются флагами CLI |
 | `SIEM_INGEST_BATCH_SIZE` / `SIEM_INGEST_FLUSH_INTERVAL` | `500` / `5.0` | Политика микро-батчинга потокового ingest (`app/ingest_queue.py`) |
 
 Явно выставленная переменная окружения всегда имеет приоритет над значением из `.env`.
+
+## Docker
+
+```powershell
+docker compose up -d --build
+```
+
+- Веб-консоль/Swagger/health — те же адреса, что и без Docker: http://localhost:8000/,
+  http://localhost:8000/docs, http://localhost:8000/health.
+- `docker-compose.yml` пробрасывает порт 8000 и монтирует runtime-данные:
+  - `siem.db` — **именованный volume** (`siem_db`), НЕ bind-mount. На Docker Desktop с
+    WSL2-бэкендом (Windows) bind-mount на путь хоста (`D:\...`) означает, что каждое
+    обращение SQLite идёт через границу Windows↔WSL2 - при частых мелких random-read
+    (`GROUP BY`/фильтр с `json_extract` по каждой строке `events`) это даёт замеренную
+    просадку на порядок (~3.3с против ~0.25с на идентичном файле/запросе — bind-mount vs
+    native). Именованный volume физически живёт на диске самой Docker VM (WSL2-диск), без
+    пересечения границы - скорость как без Docker вовсе. Обратная сторона - siem.db
+    больше не открыть напрямую из Windows (Проводник/DB Browser); посмотреть содержимое -
+    `docker compose exec soc_agent sqlite3 /app/db/siem.db` или скопировать наружу
+    (`docker cp soc_agent-soc_agent-1:/app/db/siem.db .`).
+  - `./data/uploads` и `./data/custom_rulesets` (bind-mount, монтируются в `/app/data/uploads`
+    и `/app/data/custom_rulesets`) - те же дефолтные пути, что и при запуске **без** Docker
+    (`app/config.py:UPLOADS_DIR`, `app/rules_catalog.py:CUSTOM_ROOT` резолвят их
+    относительно корня проекта в `./data/uploads`/`./data/custom_rulesets` в обоих
+    случаях) - один и тот же файл на диске, что бы вы ни выбрали для запуска, без ручной
+    синхронизации между режимами. Эти два - не на горячем пути (редкие целые файлы, не
+    тысячи мелких обращений на HTTP-запрос), поэтому bind-mount тут не мешает и даёт
+    видимость файлов с хоста.
+
+  Все три переживают `docker compose down`/пересборку образа. `./data/uploads`·
+  `./data/custom_rulesets` удаляются вручную (`rm -rf data`); `siem_db` - `docker compose
+  down -v` или `docker volume rm soc_agent_siem_db`.
+- `Dockerfile` — multi-stage: в builder-слое клонируется `Zircolite`
+  (движок детекта — внешний репозиторий, импортируется как библиотека, не pip-пакет, см.
+  [Стек](#стек)) на зафиксированном теге (`ZIRCOLITE_REF`, по умолчанию `v3.7.6` — версия,
+  реально используемая при разработке; поменять — `docker compose build --build-arg
+  ZIRCOLITE_REF=v3.x.x`), в runtime-слое — только venv и код приложения, без git/компиляторов,
+  под непривилегированным пользователем.
+- Конфигурация — те же переменные, что в [.env](#конфигурация-env), заданы в `environment:`
+  блоке `docker-compose.yml` (`SIEM_HOST=0.0.0.0` обязательно — иначе сервер слушает только
+  локалхост контейнера и порт наружу не пробросится; остальные — по необходимости).
+- Готовый образ без compose: `docker build -t soc_agent . && docker run -p 8000:8000
+  -v siem_db:/app/db -v "${PWD}/data/uploads:/app/data/uploads" -v
+  "${PWD}/data/custom_rulesets:/app/data/custom_rulesets" -e SIEM_HOST=0.0.0.0 soc_agent`.
+- ⚠️ Как и без Docker — сервис не имеет аутентификации (см.
+  [Известные ограничения](#известные-ограничения)); пробрасывать порт 8000 наружу localhost
+  можно только за доверенным периметром/reverse-proxy с своей авторизацией.
 
 ## Тесты
 
@@ -230,11 +278,15 @@ soc_agent/
 │   └── static/index.html   вся веб-консоль (один файл, без сборки)
 ├── Zircolite/              внешний клон движка детекта (не редактируется)
 ├── artifacts/              внешний клон тестовых датасетов (Security-Datasets)
-├── custom_rulesets/        пользовательские Sigma-правила/рулсеты (создаётся автоматически)
+├── data/                   runtime-данные, общие для локального запуска И Docker (создаётся автоматически)
+│   ├── custom_rulesets/    пользовательские Sigma-правила/рулсеты (app/rules_catalog.py:CUSTOM_ROOT)
+│   └── uploads/            загруженные через UI/API файлы логов (app/config.py:UPLOADS_DIR)
 ├── docs/forwarder.md        протокол потокового ingest для форвардеров
 ├── scripts/                вспомогательные скрипты для ручного тестирования
-├── uploads/                загруженные через UI файлы логов
-└── siem.db                 SQLite-база (алерты + события)
+├── siem.db                 SQLite-база локального (без Docker) запуска (алерты + события) - в Docker своя, см. Docker
+├── Dockerfile              multi-stage сборка (клон Zircolite + venv + код), см. Docker
+├── docker-compose.yml      сервис с портом 8000; siem.db - named volume (отдельно от локальной БД), data/ - bind-mount
+└── .dockerignore           исключения build-контекста (Zircolite/artifacts клонируются заново)
 ```
 
 ## Веб-консоль

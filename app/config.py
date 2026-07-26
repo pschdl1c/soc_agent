@@ -20,7 +20,7 @@ ZIRCOLITE_CONFIG_PATH = os.getenv(
 DEFAULT_RULESET_PATH = os.getenv(
     "SIEM_DEFAULT_RULESET_PATH", str(BASE_DIR / "Zircolite" / "rules" / "rules_windows_merged.json")
 )
-UPLOADS_DIR = Path(os.getenv("SIEM_UPLOADS_DIR", str(BASE_DIR / "uploads")))
+UPLOADS_DIR = Path(os.getenv("SIEM_UPLOADS_DIR", str(BASE_DIR / "data" / "uploads")))
 
 HOST = os.getenv("SIEM_HOST", "127.0.0.1")
 PORT = int(os.getenv("SIEM_PORT", "8000"))

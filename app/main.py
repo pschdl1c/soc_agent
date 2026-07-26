@@ -499,10 +499,10 @@ async def upload_ruleset(
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл как UTF-8: {exc}")
     try:
-        info, _target_path = rules_catalog.save_ruleset_yaml(yaml_text, ruleset, new_ruleset_name)
+        info, _target_path, collisions = rules_catalog.save_ruleset_yaml(yaml_text, ruleset, new_ruleset_name)
     except (CatalogError, RuleValidationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return info
+    return {**info, "collisions": collisions}
 
 
 @app.delete("/rulesets")

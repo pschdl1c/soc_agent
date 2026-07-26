@@ -50,7 +50,12 @@ from zircolite.config import RulesetConfig  # noqa: E402
 from zircolite.rules import RulesetHandler  # noqa: E402
 
 BUILTIN_RULES_DIR = BASE_DIR / "Zircolite" / "rules"
-CUSTOM_ROOT = BASE_DIR / "custom_rulesets"
+# data/ - общий корень runtime-данных для локального запуска И Docker (см. app/config.py:
+# UPLOADS_DIR, docker-compose.yml). BASE_DIR тут - корень проекта локально, /app в контейнере -
+# в обоих случаях "data/custom_rulesets" резолвится в ОДИН и тот же физический путь на хосте
+# (локально - напрямую, в Docker - через bind-mount ./data/custom_rulesets:/app/data/custom_rulesets),
+# без отдельной env-переменной.
+CUSTOM_ROOT = BASE_DIR / "data" / "custom_rulesets"
 
 CUSTOM_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -409,6 +414,20 @@ def _safe_rule_id(candidate: str | None) -> str:
     return uuid4().hex
 
 
+def _find_rule_id_owner(rule_id: str) -> tuple[str, str] | None:
+    """Ищет rule_id среди ВСЕХ рулсетов (builtin + все custom). Возвращает (ruleset_path,
+    title) владельца или None, если id свободен. Нужно для save_custom_rule/save_ruleset_yaml:
+    там rule_id уходит прямо в имя файла ВНУТРИ целевого рулсета (совпадение = тихая
+    перезапись чужого правила), а совпадение с id в ДРУГОМ рулсете отдельно ломает dedup_key
+    алертов (rule_id:host:main_entity, см. normalize._dedup_key) - два логически разных
+    правила схлопнулись бы в один алерт (инкремент event_count вместо новой записи)."""
+    for entry in list_rulesets():
+        for rule in load_rules(entry["path"]):
+            if rule.get("id") == rule_id:
+                return entry["path"], str(rule.get("title") or "")
+    return None
+
+
 def compile_custom_rule(yaml_text: str) -> dict[str, Any]:
     """Валидация + компиляция ОДНОГО правила БЕЗ сохранения на диск (переиспользуется в
     save_custom_rule).
@@ -466,7 +485,17 @@ def save_custom_rule(
     target = _resolve_target_ruleset(ruleset, new_ruleset_name)
     target_dir = _custom_ruleset_dir(target)
     compiled = compile_custom_rule(yaml_text)
-    rule_id = _safe_rule_id(compiled.get("id"))
+    candidate = compiled.get("id")
+    rule_id = _safe_rule_id(candidate)
+    if candidate and rule_id == candidate:
+        owner = _find_rule_id_owner(rule_id)
+        if owner is not None:
+            owner_ruleset, owner_title = owner
+            raise RuleValidationError(
+                f"id '{rule_id}' уже используется правилом '{owner_title}' в рулсете "
+                f"'{owner_ruleset}' - укажи другой id или убери поле 'id' из YAML, чтобы он "
+                "сгенерировался автоматически."
+            )
     compiled["id"] = rule_id
     (target_dir / f"{rule_id}.yml").write_text(yaml_text, encoding="utf-8")
     manifest_path = target_dir / ".manifest.json"
@@ -479,38 +508,71 @@ def save_custom_rule(
 
 def save_ruleset_yaml(
     yaml_text: str, ruleset: str | None = None, new_ruleset_name: str | None = None
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
     """Компилирует и сохраняет ЦЕЛЫЙ рулсет (один или несколько Sigma-правил в одном YAML-
     файле) в существующий или новый именованный custom-рулсет. Возвращает (обновлённая
-    сводка рулсета, ruleset_path)."""
+    сводка рулсета, ruleset_path, collisions).
+
+    Правило с явным id, который уже занят - ГДЕ УГОДНО (в любом другом рулсете, в этом же
+    целевом рулсете от предыдущей загрузки, или дубликат внутри ЭТОГО ЖЕ multi-document
+    файла) - НЕ добавляется; уже существующий владелец id не трогается. Это частичный успех:
+    остальные правила файла без коллизий сохраняются как обычно, ошибка не поднимается на
+    весь запрос. collisions - список {title, id, conflict_ruleset, conflict_title} для UI
+    (что именно и с чем не добавилось) - см. app/main.py:upload_ruleset."""
     target = _resolve_target_ruleset(ruleset, new_ruleset_name)
     target_dir = _custom_ruleset_dir(target)
     compiled_rules = compile_ruleset_yaml(yaml_text)
     doc_by_title = _match_yaml_by_title(_split_yaml_documents(yaml_text))
     manifest_path = target_dir / ".manifest.json"
+    collisions: list[dict[str, Any]] = []
     with _manifest_lock:
         manifest_by_id = {r.get("id"): r for r in _load_manifest_uncached(manifest_path)}
         for compiled in compiled_rules:
-            rule_id = _safe_rule_id(compiled.get("id"))
+            candidate = compiled.get("id")
+            rule_id = _safe_rule_id(candidate)
+            if candidate and rule_id == candidate:
+                # Сначала целевой рулсет (уже загруженные ранее + добавленные чуть раньше в
+                # ЭТОМ ЖЕ цикле, manifest_by_id пополняется по ходу) - дешевле и ловит
+                # внутрифайловый дубль, который _find_rule_id_owner (читает с диска) не
+                # увидит, пока манифест не записан.
+                existing = manifest_by_id.get(rule_id)
+                owner = (target, str(existing.get("title") or "")) if existing else _find_rule_id_owner(rule_id)
+                if owner is not None:
+                    owner_ruleset, owner_title = owner
+                    collisions.append({
+                        "title": compiled.get("title"),
+                        "id": rule_id,
+                        "conflict_ruleset": owner_ruleset,
+                        "conflict_title": owner_title,
+                    })
+                    continue
             compiled["id"] = rule_id
             manifest_by_id[rule_id] = compiled
             source_doc = doc_by_title.get(compiled.get("title"))
             if source_doc is not None:
                 (target_dir / f"{rule_id}.yml").write_text(source_doc, encoding="utf-8")
         _write_manifest(manifest_path, list(manifest_by_id.values()))
-    return _custom_ruleset_info(target_dir / "meta.json"), target
+    return _custom_ruleset_info(target_dir / "meta.json"), target, collisions
 
 
 def update_custom_rule(ruleset_path: str, rule_id: str, yaml_text: str) -> dict[str, Any]:
     """Пересобирает СУЩЕСТВУЮЩЕЕ правило на месте - id всегда остаётся ИСХОДНЫМ (rule_id из
-    URL), даже если в новом YAML указан другой/отсутствует 'id:' - редактирование не должно
-    незаметно переименовывать файл/manifest-запись (для настоящего переименования нужно
-    удалить старое правило и создать новое явно - осознанно не поддерживается одной кнопкой)."""
+    URL). Если новый YAML явно содержит ДРУГОЙ id - это RuleValidationError (400), не тихая
+    перезапись: пользователь должен явно увидеть, что id менять нельзя, а не молча получить
+    сохранённое правило с незаметно отброшенным id (для настоящего переименования нужно
+    удалить старое правило и создать новое явно - осознанно не поддерживается одной кнопкой).
+    Пустой/отсутствующий 'id:' в новом YAML - не ошибка, просто подставляется исходный."""
     target_dir = _custom_ruleset_dir(ruleset_path)
     rule_path = (target_dir / f"{rule_id}.yml").resolve()
     if not rule_path.is_relative_to(target_dir.resolve()) or not rule_path.is_file():
         raise CatalogError(f"Правило не найдено: {rule_id}")
     compiled = compile_custom_rule(yaml_text)
+    candidate = compiled.get("id")
+    if candidate and candidate != rule_id:
+        raise RuleValidationError(
+            f"Менять id при редактировании нельзя - оставь 'id: {rule_id}' (или убери строку "
+            "'id:' вовсе, исходный id подставится автоматически)."
+        )
     compiled["id"] = rule_id
     rule_path.write_text(yaml_text, encoding="utf-8")
     manifest_path = target_dir / ".manifest.json"

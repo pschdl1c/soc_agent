@@ -1,0 +1,37 @@
+services:
+  soc_agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: soc_agent:latest
+    ports:
+      - "8000:8000"
+    environment:
+      SIEM_HOST: "0.0.0.0"
+      SIEM_PORT: "8000"
+      SIEM_DB_PATH: /app/db/siem.db
+      # SIEM_UPLOADS_DIR не задаём - дефолт app/config.py (BASE_DIR/data/uploads) уже
+      # резолвится в /app/data/uploads, тот же относительный "data/..." путь, что и при
+      # локальном запуске без Docker (см. README §Docker) - явно переопределять незачем.
+      # Остальные переменные (SIEM_INGEST_BATCH_SIZE/SIEM_INGEST_FLUSH_INTERVAL и т.п., см.
+      # .env.example) - при необходимости добавляй сюда же, они переопределяют дефолты
+      # app/config.py.
+    volumes:
+      # siem.db - именованный volume (не bind-mount): живёт на диске Docker Desktop
+      # внутри WSL2-VM. Bind-mount на Windows-хост (D:\...) тут не годится - каждое
+      # обращение SQLite (а их на один запрос группировки/фильтра - сотни, json_extract
+      # по каждой строке) идёт через границу Windows\WSL2 и даёт ~10x просадку (замеряно:
+      # 3.3с vs 0.25с на идентичном файле/запросе). Поэтому siem.db НЕ живёт в общем ./data -
+      # локальный (без Docker) запуск и Docker используют РАЗНЫЕ файлы для БД, см. README.
+      #
+      # uploads/custom_rulesets - на эту границу не бьют так часто (редкие целые файлы, не
+      # тысячи мелких random-read на запрос) - им bind-mount не мешает, и путь ЦЕЛИКОМ общий
+      # с локальным запуском (app/config.py:UPLOADS_DIR, app/rules_catalog.py:CUSTOM_ROOT
+      # дефолтят туда же) - что добавлено локально, видно и в Docker, и наоборот.
+      - siem_db:/app/db
+      - ./data/uploads:/app/data/uploads
+      - ./data/custom_rulesets:/app/data/custom_rulesets
+    restart: unless-stopped
+
+volumes:
+  siem_db:

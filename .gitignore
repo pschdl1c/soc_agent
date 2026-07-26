@@ -26,6 +26,10 @@ custom_rulesets/
 /Zircolite/
 /artifacts/
 
+# Bind-mount данных Docker-контейнера (uploads/custom_rulesets - см. docker-compose.yml;
+# siem.db там же живёт как именованный Docker volume, не под этим путём - см. README §Docker)
+/data/
+
 # IDE
 .idea/
 .vscode/
