@@ -24,14 +24,23 @@ services:
       # 3.3с vs 0.25с на идентичном файле/запросе). Поэтому siem.db НЕ живёт в общем ./data -
       # локальный (без Docker) запуск и Docker используют РАЗНЫЕ файлы для БД, см. README.
       #
-      # uploads/custom_rulesets - на эту границу не бьют так часто (редкие целые файлы, не
-      # тысячи мелких random-read на запрос) - им bind-mount не мешает, и путь ЦЕЛИКОМ общий
-      # с локальным запуском (app/config.py:UPLOADS_DIR, app/rules_catalog.py:CUSTOM_ROOT
-      # дефолтят туда же) - что добавлено локально, видно и в Docker, и наоборот.
+      # uploads/custom_rulesets - тоже именованные volume-ы, не bind-mount. Причина не
+      # производительность (эти пути не на горячем пути, редкие целые файлы), а права:
+      # Dockerfile чаунит их на непривилегированного app-пользователя на этапе СБОРКИ образа,
+      # а bind-mount с хоста при старте контейнера подменял бы каталог целиком вместе с
+      # владельцем - на Docker Desktop (Windows/WSL2) хостовые папки, которые Docker создаёт
+      # сам при первом `up`, достаются root:root, и app не может в них писать
+      # (PermissionError на /ingest/upload). Именованный volume при первой инициализации
+      # Docker сам копирует туда содержимое ИЗ ОБРАЗА, включая права - проблема просто не
+      # возникает, без доп. скриптов/entrypoint. Обратная сторона - файлы не видны напрямую
+      # с хоста (Проводник) и не общие с локальным (без Docker) запуском, как раньше;
+      # посмотреть - `docker compose exec soc_agent ls /app/data/uploads` или `docker cp`.
       - siem_db:/app/db
-      - ./data/uploads:/app/data/uploads
-      - ./data/custom_rulesets:/app/data/custom_rulesets
+      - siem_uploads:/app/data/uploads
+      - siem_custom_rulesets:/app/data/custom_rulesets
     restart: unless-stopped
 
 volumes:
   siem_db:
+  siem_uploads:
+  siem_custom_rulesets:

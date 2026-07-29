@@ -151,18 +151,23 @@ docker compose up -d --build
     больше не открыть напрямую из Windows (Проводник/DB Browser); посмотреть содержимое -
     `docker compose exec soc_agent sqlite3 /app/db/siem.db` или скопировать наружу
     (`docker cp soc_agent-soc_agent-1:/app/db/siem.db .`).
-  - `./data/uploads` и `./data/custom_rulesets` (bind-mount, монтируются в `/app/data/uploads`
-    и `/app/data/custom_rulesets`) - те же дефолтные пути, что и при запуске **без** Docker
-    (`app/config.py:UPLOADS_DIR`, `app/rules_catalog.py:CUSTOM_ROOT` резолвят их
-    относительно корня проекта в `./data/uploads`/`./data/custom_rulesets` в обоих
-    случаях) - один и тот же файл на диске, что бы вы ни выбрали для запуска, без ручной
-    синхронизации между режимами. Эти два - не на горячем пути (редкие целые файлы, не
-    тысячи мелких обращений на HTTP-запрос), поэтому bind-mount тут не мешает и даёт
-    видимость файлов с хоста.
+  - `siem_uploads`/`siem_custom_rulesets` — тоже именованные volume-ы (не bind-mount на
+    `./data/*`, как можно было бы ожидать по аналогии с локальным запуском). Причина - права,
+    не производительность (эти пути не на горячем пути, редкие целые файлы): `Dockerfile`
+    чаунит `/app/data/uploads`·`/app/data/custom_rulesets` на непривилегированного
+    `app`-пользователя на этапе сборки образа, а bind-mount с хоста при старте подменял бы
+    каталог целиком вместе с владельцем - на Docker Desktop (особенно Windows/WSL2) хостовая
+    папка, которую Docker создаёт сам при первом `up`, достаётся `root:root`, и `app` не может
+    в неё писать (`PermissionError` на `/ingest/upload`). Именованный volume при первой
+    инициализации Docker сам копирует туда содержимое ИЗ ОБРАЗА вместе с правами - проблема не
+    возникает вообще, без дополнительных скриптов. Обратная сторона - файлы не видны напрямую
+    с хоста (Проводник) и не общие с локальным (без Docker) запуском (там свои `./data/uploads`,
+    `./data/custom_rulesets` — см. [Конфигурация](#конфигурация-env)); заглянуть внутрь -
+    `docker compose exec soc_agent ls /app/data/uploads` или `docker cp`.
 
-  Все три переживают `docker compose down`/пересборку образа. `./data/uploads`·
-  `./data/custom_rulesets` удаляются вручную (`rm -rf data`); `siem_db` - `docker compose
-  down -v` или `docker volume rm soc_agent_siem_db`.
+  Все три - именованные volume-ы, переживают `docker compose down`/пересборку образа;
+  удаляются только явным `docker compose down -v` или `docker volume rm
+  soc_agent_siem_db soc_agent_siem_uploads soc_agent_siem_custom_rulesets`.
 - `Dockerfile` — multi-stage: в builder-слое клонируется `Zircolite`
   (движок детекта — внешний репозиторий, импортируется как библиотека, не pip-пакет, см.
   [Стек](#стек)) на зафиксированном теге (`ZIRCOLITE_REF`, по умолчанию `v3.7.6` — версия,
@@ -173,8 +178,9 @@ docker compose up -d --build
   блоке `docker-compose.yml` (`SIEM_HOST=0.0.0.0` обязательно — иначе сервер слушает только
   локалхост контейнера и порт наружу не пробросится; остальные — по необходимости).
 - Готовый образ без compose: `docker build -t soc_agent . && docker run -p 8000:8000
-  -v siem_db:/app/db -v "${PWD}/data/uploads:/app/data/uploads" -v
-  "${PWD}/data/custom_rulesets:/app/data/custom_rulesets" -e SIEM_HOST=0.0.0.0 soc_agent`.
+  -v siem_db:/app/db -v siem_uploads:/app/data/uploads -v
+  siem_custom_rulesets:/app/data/custom_rulesets -e SIEM_HOST=0.0.0.0 soc_agent` (именованные
+  volume-ы, не bind-mount на `./data/*` — см. объяснение прав доступа выше).
 - ⚠️ Как и без Docker — сервис не имеет аутентификации (см.
   [Известные ограничения](#известные-ограничения)); пробрасывать порт 8000 наружу localhost
   можно только за доверенным периметром/reverse-proxy с своей авторизацией.
