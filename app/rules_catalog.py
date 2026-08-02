@@ -428,33 +428,92 @@ def _find_rule_id_owner(rule_id: str) -> tuple[str, str] | None:
     return None
 
 
-def compile_custom_rule(yaml_text: str) -> dict[str, Any]:
+def compile_custom_rule(
+    yaml_text: str, *, target_dir: Path | None = None, exclude_filename: str | None = None
+) -> dict[str, Any]:
     """Валидация + компиляция ОДНОГО правила БЕЗ сохранения на диск (переиспользуется в
-    save_custom_rule).
+    save_custom_rule/update_custom_rule).
 
     RulesetHandler глотает ошибки конвертации отдельных правил (convert_sigma_rules /
     sigma_rules_to_ruleset ловят исключение и только логируют debug, наружу не поднимают) -
     поэтому голый try/except вокруг конструктора почти никогда не поймает реальную ошибку
     компиляции конкретного правила; после конструктора отдельно проверяем, что
-    handler.rulesets непустой."""
+    handler.rulesets непустой.
+
+    target_dir - если задан, компиляция идёт в контексте ВСЕГО целевого custom-рулсета (все
+    уже сохранённые там .yml), а не изолированно во временном файле. Нужно для
+    correlation-правил: `correlation.rules` ссылается на СОСЕДНЕЕ detection-правило по имени, а
+    pySigma (SigmaCollection.load_ruleset) резолвит такие ссылки только внутри ОДНОЙ загрузки -
+    при компиляции временного файла в одиночку компилятор соседних правил рулсета просто не
+    видит, и ссылка не резолвится (SigmaRuleNotFoundError). Zircolite уже трактует
+    custom_rulesets/<id> как одну директорию-рулсет при обычном детекте (RulesetHandler globs
+    *.yml всей папки) - тут воспроизводим ту же область видимости, просто на момент сохранения
+    одного правила. Реальную директорию рулсета при этом НЕ трогаем - соседние .yml копируются
+    в одноразовую scratch-директорию вместе с новым/редактируемым правилом, компилируем ТАМ.
+    Так надёжнее переименования файлов на месте: если процесс упадёт посреди компиляции, в
+    целевом рулсете ничего не потеряется и не окажется временно скрытым под чужим расширением.
+    Итог компиляции директории - N скомпилированных правил (по числу .yml внутри), нужно
+    выбрать ИМЕННО наше среди них; сопоставление - по title (обязательное поле Sigma, тот же
+    приём, что и в save_ruleset_yaml/_match_yaml_by_title). Referenced-only detection-правило
+    (используется только чтобы дать SQL для correlation, `generate: true` не указан) не
+    попадает в handler.rulesets вовсе (см. Zircolite rules.py - "referenced only" пропускается)
+    - так что даже если title совпадёт с ним, он не будет кандидатом.
+
+    exclude_filename - при редактировании существующего правила (update_custom_rule) не копировать
+    его СТАРУЮ версию в scratch-директорию: иначе там на момент компиляции окажутся одновременно
+    старый и новый (temp) вариант одного и того же правила, и сопоставление по title становится
+    неоднозначным (два кандидата вместо одного)."""
     if not yaml_text or not yaml_text.strip():
         raise RuleValidationError("Пустой YAML")
     if not _looks_like_sigma_rule(yaml_text):
         raise RuleValidationError(
             "YAML должен содержать title, logsource и detection (или title и correlation)."
         )
-    tmp_path = Path(tempfile.gettempdir()) / f"sigma-custom-{uuid4().hex}.yml"
-    tmp_path.write_text(yaml_text, encoding="utf-8")
-    try:
+
+    if target_dir is None:
+        tmp_path = Path(tempfile.gettempdir()) / f"sigma-custom-{uuid4().hex}.yml"
+        tmp_path.write_text(yaml_text, encoding="utf-8")
         try:
-            handler = RulesetHandler(RulesetConfig(ruleset=[str(tmp_path)]))
-        except Exception as exc:  # noqa: BLE001 - реальные SigmaError от pySigma при некорректном detection/logsource
+            try:
+                handler = RulesetHandler(RulesetConfig(ruleset=[str(tmp_path)]))
+            except Exception as exc:  # noqa: BLE001 - реальные SigmaError от pySigma при некорректном detection/logsource
+                raise RuleValidationError(f"Ошибка компиляции: {exc}")
+            if not handler.rulesets:
+                raise RuleValidationError("Правило не скомпилировалось в SQL - проверь detection/logsource.")
+            return handler.rulesets[0]
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    try:
+        docs = [d for d in yaml.safe_load_all(yaml_text) if isinstance(d, dict)]
+    except yaml.YAMLError as exc:
+        raise RuleValidationError(f"Некорректный YAML: {exc}")
+    title = docs[0].get("title") if docs else None
+
+    scratch_dir = Path(tempfile.mkdtemp(prefix="sigma-compile-"))
+    try:
+        for sibling in list(target_dir.glob("*.yml")) + list(target_dir.glob("*.yaml")):
+            if exclude_filename and sibling.name == exclude_filename:
+                continue
+            shutil.copy2(sibling, scratch_dir / sibling.name)
+        (scratch_dir / f"__new_{uuid4().hex}.yml").write_text(yaml_text, encoding="utf-8")
+        try:
+            handler = RulesetHandler(RulesetConfig(ruleset=[str(scratch_dir)]))
+        except Exception as exc:  # noqa: BLE001
             raise RuleValidationError(f"Ошибка компиляции: {exc}")
         if not handler.rulesets:
             raise RuleValidationError("Правило не скомпилировалось в SQL - проверь detection/logsource.")
-        return handler.rulesets[0]
+        candidates = [r for r in handler.rulesets if r.get("title") == title] if title else handler.rulesets
+        if not candidates:
+            candidates = handler.rulesets
+        if len(candidates) > 1:
+            raise RuleValidationError(
+                f"В этом рулсете уже есть другое правило с заголовком '{title}' - результат "
+                "компиляции неоднозначен, переименуй правило (title) и попробуй снова."
+            )
+        return candidates[0]
     finally:
-        tmp_path.unlink(missing_ok=True)
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
 def compile_ruleset_yaml(yaml_text: str) -> list[dict[str, Any]]:
@@ -484,7 +543,7 @@ def save_custom_rule(
     ruleset_path, куда оно попало)."""
     target = _resolve_target_ruleset(ruleset, new_ruleset_name)
     target_dir = _custom_ruleset_dir(target)
-    compiled = compile_custom_rule(yaml_text)
+    compiled = compile_custom_rule(yaml_text, target_dir=target_dir)
     candidate = compiled.get("id")
     rule_id = _safe_rule_id(candidate)
     if candidate and rule_id == candidate:
@@ -566,7 +625,7 @@ def update_custom_rule(ruleset_path: str, rule_id: str, yaml_text: str) -> dict[
     rule_path = (target_dir / f"{rule_id}.yml").resolve()
     if not rule_path.is_relative_to(target_dir.resolve()) or not rule_path.is_file():
         raise CatalogError(f"Правило не найдено: {rule_id}")
-    compiled = compile_custom_rule(yaml_text)
+    compiled = compile_custom_rule(yaml_text, target_dir=target_dir, exclude_filename=rule_path.name)
     candidate = compiled.get("id")
     if candidate and candidate != rule_id:
         raise RuleValidationError(
