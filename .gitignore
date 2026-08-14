@@ -24,7 +24,10 @@ custom_rulesets/
 # Внешние клоны со своим .git (не часть этого репозитория, см. CLAUDE.md §1/§6):
 # ставятся отдельно по инструкции из README (Установка / Быстрый старт).
 /Zircolite/
-/artifacts/
+
+# artifacts/ вне репо, кроме artifacts/content/ - кастом правила проекта.
+/artifacts/*
+!/artifacts/content/
 
 # Bind-mount данных Docker-контейнера (uploads/custom_rulesets - см. docker-compose.yml;
 # siem.db там же живёт как именованный Docker volume, не под этим путём - см. README §Docker)
