@@ -1,0 +1,215 @@
+title: Unknown Process in Critical Directory
+id: c6e4a11d-5d9d-40e6-baf8-bc7a97c7a5f6
+status: experimental
+description: >
+  Identifies execution of a process from a Windows or Linux critical system
+  directory when the full executable path is absent from the initial allowlist.
+  The allowlist must be baselined and tuned for the monitored environment.
+author: Artem
+date: 2026-08-07
+tags:
+  - attack.defense-evasion
+  - attack.t1036.005
+
+logsource:
+  category: process_creation
+
+detection:
+  selection_critical_directory_image:
+    Image|startswith:
+      # Windows. This also covers System32 and SysWOW64 subdirectories.
+      - 'C:\Windows\'
+
+      # Linux executable and system-component directories.
+      - '/bin/'
+      - '/sbin/'
+      - '/usr/bin/'
+      - '/usr/sbin/'
+      - '/etc/'
+      - '/boot/'
+      - '/lib/'
+      - '/lib64/'
+      - '/usr/lib/'
+      - '/usr/lib64/'
+      - '/usr/libexec/'
+
+  selection_critical_directory_new_process_name:
+    NewProcessName|startswith:
+      # Windows Security Event ID 4688.
+      - 'C:\Windows\'
+
+  filter_known_system_processes_image:
+    Image:
+      # Windows core processes.
+      - 'C:\Windows\explorer.exe'
+      - 'C:\Windows\System32\smss.exe'
+      - 'C:\Windows\System32\csrss.exe'
+      - 'C:\Windows\System32\wininit.exe'
+      - 'C:\Windows\System32\winlogon.exe'
+      - 'C:\Windows\System32\services.exe'
+      - 'C:\Windows\System32\lsass.exe'
+      - 'C:\Windows\System32\svchost.exe'
+      - 'C:\Windows\System32\fontdrvhost.exe'
+      - 'C:\Windows\System32\dwm.exe'
+      - 'C:\Windows\System32\sihost.exe'
+      - 'C:\Windows\System32\taskhostw.exe'
+      - 'C:\Windows\System32\RuntimeBroker.exe'
+      - 'C:\Windows\System32\dllhost.exe'
+      - 'C:\Windows\System32\conhost.exe'
+      - 'C:\Windows\System32\spoolsv.exe'
+      - 'C:\Windows\System32\audiodg.exe'
+      - 'C:\Windows\System32\SearchIndexer.exe'
+      - 'C:\Windows\System32\wbem\WmiPrvSE.exe'
+
+      # Windows native administration utilities and LOLBins. Their suspicious
+      # command lines should be covered by separate behavioural rules.
+      - 'C:\Windows\System32\cmd.exe'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+      - 'C:\Windows\System32\rundll32.exe'
+      - 'C:\Windows\System32\regsvr32.exe'
+      - 'C:\Windows\System32\msiexec.exe'
+      - 'C:\Windows\System32\certutil.exe'
+      - 'C:\Windows\System32\reg.exe'
+      - 'C:\Windows\System32\sc.exe'
+      - 'C:\Windows\System32\net.exe'
+      - 'C:\Windows\System32\net1.exe'
+      - 'C:\Windows\System32\whoami.exe'
+      - 'C:\Windows\System32\schtasks.exe'
+      - 'C:\Windows\System32\tasklist.exe'
+      - 'C:\Windows\System32\taskkill.exe'
+      - 'C:\Windows\System32\shutdown.exe'
+      - 'C:\Windows\System32\wevtutil.exe'
+      - 'C:\Windows\System32\w32tm.exe'
+      - 'C:\Windows\System32\wbem\WMIC.exe'
+
+      # Common 32-bit Windows system processes.
+      - 'C:\Windows\SysWOW64\svchost.exe'
+      - 'C:\Windows\SysWOW64\cmd.exe'
+      - 'C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+      - 'C:\Windows\SysWOW64\rundll32.exe'
+      - 'C:\Windows\SysWOW64\regsvr32.exe'
+      - 'C:\Windows\SysWOW64\msiexec.exe'
+      - 'C:\Windows\SysWOW64\dllhost.exe'
+      - 'C:\Windows\SysWOW64\conhost.exe'
+
+      # Linux shells and common base utilities. Paths vary by distribution.
+      - '/bin/bash'
+      - '/bin/sh'
+      - '/bin/dash'
+      - '/bin/zsh'
+      - '/bin/su'
+      - '/bin/login'
+      - '/bin/systemctl'
+      - '/bin/journalctl'
+      - '/bin/mount'
+      - '/bin/umount'
+      - '/bin/ls'
+      - '/bin/cp'
+      - '/bin/mv'
+      - '/bin/rm'
+      - '/bin/cat'
+      - '/bin/chmod'
+      - '/bin/chown'
+      - '/bin/ps'
+      - '/bin/kill'
+      - '/bin/sleep'
+      - '/usr/bin/bash'
+      - '/usr/bin/sh'
+      - '/usr/bin/dash'
+      - '/usr/bin/zsh'
+      - '/usr/bin/sudo'
+      - '/usr/bin/su'
+      - '/usr/bin/login'
+      - '/usr/bin/ssh'
+      - '/usr/bin/systemctl'
+      - '/usr/bin/journalctl'
+      - '/usr/bin/dbus-daemon'
+
+      # Linux core services and service managers.
+      - '/sbin/init'
+      - '/sbin/auditd'
+      - '/sbin/agetty'
+      - '/sbin/udevd'
+      - '/sbin/sshd'
+      - '/sbin/cron'
+      - '/sbin/rsyslogd'
+      - '/usr/sbin/auditd'
+      - '/usr/sbin/sshd'
+      - '/usr/sbin/cron'
+      - '/usr/sbin/crond'
+      - '/usr/sbin/rsyslogd'
+      - '/lib/systemd/systemd'
+      - '/lib/systemd/systemd-journald'
+      - '/lib/systemd/systemd-udevd'
+      - '/lib/systemd/systemd-logind'
+      - '/usr/lib/systemd/systemd'
+      - '/usr/lib/systemd/systemd-journald'
+      - '/usr/lib/systemd/systemd-udevd'
+      - '/usr/lib/systemd/systemd-logind'
+      - '/usr/lib/policykit-1/polkitd'
+      - '/usr/libexec/polkitd'
+
+  filter_known_system_processes_new_process_name:
+    NewProcessName:
+      # Windows core processes reported in Event ID 4688.
+      - 'C:\Windows\explorer.exe'
+      - 'C:\Windows\System32\smss.exe'
+      - 'C:\Windows\System32\csrss.exe'
+      - 'C:\Windows\System32\wininit.exe'
+      - 'C:\Windows\System32\winlogon.exe'
+      - 'C:\Windows\System32\services.exe'
+      - 'C:\Windows\System32\lsass.exe'
+      - 'C:\Windows\System32\svchost.exe'
+      - 'C:\Windows\System32\fontdrvhost.exe'
+      - 'C:\Windows\System32\dwm.exe'
+      - 'C:\Windows\System32\sihost.exe'
+      - 'C:\Windows\System32\taskhostw.exe'
+      - 'C:\Windows\System32\RuntimeBroker.exe'
+      - 'C:\Windows\System32\dllhost.exe'
+      - 'C:\Windows\System32\conhost.exe'
+      - 'C:\Windows\System32\spoolsv.exe'
+      - 'C:\Windows\System32\audiodg.exe'
+      - 'C:\Windows\System32\SearchIndexer.exe'
+      - 'C:\Windows\System32\wbem\WmiPrvSE.exe'
+
+      # Windows native administration utilities and LOLBins.
+      - 'C:\Windows\System32\cmd.exe'
+      - 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+      - 'C:\Windows\System32\rundll32.exe'
+      - 'C:\Windows\System32\regsvr32.exe'
+      - 'C:\Windows\System32\msiexec.exe'
+      - 'C:\Windows\System32\certutil.exe'
+      - 'C:\Windows\System32\reg.exe'
+      - 'C:\Windows\System32\sc.exe'
+      - 'C:\Windows\System32\net.exe'
+      - 'C:\Windows\System32\net1.exe'
+      - 'C:\Windows\System32\whoami.exe'
+      - 'C:\Windows\System32\schtasks.exe'
+      - 'C:\Windows\System32\tasklist.exe'
+      - 'C:\Windows\System32\taskkill.exe'
+      - 'C:\Windows\System32\shutdown.exe'
+      - 'C:\Windows\System32\wevtutil.exe'
+      - 'C:\Windows\System32\w32tm.exe'
+      - 'C:\Windows\System32\wbem\WMIC.exe'
+
+      # Common 32-bit Windows system processes.
+      - 'C:\Windows\SysWOW64\svchost.exe'
+      - 'C:\Windows\SysWOW64\cmd.exe'
+      - 'C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+      - 'C:\Windows\SysWOW64\rundll32.exe'
+      - 'C:\Windows\SysWOW64\regsvr32.exe'
+      - 'C:\Windows\SysWOW64\msiexec.exe'
+      - 'C:\Windows\SysWOW64\dllhost.exe'
+      - 'C:\Windows\SysWOW64\conhost.exe'
+
+  condition: >
+    (selection_critical_directory_image and
+    not filter_known_system_processes_image) or
+    (selection_critical_directory_new_process_name and
+    not filter_known_system_processes_new_process_name)
+
+falsepositives:
+  - Newly installed or updated operating-system components not yet in the allowlist
+  - Vendor agents and administrative tools legitimately installed in system directories
+  - Distribution-specific Linux paths and symbolic-link resolution differences
+level: high
