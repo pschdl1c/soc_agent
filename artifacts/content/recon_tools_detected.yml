@@ -1,0 +1,827 @@
+title: Recon Tool Execution - Windows Image
+name: recon_tools_windows_image
+id: fed6cbee-0d82-47c6-b136-d370a4eb1643
+status: experimental
+description: >
+  Base rule that identifies execution of Windows utilities commonly used for
+  host, account, process, service, task, registry and network discovery through
+  the Image field. It is referenced by the Recon Tools Detected correlation.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1018/
+  - https://attack.mitre.org/techniques/T1033/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1069/
+  - https://attack.mitre.org/techniques/T1082/
+  - https://attack.mitre.org/techniques/T1087/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith:
+      # Required pool.
+      - '\at.exe'
+      - '\auditpol.exe'
+      - '\chcp.exe'
+      - '\hostname.exe'
+      - '\ipconfig.exe'
+      - '\net.exe'
+      - '\netsh.exe'
+      - '\netstat.exe'
+      - '\nslookup.exe'
+      - '\portqry.exe'
+      - '\qprocess.exe'
+      - '\query.exe'
+      - '\quser.exe'
+      - '\qwinsta.exe'
+      - '\reg.exe'
+      - '\regedit.exe'
+      - '\route.exe'
+      - '\sc.exe'
+      - '\schtasks.exe'
+      - '\systeminfo.exe'
+      - '\taskkill.exe'
+      - '\tasklist.exe'
+      - '\telnet.exe'
+      - '\wevtutil.exe'
+      - '\whoami.exe'
+
+      # Additional native discovery utilities.
+      - '\arp.exe'
+      - '\cmdkey.exe'
+      - '\dnscmd.exe'
+      - '\driverquery.exe'
+      - '\dsquery.exe'
+      - '\getmac.exe'
+      - '\gpresult.exe'
+      - '\klist.exe'
+      - '\nbtstat.exe'
+      - '\net1.exe'
+      - '\nltest.exe'
+      - '\pathping.exe'
+      - '\ping.exe'
+      - '\tracert.exe'
+      - '\w32tm.exe'
+      - '\wmic.exe'
+  condition: selection
+falsepositives:
+  - Administrative diagnostics, inventory, troubleshooting and support scripts
+  - Software deployment, monitoring and endpoint-management agents
+level: informational
+
+---
+title: Recon Tool Execution - Windows NewProcessName
+name: recon_tools_windows_new_process_name
+id: 233b9bb3-853b-41b9-ae05-126bf00cde61
+status: experimental
+description: >
+  Base rule equivalent to Recon Tool Execution - Windows Image for Windows
+  Security 4688-style events that store the executable in NewProcessName.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1018/
+  - https://attack.mitre.org/techniques/T1033/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1069/
+  - https://attack.mitre.org/techniques/T1082/
+  - https://attack.mitre.org/techniques/T1087/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    NewProcessName|endswith:
+      # Required pool.
+      - '\at.exe'
+      - '\auditpol.exe'
+      - '\chcp.exe'
+      - '\hostname.exe'
+      - '\ipconfig.exe'
+      - '\net.exe'
+      - '\netsh.exe'
+      - '\netstat.exe'
+      - '\nslookup.exe'
+      - '\portqry.exe'
+      - '\qprocess.exe'
+      - '\query.exe'
+      - '\quser.exe'
+      - '\qwinsta.exe'
+      - '\reg.exe'
+      - '\regedit.exe'
+      - '\route.exe'
+      - '\sc.exe'
+      - '\schtasks.exe'
+      - '\systeminfo.exe'
+      - '\taskkill.exe'
+      - '\tasklist.exe'
+      - '\telnet.exe'
+      - '\wevtutil.exe'
+      - '\whoami.exe'
+
+      # Additional native discovery utilities.
+      - '\arp.exe'
+      - '\cmdkey.exe'
+      - '\dnscmd.exe'
+      - '\driverquery.exe'
+      - '\dsquery.exe'
+      - '\getmac.exe'
+      - '\gpresult.exe'
+      - '\klist.exe'
+      - '\nbtstat.exe'
+      - '\net1.exe'
+      - '\nltest.exe'
+      - '\pathping.exe'
+      - '\ping.exe'
+      - '\tracert.exe'
+      - '\w32tm.exe'
+      - '\wmic.exe'
+  condition: selection
+falsepositives:
+  - Administrative diagnostics, inventory, troubleshooting and support scripts
+  - Software deployment, monitoring and endpoint-management agents
+level: informational
+
+---
+title: Recon Tool Launch Recorded - Windows Image
+id: 1c89143d-01e5-41fc-8780-edea93d75a2e
+status: experimental
+description: >
+  Records every matching Windows reconnaissance utility launch as an ordinary
+  detection so it can be inspected and grouped in the SIEM event table. This
+  companion rule is intentionally not referenced by the correlation.
+author: Artem
+date: 2026-08-08
+tags:
+  - attack.discovery
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_image:
+    Image|endswith:
+      - '\at.exe'
+      - '\auditpol.exe'
+      - '\chcp.exe'
+      - '\hostname.exe'
+      - '\ipconfig.exe'
+      - '\net.exe'
+      - '\netsh.exe'
+      - '\netstat.exe'
+      - '\nslookup.exe'
+      - '\portqry.exe'
+      - '\qprocess.exe'
+      - '\query.exe'
+      - '\quser.exe'
+      - '\qwinsta.exe'
+      - '\reg.exe'
+      - '\regedit.exe'
+      - '\route.exe'
+      - '\sc.exe'
+      - '\schtasks.exe'
+      - '\systeminfo.exe'
+      - '\taskkill.exe'
+      - '\tasklist.exe'
+      - '\telnet.exe'
+      - '\wevtutil.exe'
+      - '\whoami.exe'
+      - '\arp.exe'
+      - '\cmdkey.exe'
+      - '\dnscmd.exe'
+      - '\driverquery.exe'
+      - '\dsquery.exe'
+      - '\getmac.exe'
+      - '\gpresult.exe'
+      - '\klist.exe'
+      - '\nbtstat.exe'
+      - '\net1.exe'
+      - '\nltest.exe'
+      - '\pathping.exe'
+      - '\ping.exe'
+      - '\tracert.exe'
+      - '\w32tm.exe'
+      - '\wmic.exe'
+  selection_new_process_name:
+    NewProcessName|endswith:
+      - '\at.exe'
+      - '\auditpol.exe'
+      - '\chcp.exe'
+      - '\hostname.exe'
+      - '\ipconfig.exe'
+      - '\net.exe'
+      - '\netsh.exe'
+      - '\netstat.exe'
+      - '\nslookup.exe'
+      - '\portqry.exe'
+      - '\qprocess.exe'
+      - '\query.exe'
+      - '\quser.exe'
+      - '\qwinsta.exe'
+      - '\reg.exe'
+      - '\regedit.exe'
+      - '\route.exe'
+      - '\sc.exe'
+      - '\schtasks.exe'
+      - '\systeminfo.exe'
+      - '\taskkill.exe'
+      - '\tasklist.exe'
+      - '\telnet.exe'
+      - '\wevtutil.exe'
+      - '\whoami.exe'
+      - '\arp.exe'
+      - '\cmdkey.exe'
+      - '\dnscmd.exe'
+      - '\driverquery.exe'
+      - '\dsquery.exe'
+      - '\getmac.exe'
+      - '\gpresult.exe'
+      - '\klist.exe'
+      - '\nbtstat.exe'
+      - '\net1.exe'
+      - '\nltest.exe'
+      - '\pathping.exe'
+      - '\ping.exe'
+      - '\tracert.exe'
+      - '\w32tm.exe'
+      - '\wmic.exe'
+  condition: selection_image
+falsepositives:
+  - Normal administrative and troubleshooting activity
+level: informational
+
+---
+title: Recon Tool Launch Recorded - Windows NewProcessName
+id: 7685891f-5aca-456d-8db1-bf07a943f7ff
+status: experimental
+description: >
+  Records every matching Windows reconnaissance utility launch from
+  NewProcessName so it can be inspected and grouped in the SIEM event table.
+author: Artem
+date: 2026-08-08
+tags:
+  - attack.discovery
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    NewProcessName|endswith:
+      - '\at.exe'
+      - '\auditpol.exe'
+      - '\chcp.exe'
+      - '\hostname.exe'
+      - '\ipconfig.exe'
+      - '\net.exe'
+      - '\netsh.exe'
+      - '\netstat.exe'
+      - '\nslookup.exe'
+      - '\portqry.exe'
+      - '\qprocess.exe'
+      - '\query.exe'
+      - '\quser.exe'
+      - '\qwinsta.exe'
+      - '\reg.exe'
+      - '\regedit.exe'
+      - '\route.exe'
+      - '\sc.exe'
+      - '\schtasks.exe'
+      - '\systeminfo.exe'
+      - '\taskkill.exe'
+      - '\tasklist.exe'
+      - '\telnet.exe'
+      - '\wevtutil.exe'
+      - '\whoami.exe'
+      - '\arp.exe'
+      - '\cmdkey.exe'
+      - '\dnscmd.exe'
+      - '\driverquery.exe'
+      - '\dsquery.exe'
+      - '\getmac.exe'
+      - '\gpresult.exe'
+      - '\klist.exe'
+      - '\nbtstat.exe'
+      - '\net1.exe'
+      - '\nltest.exe'
+      - '\pathping.exe'
+      - '\ping.exe'
+      - '\tracert.exe'
+      - '\w32tm.exe'
+      - '\wmic.exe'
+  condition: selection
+falsepositives:
+  - Normal administrative and troubleshooting activity
+level: informational
+
+---
+title: Recon Tools Detected - Windows Image
+id: 52ae06ef-c3a8-4d3a-a08b-bdb26876459c
+status: experimental
+description: >
+  Detects five or more distinct Windows reconnaissance utility executable paths
+  in Image on one host during one hour. A separate companion rule records every
+  matching process launch for the SIEM event table.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1082/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+correlation:
+  type: value_count
+  rules:
+    - recon_tools_windows_image
+  group-by:
+    - Computer
+  # NOTE: soc_agent's pinned SQLite backend compiles value_count but currently
+  # omits the timespan predicate. Until the backend is fixed, the count is
+  # limited by the events present in one Zircolite processing batch, not a
+  # persistent rolling one-hour window.
+  timespan: 1h
+  condition:
+    # DISTINCT is calculated over the full executable path.
+    field: Image
+    gte: 5
+falsepositives:
+  - Helpdesk or administrator performing several diagnostic actions in a short period
+  - Inventory, compliance, software deployment and endpoint-management automation
+level: medium
+
+---
+title: Recon Tools Detected - Windows NewProcessName
+id: f7fd15ab-e8d7-4bbe-b0f8-aebc79ef8975
+status: experimental
+description: >
+  Detects five or more distinct Windows reconnaissance utility executable paths
+  in NewProcessName on one host during one hour. A separate companion rule
+  records every matching process launch for the SIEM event table.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1082/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+correlation:
+  type: value_count
+  rules:
+    - recon_tools_windows_new_process_name
+  group-by:
+    - Computer
+  # See the backend limitation note in the Windows Image correlation above.
+  timespan: 1h
+  condition:
+    # DISTINCT is calculated over the full executable path.
+    field: NewProcessName
+    gte: 5
+falsepositives:
+  - Helpdesk or administrator performing several diagnostic actions in a short period
+  - Inventory, compliance, software deployment and endpoint-management automation
+level: medium
+
+---
+title: Recon Tool Execution - Linux Image
+name: recon_tools_linux_image
+id: 9ea3953c-d846-4e7a-8338-fa406d601641
+status: experimental
+description: >
+  Base rule that identifies execution of Linux utilities commonly used for
+  host, user, process, service, task and network discovery through Image.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1018/
+  - https://attack.mitre.org/techniques/T1033/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1069/
+  - https://attack.mitre.org/techniques/T1082/
+  - https://attack.mitre.org/techniques/T1087/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    Image|endswith:
+      # Required pool.
+      - '/auditctl'
+      - '/crontab'
+      - '/cron'
+      - '/hostname'
+      - '/id'
+      - '/ifconfig'
+      - '/kill'
+      - '/last'
+      - '/netstat'
+      - '/ping'
+      - '/ps'
+      - '/telnet'
+      - '/uname'
+      - '/who'
+      - '/whoami'
+      - '/ss'
+
+      # Additional native discovery utilities.
+      - '/arp'
+      - '/arping'
+      - '/dig'
+      - '/host'
+      - '/ip'
+      - '/iptables'
+      - '/nft'
+      - '/traceroute'
+      - '/tracepath'
+      - '/lsof'
+      - '/lsblk'
+      - '/lscpu'
+      - '/lsmod'
+      - '/lastlog'
+      - '/getent'
+      - '/groups'
+      - '/users'
+      - '/w'
+      - '/systemctl'
+      - '/service'
+      - '/resolvectl'
+      - '/nmcli'
+      - '/dmidecode'
+  condition: selection
+falsepositives:
+  - Administrative diagnostics, inventory, troubleshooting and support scripts
+  - Monitoring, configuration-management and endpoint-management agents
+level: informational
+
+---
+title: Recon Tool Execution - Linux exe
+name: recon_tools_linux_exe
+id: 980d5fb4-82b0-4e40-8fe5-0742d5b90eff
+status: experimental
+description: >
+  Base rule equivalent to Recon Tool Execution - Linux Image for auditd-style
+  events that store the executable path in exe.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1018/
+  - https://attack.mitre.org/techniques/T1033/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1069/
+  - https://attack.mitre.org/techniques/T1082/
+  - https://attack.mitre.org/techniques/T1087/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    exe|endswith:
+      # Required pool.
+      - '/auditctl'
+      - '/crontab'
+      - '/cron'
+      - '/hostname'
+      - '/id'
+      - '/ifconfig'
+      - '/kill'
+      - '/last'
+      - '/netstat'
+      - '/ping'
+      - '/ps'
+      - '/telnet'
+      - '/uname'
+      - '/who'
+      - '/whoami'
+      - '/ss'
+
+      # Additional native discovery utilities.
+      - '/arp'
+      - '/arping'
+      - '/dig'
+      - '/host'
+      - '/ip'
+      - '/iptables'
+      - '/nft'
+      - '/traceroute'
+      - '/tracepath'
+      - '/lsof'
+      - '/lsblk'
+      - '/lscpu'
+      - '/lsmod'
+      - '/lastlog'
+      - '/getent'
+      - '/groups'
+      - '/users'
+      - '/w'
+      - '/systemctl'
+      - '/service'
+      - '/resolvectl'
+      - '/nmcli'
+      - '/dmidecode'
+  condition: selection
+falsepositives:
+  - Administrative diagnostics, inventory, troubleshooting and support scripts
+  - Monitoring, configuration-management and endpoint-management agents
+level: informational
+
+---
+title: Recon Tool Launch Recorded - Linux Image
+id: 9e9f8737-07af-4d41-b9ac-fb24f252d531
+status: experimental
+description: >
+  Records every matching Linux reconnaissance utility launch as an ordinary
+  detection so it can be inspected and grouped in the SIEM event table. This
+  companion rule is intentionally not referenced by the correlation.
+author: Artem
+date: 2026-08-08
+tags:
+  - attack.discovery
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_image:
+    Image|endswith:
+      - '/auditctl'
+      - '/crontab'
+      - '/cron'
+      - '/hostname'
+      - '/id'
+      - '/ifconfig'
+      - '/kill'
+      - '/last'
+      - '/netstat'
+      - '/ping'
+      - '/ps'
+      - '/telnet'
+      - '/uname'
+      - '/who'
+      - '/whoami'
+      - '/ss'
+      - '/arp'
+      - '/arping'
+      - '/dig'
+      - '/host'
+      - '/ip'
+      - '/iptables'
+      - '/nft'
+      - '/traceroute'
+      - '/tracepath'
+      - '/lsof'
+      - '/lsblk'
+      - '/lscpu'
+      - '/lsmod'
+      - '/lastlog'
+      - '/getent'
+      - '/groups'
+      - '/users'
+      - '/w'
+      - '/systemctl'
+      - '/service'
+      - '/resolvectl'
+      - '/nmcli'
+      - '/dmidecode'
+  selection_exe:
+    exe|endswith:
+      - '/auditctl'
+      - '/crontab'
+      - '/cron'
+      - '/hostname'
+      - '/id'
+      - '/ifconfig'
+      - '/kill'
+      - '/last'
+      - '/netstat'
+      - '/ping'
+      - '/ps'
+      - '/telnet'
+      - '/uname'
+      - '/who'
+      - '/whoami'
+      - '/ss'
+      - '/arp'
+      - '/arping'
+      - '/dig'
+      - '/host'
+      - '/ip'
+      - '/iptables'
+      - '/nft'
+      - '/traceroute'
+      - '/tracepath'
+      - '/lsof'
+      - '/lsblk'
+      - '/lscpu'
+      - '/lsmod'
+      - '/lastlog'
+      - '/getent'
+      - '/groups'
+      - '/users'
+      - '/w'
+      - '/systemctl'
+      - '/service'
+      - '/resolvectl'
+      - '/nmcli'
+      - '/dmidecode'
+  condition: selection_image
+falsepositives:
+  - Normal administrative and troubleshooting activity
+level: informational
+
+---
+title: Recon Tool Launch Recorded - Linux exe
+id: 45b39b16-6922-4f6f-9dfd-efb2934770d2
+status: experimental
+description: >
+  Records every matching Linux reconnaissance utility launch from exe so it
+  can be inspected and grouped in the SIEM event table.
+author: Artem
+date: 2026-08-08
+tags:
+  - attack.discovery
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    exe|endswith:
+      - '/auditctl'
+      - '/crontab'
+      - '/cron'
+      - '/hostname'
+      - '/id'
+      - '/ifconfig'
+      - '/kill'
+      - '/last'
+      - '/netstat'
+      - '/ping'
+      - '/ps'
+      - '/telnet'
+      - '/uname'
+      - '/who'
+      - '/whoami'
+      - '/ss'
+      - '/arp'
+      - '/arping'
+      - '/dig'
+      - '/host'
+      - '/ip'
+      - '/iptables'
+      - '/nft'
+      - '/traceroute'
+      - '/tracepath'
+      - '/lsof'
+      - '/lsblk'
+      - '/lscpu'
+      - '/lsmod'
+      - '/lastlog'
+      - '/getent'
+      - '/groups'
+      - '/users'
+      - '/w'
+      - '/systemctl'
+      - '/service'
+      - '/resolvectl'
+      - '/nmcli'
+      - '/dmidecode'
+  condition: selection
+falsepositives:
+  - Normal administrative and troubleshooting activity
+level: informational
+
+---
+title: Recon Tools Detected - Linux Image
+id: 4ae139e3-dd02-4322-8a42-5d99ce95f158
+status: experimental
+description: >
+  Detects five or more distinct Linux reconnaissance utility executable paths
+  in Image on one host during one hour. A separate companion rule records every
+  matching process launch for the SIEM event table.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1082/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+correlation:
+  type: value_count
+  rules:
+    - recon_tools_linux_image
+  group-by:
+    - Hostname
+  # NOTE: soc_agent's pinned SQLite backend compiles value_count but currently
+  # omits the timespan predicate. Until the backend is fixed, the count is
+  # limited by the events present in one Zircolite processing batch, not a
+  # persistent rolling one-hour window.
+  timespan: 1h
+  condition:
+    # DISTINCT is calculated over the full executable path.
+    field: Image
+    gte: 5
+falsepositives:
+  - Administrator or support engineer performing several diagnostics in a short period
+  - Monitoring, inventory and configuration-management automation
+level: medium
+
+---
+title: Recon Tools Detected - Linux exe
+id: 2e15c0f5-7163-46f0-a5db-a5f0dbef81d5
+status: experimental
+description: >
+  Detects five or more distinct Linux reconnaissance utility executable paths
+  in exe on one host during one hour. A separate companion rule records every
+  matching process launch for the SIEM event table.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1016/
+  - https://attack.mitre.org/techniques/T1057/
+  - https://attack.mitre.org/techniques/T1082/
+tags:
+  - attack.discovery
+  - attack.t1016
+  - attack.t1018
+  - attack.t1033
+  - attack.t1057
+  - attack.t1069
+  - attack.t1082
+  - attack.t1087
+correlation:
+  type: value_count
+  rules:
+    - recon_tools_linux_exe
+  group-by:
+    - Hostname
+  # See the backend limitation note in the Linux Image correlation above.
+  timespan: 1h
+  condition:
+    # DISTINCT is calculated over the full executable path.
+    field: exe
+    gte: 5
+falsepositives:
+  - Administrator or support engineer performing several diagnostics in a short period
+  - Monitoring, inventory and configuration-management automation
+level: medium

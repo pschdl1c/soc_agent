@@ -1,0 +1,137 @@
+title: System Process in Unknown Directory
+id: e08e7f1c-9a85-41c8-912d-6f3a59efcf2a
+status: experimental
+description: >
+  Detects Windows and Linux system process names executed from a path outside
+  common system and temporary directories. This can indicate masquerading or
+  an attacker-provided copy of a trusted executable.
+author: Artem
+date: 2026-08-07
+tags:
+  - attack.defense-evasion
+  - attack.t1036.005
+
+logsource:
+  category: process_creation
+
+detection:
+  selection_windows_system_process:
+    Image|endswith:
+      #Windows processes and services.
+      - '\smss.exe'
+      - '\csrss.exe'
+      - '\wininit.exe'
+      - '\winlogon.exe'
+      - '\services.exe'
+      - '\lsass.exe'
+      - '\lsaiso.exe'
+      - '\svchost.exe'
+      - '\fontdrvhost.exe'
+      - '\dwm.exe'
+      - '\sihost.exe'
+      - '\taskhostw.exe'
+      - '\RuntimeBroker.exe'
+      - '\dllhost.exe'
+      - '\conhost.exe'
+      - '\spoolsv.exe'
+      - '\audiodg.exe'
+      - '\SearchIndexer.exe'
+      - '\WmiPrvSE.exe'
+      - '\TrustedInstaller.exe'
+      - '\TiWorker.exe'
+      - '\cmd.exe'
+      - '\powershell.exe'
+      - '\pwsh.exe'
+      - '\rundll32.exe'
+      - '\regsvr32.exe'
+      - '\msiexec.exe'
+      - '\certutil.exe'
+      - '\reg.exe'
+      - '\sc.exe'
+      - '\net.exe'
+      - '\net1.exe'
+      - '\whoami.exe'
+      - '\schtasks.exe'
+      - '\tasklist.exe'
+      - '\taskkill.exe'
+      - '\wevtutil.exe'
+      - '\w32tm.exe'
+      - '\wmic.exe'
+
+  filter_windows_system_directories:
+    Image|startswith:
+      - 'C:\Windows\'
+      - 'C:\ProgramData\Microsoft\Windows Defender\Platform\'
+      - 'C:\Program Files\PowerShell\'
+      - 'C:\Program Files\WindowsApps\'
+
+  filter_windows_common_temp_directories:
+    Image|startswith:
+      - 'C:\Temp\'
+      - 'C:\ProgramData\Temp\'
+
+  filter_windows_user_temp_directory:
+    Image|startswith: 'C:\Users\'
+    Image|contains: '\AppData\Local\Temp\'
+
+  selection_linux_system_process:
+    Image|endswith:
+      #Linux system files
+      - '/systemd'
+      - '/systemd-journald'
+      - '/systemd-udevd'
+      - '/systemd-logind'
+      - '/init'
+      - '/sshd'
+      - '/auditd'
+      - '/rsyslogd'
+      - '/syslogd'
+      - '/cron'
+      - '/crond'
+      - '/agetty'
+      - '/dbus-daemon'
+      - '/polkitd'
+      - '/NetworkManager'
+      - '/udisksd'
+      - '/bash'
+      - '/sh'
+      - '/dash'
+      - '/zsh'
+      - '/sudo'
+      - '/su'
+      - '/login'
+      - '/ssh'
+      - '/systemctl'
+      - '/journalctl'
+      - '/mount'
+      - '/umount'
+
+  filter_linux_system_directories:
+    Image|startswith:
+      - '/bin/'
+      - '/sbin/'
+      - '/usr/bin/'
+      - '/usr/sbin/'
+      - '/usr/libexec/'
+      - '/lib/'
+      - '/lib64/'
+      - '/usr/lib/'
+      - '/usr/lib64/'
+      - '/etc/'
+
+  filter_linux_temp_directories:
+    Image|startswith:
+      - '/tmp/'
+      - '/var/tmp/'
+      - '/dev/shm/'
+
+  condition: >
+    (selection_windows_system_process and not 1 of filter_windows_*) or
+    (selection_linux_system_process and not 1 of filter_linux_*)
+
+falsepositives:
+  - Portable administration or recovery tools intentionally copied outside standard directories
+  - Custom Windows TEMP locations not represented by the initial allowlist
+  - Linux containers, chroots, Nix, Snap, Flatpak, or custom filesystem layouts
+  - Symbolic-link or path-normalization differences in the process creation data source
+level: high

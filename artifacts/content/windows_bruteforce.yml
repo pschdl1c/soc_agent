@@ -1,0 +1,298 @@
+title: Windows Failed Authentication With Source IP And Account
+name: windows_failed_auth_by_ip_and_account
+id: 7f0d2153-7b93-4ca4-a937-7380b5e2db43
+status: experimental
+description: Base selection for failed Windows authentications with a source IP and target account.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+    IpAddress|exists: true
+    TargetUserName|exists: true
+  filter_invalid_ip:
+    IpAddress:
+      - '-'
+      - ''
+  filter_invalid_user:
+    TargetUserName:
+      - '-'
+      - ''
+  condition: selection and not filter_invalid_ip and not filter_invalid_user
+falsepositives:
+  - Mistyped passwords
+  - Stale saved credentials
+level: informational
+
+---
+title: Windows Failed Authentication With Source Host And Account
+name: windows_failed_auth_by_host_and_account
+id: 1523c66c-6e62-4cab-8149-53ac63fc3e23
+status: experimental
+description: Base selection for failed Windows authentications with a source host and target account.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+    WorkstationName|exists: true
+    TargetUserName|exists: true
+  filter_invalid_host:
+    WorkstationName:
+      - '-'
+      - ''
+  filter_invalid_user:
+    TargetUserName:
+      - '-'
+      - ''
+  condition: selection and not filter_invalid_host and not filter_invalid_user
+falsepositives:
+  - Mistyped passwords
+  - Stale saved credentials
+level: informational
+
+---
+title: Windows Failed Authentication With Source IP
+name: windows_failed_auth_by_ip
+id: f44b22ca-d7fc-41df-a581-c2fd34e72e79
+status: experimental
+description: Base selection for failed Windows authentications with a valid source IP.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+    IpAddress|exists: true
+  filter_invalid_ip:
+    IpAddress:
+      - '-'
+      - ''
+  condition: selection and not filter_invalid_ip
+falsepositives:
+  - Shared NAT addresses
+  - Authentication loops caused by stale credentials
+level: informational
+
+---
+title: Windows Failed Authentication With Source Host
+name: windows_failed_auth_by_host
+id: 711843cf-9d5e-4e85-9712-995c21f68f2d
+status: experimental
+description: Base selection for failed Windows authentications with a valid source host name.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+    WorkstationName|exists: true
+  filter_invalid_host:
+    WorkstationName:
+      - '-'
+      - ''
+  condition: selection and not filter_invalid_host
+falsepositives:
+  - Shared terminal servers
+  - Authentication loops caused by stale credentials
+level: informational
+
+---
+title: Windows Failed Authentication With Target Account
+name: windows_failed_auth_by_account
+id: 3085413b-939e-4687-b0d2-18c26352600c
+status: experimental
+description: Base selection for failed Windows authentications with a valid target account.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+    TargetUserName|exists: true
+  filter_invalid_user:
+    TargetUserName:
+      - '-'
+      - ''
+  condition: selection and not filter_invalid_user
+falsepositives:
+  - Password changes with stale saved credentials
+  - Misconfigured services and scheduled tasks
+level: informational
+
+---
+title: Windows Brute Force - Ten Failures By Source IP And Account
+name: windows_bruteforce_10_by_ip_and_account
+id: 5eb79765-b6f5-4d5d-a78e-e379f22d0366
+status: experimental
+description: Detects at least ten failed Windows authentications from one source IP against one account within five minutes.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+correlation:
+  type: event_count
+  rules:
+    - windows_failed_auth_by_ip_and_account
+  group-by:
+    - IpAddress
+    - TargetDomainName
+    - TargetUserName
+  timespan: 5m
+  condition:
+    gte: 10
+falsepositives:
+  - A user repeatedly mistyped a password
+  - A service is using stale credentials
+level: high
+
+---
+title: Windows Brute Force - Ten Failures By Source Host And Account
+name: windows_bruteforce_10_by_host_and_account
+id: bddaffb8-35ab-45ed-a19b-42a4583e2878
+status: experimental
+description: Detects at least ten failed Windows authentications from one source host against one account within five minutes.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+correlation:
+  type: event_count
+  rules:
+    - windows_failed_auth_by_host_and_account
+  group-by:
+    - WorkstationName
+    - TargetDomainName
+    - TargetUserName
+  timespan: 5m
+  condition:
+    gte: 10
+falsepositives:
+  - A user repeatedly mistyped a password
+  - A service is using stale credentials
+level: high
+
+---
+title: Windows Brute Force - Twenty Failures By Source IP
+name: windows_bruteforce_20_by_ip
+id: 5fc12a7b-933a-4c67-a089-f5c4cb6c0e46
+status: experimental
+description: Detects at least twenty failed Windows authentications from one source IP within five minutes.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+correlation:
+  type: event_count
+  rules:
+    - windows_failed_auth_by_ip
+  group-by:
+    - IpAddress
+  timespan: 5m
+  condition:
+    gte: 20
+falsepositives:
+  - Shared NAT addresses
+  - Authentication loops caused by stale credentials
+level: high
+
+---
+title: Windows Brute Force - Twenty Failures By Source Host
+name: windows_bruteforce_20_by_host
+id: 7c855e40-5738-49e7-b395-cf7dcc7de6f3
+status: experimental
+description: Detects at least twenty failed Windows authentications from one source host within five minutes.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+correlation:
+  type: event_count
+  rules:
+    - windows_failed_auth_by_host
+  group-by:
+    - WorkstationName
+  timespan: 5m
+  condition:
+    gte: 20
+falsepositives:
+  - Shared terminal servers
+  - Authentication loops caused by stale credentials
+level: high
+
+---
+title: Windows Brute Force - Twenty Failures By Account
+name: windows_bruteforce_20_by_account
+id: c6ad51b8-ce3d-475e-a084-6ef9908dfc35
+status: experimental
+description: Detects at least twenty failed Windows authentications against one account within five minutes.
+author: Artem / OpenAI
+date: 2026-08-02
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential-access
+  - attack.t1110
+correlation:
+  type: event_count
+  rules:
+    - windows_failed_auth_by_account
+  group-by:
+    - TargetDomainName
+    - TargetUserName
+  timespan: 5m
+  condition:
+    gte: 20
+falsepositives:
+  - Password changes with stale saved credentials
+  - Misconfigured services and scheduled tasks
+level: high

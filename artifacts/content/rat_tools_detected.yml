@@ -1,0 +1,621 @@
+title: RAT and RMM Tool Process Execution - Windows Image
+id: 08b24aed-788c-4120-b757-5a00607b1041
+status: experimental
+description: >
+  Detects execution of known remote access, remote administration and RMM
+  software on Windows. The list includes AnyDesk, PsExec, Assistant, Timbuktu,
+  TeamViewer, VNC, Ammyy Admin, Radmin, PDAdmin, FreeRDP, DameWare, Remote
+  Utilities/RMS and additional commonly abused RMM tools. This rule detects
+  software presence and does not by itself prove malicious use.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1219/002/
+  - https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-025a
+  - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/process_creation/proc_creation_win_remote_access_tools_anydesk.yml
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_event:
+    EventID: 1
+  selection_image:
+    Image|endswith:
+      # AnyDesk.
+      - '\AnyDesk.exe'
+      - '\AnyDeskMSI.exe'
+
+      # PsExec and compatible implementations.
+      - '\PsExec.exe'
+      - '\PsExec64.exe'
+      - '\PsExec64a.exe'
+      - '\PSEXESVC.exe'
+      - '\PAExec.exe'
+
+      # Assistant remote access.
+      - '\assistant.exe'
+      - '\assistant_client.exe'
+      - '\assistant_service.exe'
+      - '\assistant_install_4.exe'
+
+      # Timbuktu.
+      - '\Tb2RCAssist.exe'
+      - '\Tb2pro.exe'
+      - '\Tb2logon.exe'
+      - '\Tb2launch.exe'
+
+      # TeamViewer.
+      - '\TeamViewer.exe'
+      - '\TeamViewer_Service.exe'
+      - '\TeamViewer_Desktop.exe'
+
+      # VNC implementations.
+      - '\winvnc.exe'
+      - '\vncserver.exe'
+      - '\vncviewer.exe'
+      - '\tvnserver.exe'
+      - '\tvnviewer.exe'
+      - '\uvnc_service.exe'
+      - '\uvnc_settings.exe'
+
+      # Ammyy Admin.
+      - '\Ammyy_Admin.exe'
+
+      # Radmin.
+      - '\radmin.exe'
+      - '\radmin3.exe'
+      - '\rserver3.exe'
+
+      # PDAdmin.
+      - '\PDAdmin.exe'
+
+      # FreeRDP.
+      - '\wfreerdp.exe'
+
+      # DameWare.
+      - '\DWRCS.exe'
+      - '\DWRCS64.exe'
+      - '\DNTU.exe'
+      - '\DNTU64.exe'
+
+      # Remote Utilities / RMS.
+      - '\rutserv.exe'
+      - '\rfusclient.exe'
+      - '\rutview.exe'
+
+      # Additional RMM tools commonly abused by threat actors.
+      - '\rustdesk.exe'
+      - '\ScreenConnect.ClientService.exe'
+      - '\ScreenConnect.WindowsClient.exe'
+      - '\client32.exe'
+      - '\meshagent.exe'
+      - '\SRManager.exe'
+      - '\SRService.exe'
+      - '\SplashtopSOS.exe'
+      - '\SplashtopStreamer.exe'
+      - '\dwagent.exe'
+      - '\Supremo.exe'
+      - '\SupremoService.exe'
+  selection_ammyy_versioned_name_image:
+    Image|contains: '\AA_v'
+    Image|endswith: '.exe'
+  condition: selection_event and (selection_image or selection_ammyy_versioned_name_image)
+falsepositives:
+  - Approved remote support, help-desk, system administration and software deployment
+  - Legitimate PsExec use by administrators, EDR, inventory or deployment systems
+  - Generic file names such as assistant.exe or client32.exe used by unrelated applications
+level: medium
+
+---
+title: RAT and RMM Tool Process Execution - Windows NewProcessName
+id: 651f2190-f967-4a12-b3ea-88c22a92534b
+status: experimental
+description: >
+  Windows Security 4688-compatible variant that detects the same RAT/RMM
+  process pool through NewProcessName. It is separate from the Image rule
+  because soc_agent may ingest Security events without an Image column.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1219/002/
+  - https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-025a
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_event:
+    EventID: 4688
+  selection_process:
+    NewProcessName|endswith:
+      - '\AnyDesk.exe'
+      - '\AnyDeskMSI.exe'
+      - '\PsExec.exe'
+      - '\PsExec64.exe'
+      - '\PsExec64a.exe'
+      - '\PSEXESVC.exe'
+      - '\PAExec.exe'
+      - '\assistant.exe'
+      - '\assistant_client.exe'
+      - '\assistant_service.exe'
+      - '\assistant_install_4.exe'
+      - '\Tb2RCAssist.exe'
+      - '\Tb2pro.exe'
+      - '\Tb2logon.exe'
+      - '\Tb2launch.exe'
+      - '\TeamViewer.exe'
+      - '\TeamViewer_Service.exe'
+      - '\TeamViewer_Desktop.exe'
+      - '\winvnc.exe'
+      - '\vncserver.exe'
+      - '\vncviewer.exe'
+      - '\tvnserver.exe'
+      - '\tvnviewer.exe'
+      - '\uvnc_service.exe'
+      - '\uvnc_settings.exe'
+      - '\Ammyy_Admin.exe'
+      - '\radmin.exe'
+      - '\radmin3.exe'
+      - '\rserver3.exe'
+      - '\PDAdmin.exe'
+      - '\wfreerdp.exe'
+      - '\DWRCS.exe'
+      - '\DWRCS64.exe'
+      - '\DNTU.exe'
+      - '\DNTU64.exe'
+      - '\rutserv.exe'
+      - '\rfusclient.exe'
+      - '\rutview.exe'
+      - '\rustdesk.exe'
+      - '\ScreenConnect.ClientService.exe'
+      - '\ScreenConnect.WindowsClient.exe'
+      - '\client32.exe'
+      - '\meshagent.exe'
+      - '\SRManager.exe'
+      - '\SRService.exe'
+      - '\SplashtopSOS.exe'
+      - '\SplashtopStreamer.exe'
+      - '\dwagent.exe'
+      - '\Supremo.exe'
+      - '\SupremoService.exe'
+  selection_ammyy_versioned_name:
+    NewProcessName|contains: '\AA_v'
+    NewProcessName|endswith: '.exe'
+  condition: selection_event and (selection_process or selection_ammyy_versioned_name)
+falsepositives:
+  - Approved remote support, help-desk, system administration and software deployment
+  - Legitimate PsExec use by administrators, EDR, inventory or deployment systems
+  - Generic file names such as assistant.exe or client32.exe used by unrelated applications
+level: medium
+
+---
+title: RAT and RMM Tool Process Execution - Linux Image
+id: 79feee40-c3a8-4625-a843-d0a316537e2f
+status: experimental
+description: >
+  Detects Linux execution of remote desktop and RMM clients or services from
+  the user-provided pool and additional commonly abused tools.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1219/002/
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_image:
+    Image|endswith:
+      - '/anydesk'
+      - '/teamviewer'
+      - '/teamviewerd'
+      - '/TeamViewer_Desktop'
+      - '/xfreerdp'
+      - '/wlfreerdp'
+      - '/sdl-freerdp'
+      - '/freerdp-shadow-cli'
+      - '/vncserver'
+      - '/Xvnc'
+      - '/x11vnc'
+      - '/wayvnc'
+      - '/vncviewer'
+      - '/rustdesk'
+      - '/meshagent'
+      - '/dwagent'
+  condition: selection_image
+falsepositives:
+  - Approved remote support and Linux desktop administration
+level: medium
+
+---
+title: RAT and RMM Tool Process Execution - Linux exe
+id: 001a69bd-6b79-4ad4-a105-75f4baa38c17
+status: experimental
+description: >
+  Linux auditd-compatible variant that detects the same RAT/RMM process pool
+  through the exe field. It is separate from the Image rule because soc_agent
+  may ingest auditd events without an Image column.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1219/002/
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_exe:
+    exe|endswith:
+      - '/anydesk'
+      - '/teamviewer'
+      - '/teamviewerd'
+      - '/TeamViewer_Desktop'
+      - '/xfreerdp'
+      - '/wlfreerdp'
+      - '/sdl-freerdp'
+      - '/freerdp-shadow-cli'
+      - '/vncserver'
+      - '/Xvnc'
+      - '/x11vnc'
+      - '/wayvnc'
+      - '/vncviewer'
+      - '/rustdesk'
+      - '/meshagent'
+      - '/dwagent'
+  condition: selection_exe
+falsepositives:
+  - Approved remote support and Linux desktop administration
+level: medium
+
+---
+title: AnyDesk Execution With Service or Internal Component Parameters
+id: c2e37028-2de7-4604-8d55-2e3691b2531e
+status: experimental
+description: >
+  Detects AnyDesk execution with service, control, backend, proxy, loader or
+  shared-memory parameters. These parameters can be legitimate, but provide
+  useful context for unattended access and internal component execution.
+author: Artem
+date: 2026-08-08
+references:
+  - https://attack.mitre.org/techniques/T1219/002/
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_event:
+    EventID:
+      - 1
+      - 4688
+  selection_anydesk_command:
+    CommandLine|contains: 'AnyDesk'
+  selection_parameter:
+    CommandLine|contains:
+      - '--control'
+      - '--service'
+      - '--backend'
+      - '--backproxy-system'
+      - '--loader'
+      - '--shm-id'
+  condition: selection_event and selection_anydesk_command and selection_parameter
+falsepositives:
+  - Normal AnyDesk startup, service mode, update or inter-process communication
+level: medium
+
+---
+title: RAT and RMM Network Connection by Known Process
+id: b61cbf05-5ef0-4160-94d2-fe8922f92ae5
+status: experimental
+description: >
+  Detects a network connection from a known RAT/RMM process when either the
+  local or remote port is associated with remote administration software.
+  Common ports such as 80, 135, 443, 445 and 8080 are evaluated only when the
+  process is a known remote-access executable.
+author: Artem
+date: 2026-08-08
+references:
+  - https://support.anydesk.com/docs/firewall
+  - https://www.teamviewer.com/en/global/support/knowledge-base/teamviewer-remote/troubleshooting/ports-used-by-teamviewer/
+  - https://www.remoteutilities.com/support/docs/ports-used-by-remote-utilities/
+  - https://www.remoteutilities.com/support/kb/cannot-connect-using-direct-connection/
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: network_connection
+  product: windows
+detection:
+  selection_event:
+    EventID: 3
+  selection_process_image:
+    Image|endswith:
+      - '\AnyDesk.exe'
+      - '\AnyDeskMSI.exe'
+      - '\PsExec.exe'
+      - '\PsExec64.exe'
+      - '\PsExec64a.exe'
+      - '\PSEXESVC.exe'
+      - '\PAExec.exe'
+      - '\assistant.exe'
+      - '\assistant_client.exe'
+      - '\assistant_service.exe'
+      - '\Tb2RCAssist.exe'
+      - '\Tb2pro.exe'
+      - '\Tb2logon.exe'
+      - '\Tb2launch.exe'
+      - '\TeamViewer.exe'
+      - '\TeamViewer_Service.exe'
+      - '\TeamViewer_Desktop.exe'
+      - '\winvnc.exe'
+      - '\vncserver.exe'
+      - '\vncviewer.exe'
+      - '\tvnserver.exe'
+      - '\tvnviewer.exe'
+      - '\uvnc_service.exe'
+      - '\Ammyy_Admin.exe'
+      - '\radmin.exe'
+      - '\radmin3.exe'
+      - '\rserver3.exe'
+      - '\PDAdmin.exe'
+      - '\wfreerdp.exe'
+      - '\DWRCS.exe'
+      - '\DWRCS64.exe'
+      - '\DNTU.exe'
+      - '\DNTU64.exe'
+      - '\rutserv.exe'
+      - '\rfusclient.exe'
+      - '\rutview.exe'
+      - '\rustdesk.exe'
+      - '\ScreenConnect.ClientService.exe'
+      - '\ScreenConnect.WindowsClient.exe'
+      - '\client32.exe'
+      - '\meshagent.exe'
+      - '\SRManager.exe'
+      - '\SRService.exe'
+      - '\SplashtopSOS.exe'
+      - '\SplashtopStreamer.exe'
+      - '\dwagent.exe'
+      - '\Supremo.exe'
+      - '\SupremoService.exe'
+  selection_process_ammyy_versioned:
+    Image|contains: '\AA_v'
+    Image|endswith: '.exe'
+  selection_destination_port:
+    DestinationPort:
+      - 80
+      - 135
+      - 407
+      - 443
+      - 445
+      - 1417
+      - 1418
+      - 1419
+      - 1420
+      - 3389
+      - 4899
+      - 5650
+      - 5651
+      - 5655
+      - 5676
+      - 5800
+      - 5900
+      - 5901
+      - 5902
+      - 5938
+      - 6129
+      - 6568
+      - 7070
+      - 8080
+      - 9597
+      - 44334
+      - 44335
+      - 44444
+      - 50001
+      - 50002
+      - 50003
+  selection_source_port:
+    SourcePort:
+      - 80
+      - 135
+      - 407
+      - 443
+      - 445
+      - 1417
+      - 1418
+      - 1419
+      - 1420
+      - 3389
+      - 4899
+      - 5650
+      - 5651
+      - 5655
+      - 5676
+      - 5800
+      - 5900
+      - 5901
+      - 5902
+      - 5938
+      - 6129
+      - 6568
+      - 7070
+      - 8080
+      - 9597
+      - 44334
+      - 44335
+      - 44444
+      - 50001
+      - 50002
+      - 50003
+  condition: selection_event and 1 of selection_process_* and 1 of selection_*_port
+falsepositives:
+  - Approved remote support, administration and RMM traffic
+  - A listed executable name used by unrelated software
+level: medium
+
+---
+title: Network Connection on RAT and RMM Specific Port
+id: 74e2ea2a-165a-495c-9f60-ccc664ce2cce
+status: experimental
+description: >
+  Detects connections where either endpoint uses a port associated with RAT or
+  RMM software. Common ports 80, 135, 443, 445 and 8080 are intentionally
+  excluded because a port-only match would be excessively noisy.
+author: Artem
+date: 2026-08-08
+references:
+  - https://support.anydesk.com/docs/firewall
+  - https://www.teamviewer.com/en/global/support/knowledge-base/teamviewer-remote/troubleshooting/ports-used-by-teamviewer/
+  - https://www.remoteutilities.com/support/docs/ports-used-by-remote-utilities/
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: network_connection
+  product: windows
+detection:
+  selection_event:
+    EventID: 3
+  selection_destination_port:
+    DestinationPort:
+      - 407
+      - 1417
+      - 1418
+      - 1419
+      - 1420
+      - 4899
+      - 5650
+      - 5651
+      - 5655
+      - 5676
+      - 5800
+      - 5900
+      - 5901
+      - 5902
+      - 5938
+      - 6129
+      - 6568
+      - 7070
+      - 9597
+      - 44334
+      - 44335
+      - 44444
+      - 50001
+      - 50002
+      - 50003
+  selection_source_port:
+    SourcePort:
+      - 407
+      - 1417
+      - 1418
+      - 1419
+      - 1420
+      - 4899
+      - 5650
+      - 5651
+      - 5655
+      - 5676
+      - 5800
+      - 5900
+      - 5901
+      - 5902
+      - 5938
+      - 6129
+      - 6568
+      - 7070
+      - 9597
+      - 44334
+      - 44335
+      - 44444
+      - 50001
+      - 50002
+      - 50003
+  condition: selection_event and (selection_destination_port or selection_source_port)
+falsepositives:
+  - Unrelated applications configured to use the same port
+  - Approved remote administration software
+level: low
+
+---
+title: DNS Query to RAT and RMM Service Domain
+id: a13b95c9-adf6-481c-89ef-29000d15f75c
+status: experimental
+description: >
+  Detects DNS resolution of domains associated with remote access and RMM
+  services from non-browser processes. Domain resolution alone does not prove
+  that a remote-control session was established.
+author: Artem
+date: 2026-08-08
+references:
+  - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/dns_query/dns_query_win_remote_access_software_domains_non_browsers.yml
+  - https://attack.mitre.org/techniques/T1219/002/
+tags:
+  - attack.command-and-control
+  - attack.t1219.002
+logsource:
+  category: dns_query
+  product: windows
+detection:
+  selection_event:
+    EventID: 22
+  selection_domain_generic:
+    QueryName|endswith:
+      # User-provided products with stable vendor infrastructure.
+      - 'ammyy.com'
+      - 'net.anydesk.com'
+      - 'teamviewer.com'
+      - 'services.vnc.com'
+      - 'remoteutilities.com'
+      - 'radmin.com'
+      - 'safib.ru'
+      - 'xn--80akicokc0aablc.xn--p1ai'
+
+      # Additional remote-access and RMM services.
+      - 'control.connectwise.com'
+      - 'relay.screenconnect.com'
+      - 'api.splashtop.com'
+      - 'relay.splashtop.com'
+      - 'dwservice.net'
+      - 'zohoassist.com'
+      - 'assist.zoho.com'
+      - 'join.zoho.com'
+      - 'logmein.com'
+      - 'logmeininc.com'
+      - 'logmein-gateway.com'
+      - 'remotepc.com'
+      - 'netsupportsoftware.com'
+      - 'getscreen.me'
+      - 'supremocontrol.com'
+  selection_domain_rustdesk:
+    QueryName|startswith: 'rs-'
+    QueryName|endswith: '.rustdesk.com'
+  filter_browser:
+    Image|endswith:
+      - '\chrome.exe'
+      - '\firefox.exe'
+      - '\msedge.exe'
+      - '\msedgewebview2.exe'
+      - '\iexplore.exe'
+      - '\opera.exe'
+      - '\brave.exe'
+      - '\vivaldi.exe'
+      - '\safari.exe'
+      - '\Waterfox.exe'
+      - '\Tor Browser\Browser\firefox.exe'
+  condition: selection_event and 1 of selection_domain_* and not filter_browser
+falsepositives:
+  - Approved remote support software contacting vendor infrastructure
+  - DNS resolution by software inventory, EDR, proxy, DNS inspection or update services
+  - Browsers not included in the filter list
+level: medium
