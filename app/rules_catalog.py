@@ -4,10 +4,12 @@
 Две категории рулсетов:
   - builtin - Zircolite/rules/*.json (внешний git-клон, read-only, никогда не редактируем/не удаляем).
   - custom  - custom_rulesets/<ruleset_id>/ - именованные пользовательские рулсеты. Каждый -
-              директория: meta.json (id/name/created_at), <rule_id>.yml на правило (сырой Sigma
-              YAML - source of truth) и .manifest.json - кэш скомпилированных метаданных ВСЕХ
-              правил директории (тот же формат, что и Zircolite/rules/*.json), нужен только для
-              быстрого просмотра списком, никогда не участвует в детекте напрямую.
+              директория: meta.json (id/name/created_at), <rule_id>.yml на обычное правило
+              (сырой Sigma YAML - source of truth), <rule_id>{CORRELATION_EXT} на
+              correlation-правило (см. ниже, ПОЧЕМУ отдельное расширение) и .manifest.json -
+              кэш скомпилированных метаданных ВСЕХ правил директории (тот же формат, что и
+              Zircolite/rules/*.json), нужен только для быстрого просмотра списком, никогда не
+              участвует в детекте напрямую.
 
 Состав "основного рулсета" (main ruleset, ruleset_path == "main") - НЕ часть этого модуля,
 см. app/main_ruleset.py. Он лишь ссылается на рулсеты/правила, каталогизированные здесь
@@ -24,6 +26,27 @@ RulesetHandler его не увидит.
 Просмотр рулсетов (browsing) НЕ требует pySigma вообще - built-in уже скомпилирован (обычный
 json.load), custom читается из готового .manifest.json. Компиляция через RulesetHandler нужна
 ТОЛЬКО при добавлении нового кастомного правила/рулсета (save_custom_rule/save_ruleset_yaml).
+
+Sigma correlation-правила (type: event_count/value_count/temporal/temporal_ordered) хранятся
+ИНАЧЕ, чем обычные - файлом `<rule_id>{CORRELATION_EXT}` (не `.yml`/`.yaml`!) в той же
+директории рулсета. Причина - реальный баг в пинченном pysigma-backend-sqlite (проверено
+эмпирически вплоть до последней опубликованной версии 1.2.4): правило, на которое ссылается
+`correlation.rules:` (то есть присутствует В ОДНОМ SigmaCollection вместе с корреляцией,
+ссылающейся на него), при компиляции этого правила ОТДЕЛЬНО backend возвращает сырую
+SQL-строку вместо dict, что валит компиляцию pySigma-стороны совсем (`'str' object has no
+attribute 'get'` в Zircolite при попытке отсортировать результат). Наш собственный
+correlation-движок (app/correlation.py) при этом вообще не использует SQL, который бы
+сгенерировал pySigma для корреляции - ему нужны только структурные поля (type/group-by/
+timespan/condition/rules) из raw YAML, которые он читает сам (load_correlation_rules ниже).
+Поэтому решение простое и радикальное: correlation-правила физически НИКОГДА не попадают в
+тот же RulesetHandler-вызов, что и правило, на которое они ссылаются - расширение файла не
+`.yml`/`.yaml`, значит RulesetHandler (rglob("*.yml") + rglob("*.yaml")) их вообще не видит,
+`resolve_rule_references()` внутри pySigma никогда не запускается на referenced-правиле, и
+оно компилируется как совершенно обычное правило, под своим настоящим именем - никаких
+"правил-двойников" в контенте заводить не нужно. compile_custom_rule/compile_ruleset_yaml
+ниже сами решают (по наличию ключа `correlation:` в документе), в какую компиляцию отдать
+документ - в RulesetHandler (обычные правила) или в собственную лёгкую валидацию без pySigma
+(correlation-правила, см. _validate_correlation_doc/_compile_correlation_doc).
 """
 from __future__ import annotations
 
@@ -62,6 +85,14 @@ CUSTOM_ROOT.mkdir(parents=True, exist_ok=True)
 LEVEL_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+# Расширение файлов correlation-правил на диске - НЕ .yml/.yaml, чтобы RulesetHandler
+# (Zircolite/pySigma) их вообще не видел при компиляции директории рулсета (см. докстринг
+# модуля выше про причину). Содержимое файла при этом - обычный raw Sigma YAML (source of
+# truth, как и у .yml-правил), просто с "невидимым" для детект-движка расширением.
+CORRELATION_EXT = ".sigmacorr"
+
+_CORR_TYPES = {"event_count", "value_count", "temporal", "temporal_ordered"}
 
 
 class CatalogError(Exception):
@@ -167,6 +198,20 @@ def _is_custom_ruleset(ruleset_path: str) -> bool:
         return False
 
 
+def _find_rule_file(target_dir: Path, rule_id: str) -> Path | None:
+    """Находит файл правила по id независимо от того, обычное это правило (`.yml`) или
+    correlation (CORRELATION_EXT, см. докстринг модуля) - оба хранятся под одним и тем же
+    rule_id, различается только расширение. Возвращает None, если правила с таким id нет ни
+    в каком виде."""
+    plain = target_dir / f"{rule_id}.yml"
+    if plain.is_file():
+        return plain
+    corr = target_dir / f"{rule_id}{CORRELATION_EXT}"
+    if corr.is_file():
+        return corr
+    return None
+
+
 def load_rules(ruleset_path: str) -> list[dict[str, Any]]:
     """Список правил рулсета по пути/id - тот же 'ruleset', что уже принимают /ingest/*."""
     if _is_custom_ruleset(ruleset_path):
@@ -258,11 +303,91 @@ def get_rule(ruleset_path: str, rule_id: str) -> dict[str, Any] | None:
         if rule.get("id") == rule_id:
             if _is_custom_ruleset(ruleset_path):
                 rule = dict(rule)
-                yaml_path = _custom_ruleset_dir(ruleset_path) / f"{rule_id}.yml"
-                if yaml_path.is_file():
+                yaml_path = _find_rule_file(_custom_ruleset_dir(ruleset_path), rule_id)
+                if yaml_path is not None:
                     rule["yaml_text"] = yaml_path.read_text(encoding="utf-8")
             return rule
     return None
+
+
+def load_correlation_rules(ruleset_path: str) -> list[dict[str, Any]]:
+    """Структурированные описания correlation-правил (Sigma type: event_count/value_count/
+    temporal/temporal_ordered) одного custom-рулсета - для app/correlation.py (свой движок
+    поверх постоянной таблицы events/rule_hits, а не через pysigma-backend-sqlite - см.
+    докстринг модуля про причину и CORRELATION_EXT). Builtin-рулсеты никогда не содержат
+    correlation-правил (проверено на всех Zircolite/rules/*.json) - для них всегда [].
+
+    Читает *{CORRELATION_EXT} рулсета напрямую (yaml.safe_load, без pySigma/RulesetHandler -
+    тот же "дешёвый browsing"-принцип, что и у остального модуля) - нужны структурные поля
+    Sigma YAML (type/group-by/timespan/condition/rules) как есть, не готовый SQL.
+
+    correlation.rules ссылается на соседние правила по их Sigma 'name' (короткий идентификатор)
+    ИЛИ 'id' (uuid) - оба формата валидны по спеке; индекс name/id -> title строится по ВСЕМ
+    обычным *.yml/*.yaml рулсета (они теперь компилируются независимо от корреляции, см.
+    CORRELATION_EXT - никаких "правил-двойников" не требуется, base_rule_titles указывает
+    прямо на настоящий title референсируемого правила, ровно то, что реально попадёт в
+    events.matched_rules/rule_hits.rule_title, см. app/main.py:_build_matched_row_map).
+    Правило с хотя бы одной неразрешённой ссылкой пропускается защитно - каталог не должен
+    падать на кривом/неполном YAML (например пока сохраняется только часть файла)."""
+    if not _is_custom_ruleset(ruleset_path):
+        return []
+    target_dir = _custom_ruleset_dir(ruleset_path)
+
+    name_to_title: dict[str, str] = {}
+    for yml_path in list(target_dir.glob("*.yml")) + list(target_dir.glob("*.yaml")):
+        try:
+            text = yml_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            docs = [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
+        except yaml.YAMLError:
+            continue
+        for doc in docs:
+            title = doc.get("title")
+            if not title:
+                continue
+            if doc.get("name"):
+                name_to_title[str(doc["name"])] = title
+            if doc.get("id"):
+                name_to_title[str(doc["id"])] = title
+
+    results: list[dict[str, Any]] = []
+    for corr_path in target_dir.glob(f"*{CORRELATION_EXT}"):
+        try:
+            text = corr_path.read_text(encoding="utf-8")
+            docs = [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
+        except (OSError, yaml.YAMLError):
+            continue
+        for doc in docs:
+            corr = doc.get("correlation")
+            title = doc.get("title")
+            if not title or not isinstance(corr, dict):
+                continue
+            refs = corr.get("rules") or []
+            base_titles: list[str] = []
+            unresolved = False
+            for ref in refs:
+                title_for_ref = name_to_title.get(str(ref))
+                if title_for_ref is None:
+                    unresolved = True
+                    break
+                base_titles.append(title_for_ref)
+            if unresolved:
+                continue
+            results.append({
+                "id": doc.get("id"),
+                "title": title,
+                "level": doc.get("level", "informational"),
+                "description": doc.get("description", ""),
+                "tags": doc.get("tags", []),
+                "type": corr.get("type"),
+                "group_by": corr.get("group-by") or [],
+                "timespan": corr.get("timespan"),
+                "condition": corr.get("condition") or {},
+                "base_rule_titles": base_titles,
+            })
+    return results
 
 
 # ------------------------------------------------------------------ Рулсеты (список/upload/delete)
@@ -356,6 +481,63 @@ def delete_custom_ruleset(ruleset_path: str) -> None:
 
 # ------------------------------------------------------------------ Кастомные правила (YAML)
 
+def _looks_like_correlation_doc(doc: dict[str, Any]) -> bool:
+    return "title" in doc and "correlation" in doc
+
+
+def _validate_correlation_doc(doc: dict[str, Any]) -> None:
+    """Лёгкая структурная валидация correlation-документа БЕЗ pySigma (см. докстринг модуля
+    про CORRELATION_EXT/почему pySigma тут не участвует вообще). Не полный валидатор Sigma-
+    спеки - ловит только очевидные ошибки, чтобы автор правила увидел понятную причину отказа
+    при сохранении, а не тихо получил корреляцию, которая никогда не сработает (app/
+    correlation.py и так защитно пропускает неподдерживаемые/некорректные записи молча -
+    здесь, наоборот, хотим громко предупредить на этапе сохранения)."""
+    if not doc.get("title"):
+        raise RuleValidationError("Correlation-правило должно содержать 'title'")
+    corr = doc.get("correlation")
+    if not isinstance(corr, dict):
+        raise RuleValidationError("Отсутствует блок 'correlation'")
+    corr_type = corr.get("type")
+    if corr_type not in _CORR_TYPES:
+        raise RuleValidationError(
+            f"correlation.type должен быть одним из {sorted(_CORR_TYPES)}, получено: {corr_type!r}"
+        )
+    refs = corr.get("rules")
+    if not refs or not isinstance(refs, list):
+        raise RuleValidationError("correlation.rules должен быть непустым списком ссылок на правила")
+    if corr_type in ("event_count", "value_count"):
+        if not corr.get("timespan"):
+            raise RuleValidationError(f"correlation.timespan обязателен для типа '{corr_type}'")
+        if not corr.get("condition"):
+            raise RuleValidationError(f"correlation.condition обязателен для типа '{corr_type}'")
+        if corr_type == "value_count" and not (corr.get("condition") or {}).get("field"):
+            raise RuleValidationError("correlation.condition.field обязателен для value_count")
+
+
+def _compile_correlation_doc(doc: dict[str, Any]) -> dict[str, Any]:
+    """"Псевдо-скомпилированная" запись correlation-правила для .manifest.json (просмотр/
+    main-ruleset toggle в UI - те же поля, что и у обычных compiled-словарей из RulesetHandler,
+    но без 'rule' (SQL, тут неоткуда взять и не нужен - см. докстринг модуля) и без обращения
+    к pySigma вообще. Структурные поля (type/group-by/timespan/condition/rules) сюда
+    сознательно НЕ дублируются - их заново читает load_correlation_rules из raw YAML при
+    каждом использовании (дёшево, correlation-правил в рулсете единицы)."""
+    return {
+        "id": doc.get("id") or "",
+        "title": doc["title"],
+        "status": doc.get("status", "experimental"),
+        "description": doc.get("description", ""),
+        "author": doc.get("author", ""),
+        "tags": doc.get("tags", []),
+        "falsepositives": doc.get("falsepositives", []),
+        "level": doc.get("level", "informational"),
+        "correlation": True,
+        "rule": [],
+        "filename": "",
+        "channel": [],
+        "eventid": [],
+    }
+
+
 def _looks_like_sigma_rule(yaml_text: str) -> bool:
     """Структурная пре-проверка без обращения к Zircolite/pySigma - эквивалент
     RulesetHandler.is_valid_sigma_rule (title+logsource+detection, либо title+correlation),
@@ -440,35 +622,50 @@ def compile_custom_rule(
     компиляции конкретного правила; после конструктора отдельно проверяем, что
     handler.rulesets непустой.
 
-    target_dir - если задан, компиляция идёт в контексте ВСЕГО целевого custom-рулсета (все
-    уже сохранённые там .yml), а не изолированно во временном файле. Нужно для
-    correlation-правил: `correlation.rules` ссылается на СОСЕДНЕЕ detection-правило по имени, а
-    pySigma (SigmaCollection.load_ruleset) резолвит такие ссылки только внутри ОДНОЙ загрузки -
-    при компиляции временного файла в одиночку компилятор соседних правил рулсета просто не
-    видит, и ссылка не резолвится (SigmaRuleNotFoundError). Zircolite уже трактует
-    custom_rulesets/<id> как одну директорию-рулсет при обычном детекте (RulesetHandler globs
-    *.yml всей папки) - тут воспроизводим ту же область видимости, просто на момент сохранения
-    одного правила. Реальную директорию рулсета при этом НЕ трогаем - соседние .yml копируются
-    в одноразовую scratch-директорию вместе с новым/редактируемым правилом, компилируем ТАМ.
-    Так надёжнее переименования файлов на месте: если процесс упадёт посреди компиляции, в
-    целевом рулсете ничего не потеряется и не окажется временно скрытым под чужим расширением.
-    Итог компиляции директории - N скомпилированных правил (по числу .yml внутри), нужно
-    выбрать ИМЕННО наше среди них; сопоставление - по title (обязательное поле Sigma, тот же
-    приём, что и в save_ruleset_yaml/_match_yaml_by_title). Referenced-only detection-правило
-    (используется только чтобы дать SQL для correlation, `generate: true` не указан) не
-    попадает в handler.rulesets вовсе (см. Zircolite rules.py - "referenced only" пропускается)
-    - так что даже если title совпадёт с ним, он не будет кандидатом.
+    target_dir - если задан, компиляция обычного (не-correlation, см. ниже) правила идёт в
+    контексте ВСЕХ уже сохранённых там .yml-соседей, а не изолированно во временном файле -
+    чтобы поймать коллизию title внутри ОДНОГО рулсета (если после компиляции нашлось больше
+    одного правила с таким title - значит в рулсете уже есть тёзка, неоднозначность, см. ниже
+    по коду). Соседние .yml копируются в одноразовую scratch-директорию вместе с новым/
+    редактируемым правилом, компилируем ТАМ (не реальную директорию рулсета) - надёжнее
+    переименования файлов на месте: если процесс упадёт посреди компиляции, в целевом рулсете
+    ничего не потеряется и не окажется временно скрытым под чужим расширением. Итог компиляции
+    директории - N скомпилированных правил (по числу .yml внутри), нужно выбрать ИМЕННО наше
+    среди них; сопоставление - по title (обязательное поле Sigma, тот же приём, что и в
+    save_ruleset_yaml/_match_yaml_by_title).
+
+    ВАЖНО: correlation-правила (в т.ч. те, на которые где-то ссылается correlation.rules
+    соседнего файла) сюда не попадают вообще - они хранятся под CORRELATION_EXT (не .yml/
+    .yaml), поэтому глоб ниже их физически не видит, и pySigma никогда не узнаёт о связи
+    correlation-правило/referenced-правило (см. докстринг модуля). Раньше (до перехода на
+    CORRELATION_EXT) referenced-only правило не попадало в handler.rulesets из-за
+    `_output=False`, выставляемого pySigma при виде correlation-ссылки в ТОЙ ЖЕ загрузке -
+    сейчас этот сценарий просто не наступает: обычные правила НИКОГДА не делят SigmaCollection
+    с correlation-документами.
 
     exclude_filename - при редактировании существующего правила (update_custom_rule) не копировать
     его СТАРУЮ версию в scratch-директорию: иначе там на момент компиляции окажутся одновременно
     старый и новый (temp) вариант одного и того же правила, и сопоставление по title становится
-    неоднозначным (два кандидата вместо одного)."""
+    неоднозначным (два кандидата вместо одного).
+
+    Correlation-документы (есть ключ 'correlation') сюда НЕ доходят до RulesetHandler вовсе -
+    отдельная ветка ниже, своя лёгкая валидация без pySigma (см. докстринг модуля/
+    CORRELATION_EXT про причину: pySigma ломает компиляцию правила, на которое ссылается
+    корреляция, если они оба в одном SigmaCollection)."""
     if not yaml_text or not yaml_text.strip():
         raise RuleValidationError("Пустой YAML")
     if not _looks_like_sigma_rule(yaml_text):
         raise RuleValidationError(
             "YAML должен содержать title, logsource и detection (или title и correlation)."
         )
+
+    try:
+        first_doc = next((d for d in yaml.safe_load_all(yaml_text) if isinstance(d, dict)), None)
+    except yaml.YAMLError as exc:
+        raise RuleValidationError(f"Некорректный YAML: {exc}")
+    if first_doc is not None and _looks_like_correlation_doc(first_doc):
+        _validate_correlation_doc(first_doc)
+        return _compile_correlation_doc(first_doc)
 
     if target_dir is None:
         tmp_path = Path(tempfile.gettempdir()) / f"sigma-custom-{uuid4().hex}.yml"
@@ -518,21 +715,51 @@ def compile_custom_rule(
 
 def compile_ruleset_yaml(yaml_text: str) -> list[dict[str, Any]]:
     """Валидация + компиляция ВСЕХ правил multi-document YAML (одна или несколько Sigma-rule
-    документов в одном файле - SigmaCollection.load_ruleset поддерживает это нативно)."""
+    документов в одном файле - SigmaCollection.load_ruleset поддерживает это нативно).
+
+    Документы с ключом 'correlation' компилируются ОТДЕЛЬНО от обычных - собственной лёгкой
+    валидацией без pySigma (см. докстринг модуля/CORRELATION_EXT). Обычные документы отдаются
+    в RulesetHandler ОДНИМ файлом БЕЗ correlation-документов вовсе - именно их совместное
+    присутствие в одном SigmaCollection и ломает компиляцию referenced-правила (см. докстринг
+    модуля), поэтому исключаем эту ситуацию физически, а не боремся с её последствиями."""
     if not yaml_text or not yaml_text.strip():
         raise RuleValidationError("Пустой YAML")
-    tmp_path = Path(tempfile.gettempdir()) / f"sigma-ruleset-{uuid4().hex}.yml"
-    tmp_path.write_text(yaml_text, encoding="utf-8")
     try:
+        list(yaml.safe_load_all(yaml_text))  # ранний фейл на невалидном YAML целиком
+    except yaml.YAMLError as exc:
+        raise RuleValidationError(f"Некорректный YAML: {exc}")
+
+    corr_results: list[dict[str, Any]] = []
+    plain_docs: list[str] = []
+    for doc_text in _split_yaml_documents(yaml_text):
         try:
-            handler = RulesetHandler(RulesetConfig(ruleset=[str(tmp_path)]))
-        except Exception as exc:  # noqa: BLE001
-            raise RuleValidationError(f"Ошибка компиляции: {exc}")
-        if not handler.rulesets:
-            raise RuleValidationError("Ни одно правило не скомпилировалось - проверь YAML.")
-        return handler.rulesets
-    finally:
-        tmp_path.unlink(missing_ok=True)
+            parsed = yaml.safe_load(doc_text)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if _looks_like_correlation_doc(parsed):
+            _validate_correlation_doc(parsed)
+            corr_results.append(_compile_correlation_doc(parsed))
+        else:
+            plain_docs.append(doc_text)
+
+    compiled_plain: list[dict[str, Any]] = []
+    if plain_docs:
+        tmp_path = Path(tempfile.gettempdir()) / f"sigma-ruleset-{uuid4().hex}.yml"
+        tmp_path.write_text("\n---\n".join(plain_docs), encoding="utf-8")
+        try:
+            try:
+                handler = RulesetHandler(RulesetConfig(ruleset=[str(tmp_path)]))
+            except Exception as exc:  # noqa: BLE001
+                raise RuleValidationError(f"Ошибка компиляции: {exc}")
+            compiled_plain = handler.rulesets
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    if not compiled_plain and not corr_results:
+        raise RuleValidationError("Ни одно правило не скомпилировалось - проверь YAML.")
+    return compiled_plain + corr_results
 
 
 def save_custom_rule(
@@ -556,7 +783,8 @@ def save_custom_rule(
                 "сгенерировался автоматически."
             )
     compiled["id"] = rule_id
-    (target_dir / f"{rule_id}.yml").write_text(yaml_text, encoding="utf-8")
+    ext = CORRELATION_EXT if compiled.get("correlation") else ".yml"
+    (target_dir / f"{rule_id}{ext}").write_text(yaml_text, encoding="utf-8")
     manifest_path = target_dir / ".manifest.json"
     with _manifest_lock:
         manifest = [r for r in _load_manifest_uncached(manifest_path) if r.get("id") != rule_id]
@@ -609,7 +837,8 @@ def save_ruleset_yaml(
             manifest_by_id[rule_id] = compiled
             source_doc = doc_by_title.get(compiled.get("title"))
             if source_doc is not None:
-                (target_dir / f"{rule_id}.yml").write_text(source_doc, encoding="utf-8")
+                ext = CORRELATION_EXT if compiled.get("correlation") else ".yml"
+                (target_dir / f"{rule_id}{ext}").write_text(source_doc, encoding="utf-8")
         _write_manifest(manifest_path, list(manifest_by_id.values()))
     return _custom_ruleset_info(target_dir / "meta.json"), target, collisions
 
@@ -620,10 +849,15 @@ def update_custom_rule(ruleset_path: str, rule_id: str, yaml_text: str) -> dict[
     перезапись: пользователь должен явно увидеть, что id менять нельзя, а не молча получить
     сохранённое правило с незаметно отброшенным id (для настоящего переименования нужно
     удалить старое правило и создать новое явно - осознанно не поддерживается одной кнопкой).
-    Пустой/отсутствующий 'id:' в новом YAML - не ошибка, просто подставляется исходный."""
+    Пустой/отсутствующий 'id:' в новом YAML - не ошибка, просто подставляется исходный.
+
+    Тип правила (обычное <-> correlation, см. CORRELATION_EXT) может смениться при
+    редактировании - файл при этом переписывается под НОВЫМ расширением, старый удаляется
+    (rule_id/id в URL остаются теми же, меняется только физическое расширение файла на диске -
+    невидимо снаружи API, main_ruleset ссылается на rule_id, не на путь файла)."""
     target_dir = _custom_ruleset_dir(ruleset_path)
-    rule_path = (target_dir / f"{rule_id}.yml").resolve()
-    if not rule_path.is_relative_to(target_dir.resolve()) or not rule_path.is_file():
+    rule_path = _find_rule_file(target_dir, rule_id)
+    if rule_path is None:
         raise CatalogError(f"Правило не найдено: {rule_id}")
     compiled = compile_custom_rule(yaml_text, target_dir=target_dir, exclude_filename=rule_path.name)
     candidate = compiled.get("id")
@@ -633,7 +867,11 @@ def update_custom_rule(ruleset_path: str, rule_id: str, yaml_text: str) -> dict[
             "'id:' вовсе, исходный id подставится автоматически)."
         )
     compiled["id"] = rule_id
-    rule_path.write_text(yaml_text, encoding="utf-8")
+    new_ext = CORRELATION_EXT if compiled.get("correlation") else ".yml"
+    new_path = target_dir / f"{rule_id}{new_ext}"
+    if new_path != rule_path:
+        rule_path.unlink(missing_ok=True)
+    new_path.write_text(yaml_text, encoding="utf-8")
     manifest_path = target_dir / ".manifest.json"
     with _manifest_lock:
         manifest = [r for r in _load_manifest_uncached(manifest_path) if r.get("id") != rule_id]
@@ -644,8 +882,8 @@ def update_custom_rule(ruleset_path: str, rule_id: str, yaml_text: str) -> dict[
 
 def delete_custom_rule(ruleset_path: str, rule_id: str) -> None:
     target_dir = _custom_ruleset_dir(ruleset_path)
-    rule_path = (target_dir / f"{rule_id}.yml").resolve()
-    if not rule_path.is_relative_to(target_dir.resolve()) or not rule_path.is_file():
+    rule_path = _find_rule_file(target_dir, rule_id)
+    if rule_path is None:
         raise CatalogError(f"Правило не найдено: {rule_id}")
     manifest_path = target_dir / ".manifest.json"
     with _manifest_lock:

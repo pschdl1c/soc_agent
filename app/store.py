@@ -64,7 +64,35 @@ CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time);
 -- (json_extract на каждой строке). Выражение здесь должно ТЕКСТУАЛЬНО совпадать с тем, что
 -- строит resolve_json_path, иначе планировщик SQLite индекс не подхватит.
 CREATE INDEX IF NOT EXISTS idx_events_json_eventid ON events(json_extract(raw_json, '$."EventID"'));
+
+-- Леджер срабатываний, "интересных" для корреляционных правил (app/correlation.py) - НЕ для
+-- всех сработавших правил, только для тех, что являются base_rule_titles хотя бы одной
+-- активной correlation-записи (см. hit_worthy_titles у store_events) - иначе таблица росла бы
+-- на каждое срабатывание любого из тысяч built-in-правил. event_id логически ссылается на
+-- events.event_id (без FOREIGN KEY - проект их нигде не использует), raw_json НЕ дублируется -
+-- достаётся через JOIN. event_time здесь уже НОРМАЛИЗОВАННЫЙ (см. _normalize_event_time) вид,
+-- не сырой формат источника - тогда evaluate_correlation_window может делать простой BETWEEN
+-- без обёртки replace(...) в SQL и реально использовать индекс как range-scan (колонка,
+-- обёрнутая в функцию, индекс так не использует).
+CREATE TABLE IF NOT EXISTS rule_hits (
+    event_id TEXT NOT NULL,
+    rule_title TEXT NOT NULL,
+    source_batch TEXT NOT NULL,
+    event_time TEXT,
+    PRIMARY KEY (event_id, rule_title)
+);
+CREATE INDEX IF NOT EXISTS idx_rule_hits_lookup ON rule_hits(rule_title, source_batch, event_time);
 """
+
+
+def _normalize_event_time(event_time: str | None) -> str | None:
+    """Нормализует event_time в вид "YYYY-MM-DDTHH:MM:SS[...]" (без пробела и без 'Z') -
+    та же логика, что сейчас инлайнится в SQL в _events_where на КАЖДОЕ чтение (replace/replace);
+    для rule_hits нормализуем один раз на запись, чтобы запрос к нему был простым BETWEEN и
+    реально использовал idx_rule_hits_lookup как range-scan (см. докстринг схемы выше)."""
+    if event_time is None:
+        return None
+    return event_time.replace(" ", "T").replace("Z", "")
 
 # Ранг severity для сортировки колонки "Правило" (critical - самый высокий).
 _SEVERITY_RANK_SQL = (
@@ -288,20 +316,29 @@ class Store:
         raw_events: list[dict[str, Any]],
         source_batch: str,
         matched_row_to_rules: dict[Any, list[str]],
+        hit_worthy_titles: set[str] | None = None,
     ) -> int:
         """
         raw_events            - все события батча, как вернул ZircoliteCore (включают row_id)
         matched_row_to_rules  - {row_id: [названия сработавших правил]} для этого же батча
+        hit_worthy_titles     - названия правил, которые являются base_rule_titles хотя бы
+                                 одной АКТИВНОЙ correlation-записи (см. app/correlation.py) -
+                                 для событий, сматченных ЭТИМИ правилами, дополнительно пишется
+                                 строка в rule_hits (леджер для correlation-движка, см. схему
+                                 выше). None/пусто (обычный ingest без активных корреляций) -
+                                 rule_hits не трогается вообще.
         """
         ingested_at = datetime.now(timezone.utc).isoformat()
         rows = []
+        hit_rows = []
         for event in raw_events:
             row_id = event.get("row_id")
             matched = matched_row_to_rules.get(row_id, [])
             host = first_present(event, HOST_FIELDS) or "unknown-host"
             event_time = first_present(event, TIME_FIELDS)
+            event_id = str(uuid4())
             rows.append((
-                str(uuid4()),
+                event_id,
                 source_batch,
                 host,
                 event_time,
@@ -310,6 +347,11 @@ class Store:
                 json.dumps(matched),
                 json.dumps(event, default=str),
             ))
+            if hit_worthy_titles:
+                normalized_time = _normalize_event_time(event_time)
+                for title in matched:
+                    if title in hit_worthy_titles:
+                        hit_rows.append((event_id, title, source_batch, normalized_time))
 
         with self._lock:
             self._conn.executemany(
@@ -321,6 +363,14 @@ class Store:
                 """,
                 rows,
             )
+            if hit_rows:
+                self._conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO rule_hits (event_id, rule_title, source_batch, event_time)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    hit_rows,
+                )
             self._conn.commit()
         return len(rows)
 
@@ -492,6 +542,120 @@ class Store:
         with self._read_lock:
             return self._read_conn.execute(query, where_params).fetchone()["c"]
 
+    # ------------------------------------------------------------------ Correlation
+
+    def evaluate_correlation_window(
+        self,
+        base_rule_titles: list[str],
+        group_by: list[str],
+        key_values: tuple[Any, ...],
+        source_batch: str,
+        time_from: str,
+        time_to: str,
+        distinct_field: str | None = None,
+        sample_limit: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Считает event_count (COUNT(*)) или, если задан distinct_field, value_count
+        (COUNT(DISTINCT ...)) для одного (correlation-правило, group-by-ключ) сочетания в
+        пределах окна [time_from, time_to] (уже нормализованные строки, см.
+        _normalize_event_time - сравниваются простым BETWEEN, см. схему rule_hits) и одного
+        source_batch (корреляция считается "в рамках одного источника", см. диалог/CLAUDE.md).
+
+        base_rule_titles - OR по всем title'ам, которые эта correlation ссылается (обычно один,
+        но Sigma допускает несколько base-правил на одну корреляцию). group_by/key_values -
+        параллельные списки: поле группировки -> конкретное значение этого ключа (уже известное
+        вызывающей стороне, app/correlation.py, из свежесматченных событий батча).
+
+        JOIN rule_hits (проиндексирован по (rule_title, source_batch, event_time), см. схему) ->
+        events (по event_id, без дублирования raw_json) - строк на входе уже мало благодаря
+        индексу, дальше json_extract по group-by полям выполняется над этим узким набором, а
+        не над всей таблицей events (в отличие от прямого запроса к events без rule_hits).
+        """
+        if not base_rule_titles or not group_by or len(group_by) != len(key_values):
+            return {"count": 0, "sample_events": []}
+
+        rule_placeholders = ",".join("?" * len(base_rule_titles))
+        where = [
+            f"h.rule_title IN ({rule_placeholders})",
+            "h.source_batch = ?",
+            "h.event_time BETWEEN ? AND ?",
+        ]
+        params: list[Any] = [*base_rule_titles, source_batch, time_from, time_to]
+        for field, value in zip(group_by, key_values):
+            col_expr, col_params = resolve_json_path(field)
+            where.append(f"{col_expr} = ?")
+            params += [*col_params, str(value)]
+        where_sql = " AND ".join(where)
+
+        if distinct_field:
+            dist_expr, dist_params = resolve_json_path(distinct_field)
+            count_sql = (
+                f"SELECT COUNT(DISTINCT {dist_expr}) AS c FROM rule_hits h "
+                f"JOIN events e ON e.event_id = h.event_id WHERE {where_sql}"
+            )
+            count_params = [*dist_params, *params]
+        else:
+            count_sql = (
+                f"SELECT COUNT(*) AS c FROM rule_hits h "
+                f"JOIN events e ON e.event_id = h.event_id WHERE {where_sql}"
+            )
+            count_params = params
+
+        sample_sql = (
+            f"SELECT e.raw_json FROM rule_hits h JOIN events e ON e.event_id = h.event_id "
+            f"WHERE {where_sql} ORDER BY h.event_time ASC LIMIT ?"
+        )
+        with self._read_lock:
+            count = self._read_conn.execute(count_sql, count_params).fetchone()["c"]
+            sample_rows = self._read_conn.execute(sample_sql, [*params, sample_limit]).fetchall()
+        sample_events = []
+        for row in sample_rows:
+            try:
+                sample_events.append(json.loads(row["raw_json"]))
+            except (TypeError, json.JSONDecodeError):
+                continue
+        return {"count": count, "sample_events": sample_events}
+
+    def upsert_correlation_alerts(self, alerts: list[Alert]) -> int:
+        """Как upsert_alerts, но OVERWRITE event_count/sample_events, не increment - для
+        correlation-алертов event_count описывает "сколько сейчас в текущем окне", не "сколько
+        раз в сумме сработало с прошлого прогона" (окно сдвигается/пересчитывается на каждый
+        flush, старые события из него естественным образом выпадают - increment был бы неверен,
+        событие могло бы уже не входить в окно, а счётчик всё равно рос бы)."""
+        count = 0
+        with self._lock:
+            cur = self._conn.cursor()
+            for alert in alerts:
+                cur.execute("SELECT alert_id FROM alerts WHERE dedup_key = ?", (alert.dedup_key,))
+                existing = cur.fetchone()
+                if existing:
+                    cur.execute(
+                        "UPDATE alerts SET event_count = ?, sample_events = ? WHERE dedup_key = ?",
+                        (alert.event_count, json.dumps(alert.sample_events, default=str), alert.dedup_key),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO alerts (
+                            alert_id, dedup_key, created_at, engine, source_batch, host,
+                            rule_id, rule_title, rule_level, mitre_techniques, description,
+                            entities, event_count, sample_events, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            alert.alert_id, alert.dedup_key, alert.created_at.isoformat(),
+                            alert.engine, alert.source_batch, alert.host,
+                            alert.rule.rule_id, alert.rule.title, alert.rule.level.value,
+                            json.dumps(alert.rule.mitre_techniques), alert.rule.description,
+                            json.dumps(alert.entities.model_dump()), alert.event_count,
+                            json.dumps(alert.sample_events, default=str), alert.status,
+                        ),
+                    )
+                count += 1
+            self._conn.commit()
+        return count
+
     # ------------------------------------------------------------------ Batches
 
     def list_batches(self) -> list[dict[str, Any]]:
@@ -520,9 +684,15 @@ class Store:
         return event_rows
 
     def delete_batch(self, source_batch: str) -> dict[str, int]:
-        """Полное удаление источника: все events И все alerts с этим source_batch (не только
-        события) - source_batch не отдельная сущность/таблица, просто общая метка на обеих
-        таблицах, поэтому "удалить источник" технически значит удалить всё с этой меткой."""
+        """Полное удаление источника: все events, alerts И rule_hits с этим source_batch (не
+        только события) - source_batch не отдельная сущность/таблица, просто общая метка на ВСЕХ
+        трёх таблицах, поэтому "удалить источник" технически значит удалить всё с этой меткой.
+        rule_hits важно чистить здесь же: иначе при повторном ingest под ТЕМ ЖЕ source_batch
+        (частый случай в ручном тестировании, см. CLAUDE.md) осиротевшие строки от УДАЛЁННОГО
+        батча продолжали бы учитываться в evaluate_correlation_window (окно фильтруется по
+        source_batch+event_time, не по тому, жив ли ещё сам event_id в events - JOIN просто не
+        вернёт по нему raw_json, но COUNT(*) без JOIN их всё равно посчитал бы; здесь JOIN есть,
+        так что реального искажения счётчика нет, но мусор всё равно накапливался бы вечно)."""
         with self._lock:
             events_deleted = self._conn.execute(
                 "DELETE FROM events WHERE source_batch = ?", (source_batch,)
@@ -530,6 +700,7 @@ class Store:
             alerts_deleted = self._conn.execute(
                 "DELETE FROM alerts WHERE source_batch = ?", (source_batch,)
             ).rowcount
+            self._conn.execute("DELETE FROM rule_hits WHERE source_batch = ?", (source_batch,))
             self._conn.commit()
         return {"events_deleted": events_deleted, "alerts_deleted": alerts_deleted}
 

@@ -66,6 +66,18 @@ class ZircoliteEngine:
             elapsed       - время выполнения в секундах
         """
         t0 = time.time()
+        # Correlation-правила (Sigma type: event_count/value_count/temporal/temporal_ordered)
+        # сюда в норме и не должны попадать вовсе: они хранятся в custom-рулсетах под
+        # app/rules_catalog.CORRELATION_EXT (не .yml/.yaml), поэтому RulesetHandler их не
+        # компилирует и они физически не появляются ни в main_ruleset.resolve(), ни в
+        # handler.rulesets прямого custom-ruleset прогона - их эвалуацией целиком занимается
+        # app/correlation.py поверх постоянной таблицы events/rule_hits (см.
+        # app/main.py:_process_batch), а не Zircolite (pinned pysigma-backend-sqlite компилирует
+        # SQL для этих типов без учёта timespan и без state между batch'ами - см. докстринг
+        # app/rules_catalog.py). Фильтр ниже - только defense-in-depth на случай, если
+        # какой-то будущий путь всё же протащит сюда correlation-запись (напр. built-in
+        # рулсет, скомпилированный вне этого приложения) - дешёвый, безопасно оставить всегда.
+        rules = [r for r in rules if not r.get("correlation")]
         core = ZircoliteCore(
             self.config_path,
             ProcessingConfig(db_location=":memory:", disable_progress=True, no_output=True),

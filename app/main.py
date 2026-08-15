@@ -18,6 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app import config
+from app import correlation
 from app.engine import ZircoliteEngine
 from app.fields import INGEST_SOURCE_FIELD
 from app.filter_lang import FilterSyntaxError, compile_filter_query
@@ -103,10 +104,32 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
         )
 
     matched_map = _build_matched_row_map(raw_results)
+    # Названия правил, за которыми следит хотя бы одна активная correlation-запись этого
+    # ruleset_path - считается один раз на весь батч (дёшево, читает уже скомпилированные
+    # правила через кэш rules_catalog), передаётся в store_events, чтобы rule_hits (леджер для
+    # app/correlation.py) не разрастался на КАЖДОЕ сработавшее правило, только на нужные.
+    hit_titles = correlation.active_base_rule_titles(ruleset_path)
+    correlation_created = 0
     # Один прогон движка мог объединять НЕСКОЛЬКО реальных источников (см. _process_events) -
     # события возвращаются в БД под их СОБСТВЕННОЙ меткой, не под source_label всего прогона.
     for label, events_subset in _split_events_by_source(all_events, source_label).items():
-        store.store_events(events_subset, source_batch=label, matched_row_to_rules=matched_map)
+        store.store_events(
+            events_subset, source_batch=label, matched_row_to_rules=matched_map,
+            hit_worthy_titles=hit_titles,
+        )
+        # Стейтфул-корреляция (app/correlation.py) - переоценивается ПОСЛЕ каждого flush для
+        # (правило, group-by-ключ) пар, реально затронутых ЭТИМ батчем (короткое замыкание
+        # внутри evaluate_batch, если ни одно активное correlation-правило не ссылается на
+        # сработавшее здесь правило - до БД дело не доходит вовсе). Окно считается по постоянной
+        # таблице events/rule_hits, а не по содержимому текущего батча - см. CLAUDE.md.
+        matched_events_by_title: dict[str, list[dict]] = {}
+        for event in events_subset:
+            for title in matched_map.get(event.get("row_id"), []):
+                matched_events_by_title.setdefault(title, []).append(event)
+        correlation_created += correlation.evaluate_batch(
+            store, ruleset_path=ruleset_path, source_batch=label,
+            matched_events_by_title=matched_events_by_title,
+        )
 
     alerts = zircolite_results_to_alerts(raw_results, default_source_batch=source_label)
     created = store.upsert_alerts(alerts)
@@ -115,7 +138,7 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
         source_batch=source_label,
         events_processed=total_events,
         rules_matched=len(raw_results),
-        alerts_created=created,
+        alerts_created=created + correlation_created,
         duration_seconds=round(elapsed, 2),
     )
 

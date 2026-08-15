@@ -98,6 +98,8 @@ def zircolite_results_to_alerts(
             mitre_techniques=[t for t in rule.get("tags", []) if t.startswith("attack.t")],
             description=rule.get("description", ""),
         )
+        if rule_ref.level == Severity.informational:
+            continue  # informational - шум, алерты по нему не заводим (см. CLAUDE.md/UI)
 
         # Группируем сматченные события правила по (хосту, реальному источнику) - см. докстринг.
         events_by_group: dict[tuple[str, str], list[dict[str, Any]]] = {}

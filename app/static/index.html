@@ -1865,6 +1865,7 @@ async function selectAlert(id) {
       <p class="muted">${a.description || "без описания"}</p>
       <div style="margin:10px 0;">${techs}</div>
       <div class="kv"><span>Хост</span><span>${a.host}</span></div>
+      <div class="kv"><span>Уровень</span><span>${sevBar(a.rule_level)}${a.rule_level}</span></div>
       <div class="kv"><span>Источник</span><span>${a.source_batch}</span></div>
       <div class="kv"><span>Событий</span><span>${a.event_count}</span></div>
       <div class="kv"><span>Пользователи</span><span>${(ent.users||[]).join(", ") || "—"}</span></div>
@@ -2564,6 +2565,7 @@ async function selectSigmaRule(ruleId, ruleset) {
       <h3>${sevBar(r.level)}${escapeHtml(r.title || "")}</h3>
       <p class="muted">${escapeHtml(r.description || "без описания")}</p>
       <div style="margin:10px 0;">${tags}</div>
+      <div class="kv"><span>Уровень</span><span>${sevBar(r.level)}${escapeHtml(r.level || "—")}</span></div>
       <div class="kv"><span>Статус</span><span>${escapeHtml(r.status || "—")}</span></div>
       <div class="kv"><span>Автор</span><span>${escapeHtml(r.author || "—")}</span></div>
       <div class="kv"><span>Канал</span><span>${(r.channel || []).join(", ") || "—"}</span></div>
