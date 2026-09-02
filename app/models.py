@@ -3,12 +3,24 @@ Pydantic-модели: нормализованный Alert (то, что вид
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+def utcnow_naive() -> datetime:
+    """Наивный (без tzinfo) datetime по UTC - замена deprecated (в 3.12) datetime.utcnow().
+
+    Именно наивный, а не datetime.now(timezone.utc): Alert.created_at уходит в БД строкой
+    через .isoformat(), а store.list_alerts фильтрует/сортирует его СТРОКОВЫМ сравнением с
+    наивными границами из UI (см. timeParams() в index.html - специально без 'Z'/offset) и с
+    уже накопленными в alerts строками того же формата. Aware-вариант дал бы суффикс '+00:00'
+    -> сломанное сравнение диапазонов и колонка смешанного формата. Формат на диске остаётся
+    ровно тем же, что и был при datetime.utcnow()."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Severity(str, Enum):
@@ -47,7 +59,7 @@ class SigmaRuleRef(BaseModel):
 class Alert(BaseModel):
     alert_id: str = Field(default_factory=lambda: str(uuid4()))
     dedup_key: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow_naive)
     engine: str = "zircolite"
     source_batch: str  # имя датасета/источника, из которого пришёл алерт
     host: str
@@ -109,3 +121,35 @@ class MainRulesetToggle(BaseModel):
     """Тело POST /main-ruleset/rulesets - добавить/убрать рулсет ЦЕЛИКОМ в основной рулсет."""
     ruleset: str
     include: bool
+
+
+SOURCE_DESCRIPTION_MAX = 64
+
+
+class SourceCreate(BaseModel):
+    """Тело POST /sources - регистрация потокового источника (вкладка «Источник данных»).
+    name ОБЯЗАТЕЛЕН и уникален: он же становится меткой source_batch для всех событий и
+    алертов этого источника. После создания name неизменяем (можно только удалить/пересоздать)."""
+    name: str
+    description: str = Field(default="", max_length=SOURCE_DESCRIPTION_MAX)
+
+
+class SourceUpdate(BaseModel):
+    """Тело PATCH /sources/{source_id} - что разрешено менять после создания (name и токен - нет;
+    токен меняется только через POST /sources/{source_id}/rotate)."""
+    enabled: Optional[bool] = None
+    description: Optional[str] = Field(default=None, max_length=SOURCE_DESCRIPTION_MAX)
+
+
+class ValueListCreate(BaseModel):
+    """Тело POST /value-lists - новый именованный список значений (см. app/value_lists.py).
+    name - оно же имя плейсхолдера %name% в правилах, после создания неизменяемо."""
+    name: str
+    description: str = ""
+    values: list[str] = Field(default_factory=list)
+
+
+class ValueListUpdate(BaseModel):
+    """Тело PUT /value-lists/{name} - описание + значения (name берётся из URL, не меняется)."""
+    description: str = ""
+    values: list[str] = Field(default_factory=list)

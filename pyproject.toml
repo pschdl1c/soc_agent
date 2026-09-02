@@ -1,0 +1,123 @@
+# pyproject.toml — ЕДИНСТВЕННАЯ точка конфигурации проекта soc_agent (мини-SIEM на Sigma-правилах).
+# requirements.txt / requirements-dev.txt из проекта убраны — Docker-сборка тоже ставит из этого
+# файла (`pip install .`, см. Dockerfile builder-стадию).
+#
+# Что здесь собрано:
+#   [project]                    — метаданные + прод-зависимости (фиксированные версии).
+#   [project.optional-dependencies].dev — pytest + httpx (TestClient для HTTP-тестов) + ruff (линт).
+#   [tool.setuptools]            — пакет один: app/. Zircolite подключается НЕ как зависимость,
+#                                  а импортом из локального клона ./Zircolite (см. app/engine.py).
+#   [tool.pytest.ini_options]    — переехало из pytest.ini (его можно удалить).
+#   [tool.ruff]                  — базовый линт; в коде уже есть `# noqa` (E402/E731/BLE001),
+#                                  значит линтер подразумевался, но конфига не было.
+#
+# Установка для разработки:
+#   python -m venv .venv && .venv\Scripts\Activate.ps1
+#   pip install -e ".[dev]"
+# Прод (как в Dockerfile):
+#   pip install .
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soc-agent"
+version = "0.3.0"                       # источник правды для версии; app.main:FastAPI(version=...) стоит читать отсюда
+description = "Мини-SIEM на Sigma-правилах (Zircolite) с AI-агентом расследования алертов"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+# Версии зафиксированы по фактически рабочему окружению (см. CLAUDE.md §2).
+dependencies = [
+    # --- веб-сервис ---
+    "fastapi==0.139.2",
+    "uvicorn==0.51.0",
+    "pydantic==2.13.4",
+    "python-multipart==0.0.32",         # FastAPI Form/UploadFile
+    "python-dotenv==1.2.2",             # чтение .env (app/config.py)
+    # --- Sigma -> SQL ---
+    "pysigma==1.4.0",
+    "pysigma-backend-sqlite==1.2.0",    # пин намеренный: баг компиляции correlation-ссылок жив вплоть до 1.2.4 (CLAUDE.md §8)
+    "pysigma-pipeline-windows==2.0.0",
+    "pysigma-pipeline-sysmon==2.0.0",
+    "pyyaml==6.0.3",
+    # --- транзитивно нужно клонированному Zircolite (импортируется как библиотека, не pip-пакет) ---
+    "orjson==3.11.9",
+    "xxhash==3.8.1",
+    "rich==15.0.0",
+    "chardet==5.2.0",
+    "RestrictedPython==8.4",
+    "requests==2.34.2",
+    "jinja2==3.1.6",
+    "evtx==0.12.1",
+    "lxml==6.1.1",
+    "psutil==7.2.2",
+    "urllib3==2.7.0",
+    "py7zr==1.1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "httpx==0.28.1",                    # TestClient для тестов HTTP-слоя app/main.py (сейчас не покрыт)
+    "ruff==0.9.6",                      # линт/формат; заменяет разрозненные `# noqa`-предположения
+]
+
+[project.urls]
+Homepage = "https://github.com/pschdl1c/soc_agent"
+
+# Раскомментировать после добавления функции-обёртки в app/main.py (def main(): uvicorn.run(...)),
+# см. отчёт по рефакторингу. Сейчас запуск: `uvicorn app.main:app` или `python -m app.main`.
+# [project.scripts]
+# soc-agent = "app.main:main"
+
+[tool.setuptools]
+packages = ["app"]
+# app/static/index.html — не .py, но нужен рантайму; включаем в пакет.
+[tool.setuptools.package-data]
+app = ["static/*.html"]
+
+# ---------------------------------------------------------------------------
+# pytest — перенесено из pytest.ini (после проверки pytest.ini можно удалить)
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    # DeprecationWarning, поднятые НАШИМ кодом (app.*), делаем ошибкой. Не глобально: Zircolite
+    # и часть pip-зависимостей шумят своими deprecation'ами, которые нам всё равно не чинить.
+    # NB: предупреждения от stdlib, вызванные через сторонний код (напр. datetime.utcnow из
+    # pydantic-валидатора), атрибутируются НЕ к app.* - их ловят точечными тестами-контрактами
+    # (см. tests/test_normalize.py::test_alert_created_at_is_naive_utc).
+    "error::DeprecationWarning:app",
+]
+
+# ---------------------------------------------------------------------------
+# ruff — линт + сортировка импортов + формат
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["Zircolite", "artifacts", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",    # длинные строки — в проекте много длинных RU-комментариев, не блокируем
+    "RUF001", "RUF002", "RUF003",  # «похожие на латиницу» кириллические символы в строках/докстрингах — это норма тут
+]
+
+[tool.ruff.lint.per-file-ignores]
+# sys.path.insert(...) до импортов zircolite.* — вынужденно, клон подключается по пути
+"app/engine.py" = ["E402"]
+"app/rules_catalog.py" = ["E402"]
+"tests/*" = ["B011", "S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI-паттерн: File(...)/Form(...)/Query(...) в дефолтах аргументов
+extend-immutable-calls = ["fastapi.File", "fastapi.Form", "fastapi.Query", "fastapi.Depends"]

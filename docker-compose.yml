@@ -3,6 +3,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # База знаний MITRE ATT&CK собирается на этапе build (scripts/build_kb.py) и вшивается
+      # в образ read-only - volume под неё НЕ нужен, обновление = пересборка образа. Закрепить
+      # версию для воспроизводимости: ATTACK_STIX_REF (git ref) + ATTACK_STIX_VERSION (напр. 15.1).
+      args:
+        ATTACK_STIX_REF: master
+        ATTACK_STIX_VERSION: ""
     image: soc_agent:latest
     ports:
       - "8000:8000"
@@ -38,9 +44,11 @@ services:
       - siem_db:/app/db
       - siem_uploads:/app/data/uploads
       - siem_custom_rulesets:/app/data/custom_rulesets
+      - siem_value_lists:/app/data/value_lists
     restart: unless-stopped
 
 volumes:
   siem_db:
   siem_uploads:
   siem_custom_rulesets:
+  siem_value_lists:

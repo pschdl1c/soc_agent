@@ -63,6 +63,8 @@ from uuid import uuid4
 
 import yaml
 
+from app import value_lists
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 ZIRCOLITE_REPO_PATH = BASE_DIR / "Zircolite"
@@ -667,6 +669,14 @@ def compile_custom_rule(
         _validate_correlation_doc(first_doc)
         return _compile_correlation_doc(first_doc)
 
+    # Разворот именованных списков значений (%name% / |expand, см. app/value_lists.py) ДО
+    # компиляции - дальше pySigma/Zircolite плейсхолдер не видят. На диск пишется исходный
+    # yaml_text с %name% (source of truth), это - только для компиляции.
+    try:
+        yaml_text = value_lists.expand_placeholders(yaml_text)
+    except value_lists.ValueListError as exc:
+        raise RuleValidationError(str(exc))
+
     if target_dir is None:
         tmp_path = Path(tempfile.gettempdir()) / f"sigma-custom-{uuid4().hex}.yml"
         tmp_path.write_text(yaml_text, encoding="utf-8")
@@ -692,7 +702,11 @@ def compile_custom_rule(
         for sibling in list(target_dir.glob("*.yml")) + list(target_dir.glob("*.yaml")):
             if exclude_filename and sibling.name == exclude_filename:
                 continue
-            shutil.copy2(sibling, scratch_dir / sibling.name)
+            try:
+                sib_text = value_lists.expand_placeholders(sibling.read_text(encoding="utf-8"))
+            except (OSError, value_lists.ValueListError):
+                continue  # сосед с неразрешимым %placeholder% не должен ронять компиляцию текущего правила
+            (scratch_dir / sibling.name).write_text(sib_text, encoding="utf-8")
         (scratch_dir / f"__new_{uuid4().hex}.yml").write_text(yaml_text, encoding="utf-8")
         try:
             handler = RulesetHandler(RulesetConfig(ruleset=[str(scratch_dir)]))
@@ -742,7 +756,10 @@ def compile_ruleset_yaml(yaml_text: str) -> list[dict[str, Any]]:
             _validate_correlation_doc(parsed)
             corr_results.append(_compile_correlation_doc(parsed))
         else:
-            plain_docs.append(doc_text)
+            try:
+                plain_docs.append(value_lists.expand_placeholders(doc_text))
+            except value_lists.ValueListError as exc:
+                raise RuleValidationError(str(exc))
 
     compiled_plain: list[dict[str, Any]] = []
     if plain_docs:
@@ -793,12 +810,38 @@ def save_custom_rule(
     return compiled, target
 
 
+def _peel_value_list_docs(yaml_text: str) -> tuple[list[Any], str]:
+    """Из multi-document YAML '+ Загрузить рулсет' вынимает документы-определения списков
+    значений (СТРОГО: Sigma pipeline с value_placeholders ИЛИ наш {name, values} - см.
+    value_lists.is_list_document). Возвращает (parsed_lists, YAML только правил/корреляций)."""
+    list_texts: list[str] = []
+    rule_texts: list[str] = []
+    for doc_text in _split_yaml_documents(yaml_text):
+        try:
+            parsed = yaml.safe_load(doc_text)
+        except yaml.YAMLError:
+            rule_texts.append(doc_text)  # пусть на этом споткнётся компилятор правил, не мы
+            continue
+        if isinstance(parsed, dict) and value_lists.is_list_document(parsed):
+            list_texts.append(doc_text)
+        else:
+            rule_texts.append(doc_text)
+    parsed_lists = value_lists.parse_list_file("\n---\n".join(list_texts)) if list_texts else []
+    return parsed_lists, "\n---\n".join(rule_texts)
+
+
 def save_ruleset_yaml(
     yaml_text: str, ruleset: str | None = None, new_ruleset_name: str | None = None
-) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
-    """Компилирует и сохраняет ЦЕЛЫЙ рулсет (один или несколько Sigma-правил в одном YAML-
-    файле) в существующий или новый именованный custom-рулсет. Возвращает (обновлённая
-    сводка рулсета, ruleset_path, collisions).
+) -> tuple[dict[str, Any] | None, str | None, list[dict[str, Any]], dict[str, list[str]]]:
+    """Компилирует и сохраняет ЦЕЛЫЙ рулсет (одно или несколько Sigma-правил в одном YAML-
+    файле) в существующий или новый именованный custom-рулсет. Возвращает
+    (сводка рулсета|None, ruleset_path|None, collisions, value_lists_imported).
+
+    Multi-document файл может, кроме правил, содержать документы-определения списков значений
+    (Sigma pipeline с value_placeholders.mapping или наш {name, values}) - они вынимаются
+    ПЕРВЫМИ, пишутся на диск (mode=replace), и только потом компилируются правила (разворот
+    %name% в compile_ruleset_yaml уже видит новые списки). Если в файле ТОЛЬКО списки -
+    рулсет не создаётся, возвращается (None, None, [], imported).
 
     Правило с явным id, который уже занят - ГДЕ УГОДНО (в любом другом рулсете, в этом же
     целевом рулсете от предыдущей загрузки, или дубликат внутри ЭТОГО ЖЕ multi-document
@@ -806,10 +849,17 @@ def save_ruleset_yaml(
     остальные правила файла без коллизий сохраняются как обычно, ошибка не поднимается на
     весь запрос. collisions - список {title, id, conflict_ruleset, conflict_title} для UI
     (что именно и с чем не добавилось) - см. app/main.py:upload_ruleset."""
+    parsed_lists, rule_yaml = _peel_value_list_docs(yaml_text)
+    imported = value_lists.import_lists(parsed_lists, mode="replace") if parsed_lists else {
+        "created": [], "replaced": [], "merged": [], "skipped": [], "recompile_needed": [],
+    }
+    if not rule_yaml.strip():
+        return None, None, [], imported
+
     target = _resolve_target_ruleset(ruleset, new_ruleset_name)
     target_dir = _custom_ruleset_dir(target)
-    compiled_rules = compile_ruleset_yaml(yaml_text)
-    doc_by_title = _match_yaml_by_title(_split_yaml_documents(yaml_text))
+    compiled_rules = compile_ruleset_yaml(rule_yaml)
+    doc_by_title = _match_yaml_by_title(_split_yaml_documents(rule_yaml))
     manifest_path = target_dir / ".manifest.json"
     collisions: list[dict[str, Any]] = []
     with _manifest_lock:
@@ -840,7 +890,7 @@ def save_ruleset_yaml(
                 ext = CORRELATION_EXT if compiled.get("correlation") else ".yml"
                 (target_dir / f"{rule_id}{ext}").write_text(source_doc, encoding="utf-8")
         _write_manifest(manifest_path, list(manifest_by_id.values()))
-    return _custom_ruleset_info(target_dir / "meta.json"), target, collisions
+    return _custom_ruleset_info(target_dir / "meta.json"), target, collisions, imported
 
 
 def update_custom_rule(ruleset_path: str, rule_id: str, yaml_text: str) -> dict[str, Any]:
@@ -890,6 +940,92 @@ def delete_custom_rule(ruleset_path: str, rule_id: str) -> None:
         manifest = [r for r in _load_manifest_uncached(manifest_path) if r.get("id") != rule_id]
         _write_manifest(manifest_path, manifest)
     rule_path.unlink()
+
+
+# ------------------------------------------------------------------ Value lists <-> правила
+
+def _iter_custom_rule_files():
+    """(ruleset_path, Path к *.yml/*.yaml) по всем именованным custom-рулсетам. Correlation-
+    правила (*{CORRELATION_EXT}) сюда не попадают - у них нет detection, плейсхолдеров быть
+    не может."""
+    for meta_path in sorted(CUSTOM_ROOT.glob("*/meta.json")):
+        ruleset_dir = meta_path.parent
+        ruleset_path = f"custom_rulesets/{ruleset_dir.name}"
+        for yml in list(ruleset_dir.glob("*.yml")) + list(ruleset_dir.glob("*.yaml")):
+            yield ruleset_path, yml
+
+
+def _rule_title_from_file(path: Path) -> str:
+    try:
+        first = next((d for d in yaml.safe_load_all(path.read_text(encoding="utf-8")) if isinstance(d, dict)), None)
+    except (OSError, yaml.YAMLError):
+        return ""
+    return str((first or {}).get("title") or "")
+
+
+def rules_using_value_list(list_name: str) -> list[dict[str, Any]]:
+    """Кастомные правила, чей detection ссылается на плейсхолдер %list_name% (через |expand).
+    Для GET /value-lists/{name}.used_by и защиты при удалении списка."""
+    out: list[dict[str, Any]] = []
+    for ruleset_path, yml in _iter_custom_rule_files():
+        try:
+            text = yml.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if list_name in value_lists.placeholders_used(text):
+            out.append({"ruleset": ruleset_path, "rule_id": yml.stem, "title": _rule_title_from_file(yml)})
+    return out
+
+
+def value_list_usage_counts() -> dict[str, int]:
+    """{имя списка: сколько кастом-правил на него ссылаются} - одним проходом по всем правилам
+    (для колонки "исп. в N правилах" во вкладке "Списки", дешевле N вызовов rules_using_value_list)."""
+    counts: dict[str, int] = {}
+    for _ruleset_path, yml in _iter_custom_rule_files():
+        try:
+            names = value_lists.placeholders_used(yml.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        for n in names:
+            counts[n] = counts.get(n, 0) + 1
+    return counts
+
+
+def recompile_rules_for_value_list(list_name: str) -> dict[str, Any]:
+    """Пересобирает все кастом-правила, ссылающиеся на %list_name%, и переписывает их записи
+    в .manifest.json соответствующих рулсетов. Возвращает
+    {recompiled: [...], errors: [{..., error}], affected_rulesets: [...]}.
+
+    Вызывается из main.py после value_lists.update_list. engine.invalidate(...) для
+    affected_rulesets делает main.py (у rules_catalog нет ссылки на engine). Правило, которое
+    не пересобралось (напр. в нём же есть второй, теперь битый плейсхолдер), сохраняет прежний
+    SQL в манифесте - ошибка возвращается наверх для показа пользователю, но save списка не
+    откатывается (сам список валиден)."""
+    recompiled: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    affected: set[str] = set()
+    for ref in rules_using_value_list(list_name):
+        ruleset_path, rule_id = ref["ruleset"], ref["rule_id"]
+        try:
+            target_dir = _custom_ruleset_dir(ruleset_path)
+            rule_path = _find_rule_file(target_dir, rule_id)
+            if rule_path is None:
+                continue
+            compiled = compile_custom_rule(
+                rule_path.read_text(encoding="utf-8"),
+                target_dir=target_dir, exclude_filename=rule_path.name,
+            )
+            compiled["id"] = rule_id
+            manifest_path = target_dir / ".manifest.json"
+            with _manifest_lock:
+                manifest = [r for r in _load_manifest_uncached(manifest_path) if r.get("id") != rule_id]
+                manifest.append(compiled)
+                _write_manifest(manifest_path, manifest)
+            recompiled.append(dict(ref))
+            affected.add(ruleset_path)
+        except (RuleValidationError, CatalogError) as exc:
+            errors.append({**ref, "error": str(exc)})
+    return {"recompiled": recompiled, "errors": errors, "affected_rulesets": sorted(affected)}
 
 
 # ------------------------------------------------------------------ Миграция старой раскладки

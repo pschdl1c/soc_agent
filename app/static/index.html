@@ -388,8 +388,13 @@
      начальная ширина всё равно оставалась бы 380px. Держать в синхроне со значением
      defaultWidth у "rule-detail" в PANEL_RESIZE_CONFIG. */
   #rule-detail { width: 700px; }
+  #vl-detail { width: 440px; }  /* держать в синхроне с defaultWidth "vl-detail" в PANEL_RESIZE_CONFIG */
+  /* режим просмотра списка: поля видимы, но не редактируются до кнопки «Редактировать» */
+  #vl-detail input[readonly], #vl-detail textarea[readonly] { opacity: 0.75; cursor: default; }
   .panel-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; flex-shrink: 0; }
   .panel-toolbar button { font-size: 11px; padding: 4px 10px; }
+  /* компактная кнопка-иконка (копирование сырого события и т.п.) */
+  button.ico { font-size: 13px; line-height: 1; padding: 3px 7px; }
   .detail-body { overflow-y: auto; flex: 1 1 auto; }
   .resize-handle { position: absolute; left: 0; top: 0; bottom: 0; width: 14px; cursor: ew-resize; z-index: 2; }
   .resize-handle::after { content: ""; position: absolute; left: 6px; top: 0; bottom: 0; width: 2px; background: var(--border); }
@@ -424,6 +429,31 @@
   .pagination { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; color: var(--muted); font-size: 12px; }
 
   .status-select-row { display: flex; gap: 8px; margin-top: 10px; }
+
+  /* --- База знаний: MITRE ATT&CK --- */
+  a.tech-tag { text-decoration: none; }
+  .tech-tag.tech-matched { color: var(--text); border-color: var(--accent); }
+  .tech-tag.tech-matched:hover { background: var(--surface); }
+  .tactic-tag { display: inline-block; background: transparent; border: 1px solid var(--border); border-radius: 10px; padding: 2px 8px; font-size: 11px; font-family: var(--sans); margin: 2px 4px 2px 0; color: var(--muted); }
+  .kb-subtabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .kb-subtab { padding: 6px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-size: 13px; }
+  .kb-subtab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .kb-matrix { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; align-items: stretch; }
+  .kb-tactic-col { flex: 0 0 190px; min-width: 0; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; height: calc(100vh - 230px); overflow: hidden; }
+  .kb-tactic-head { flex: 0 0 auto; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; }
+  .kb-tactic-head .muted { font-weight: 400; color: var(--muted); font-family: var(--mono); }
+  /* min-height:0 + flex:1 1 auto - иначе flex-элемент не даёт body сжаться и overflow-y:auto не
+     включает скролл, а flex:0 0 auto на ячейках не даёт им схлопнуться по высоте под line-height
+     (колонки с 100+ техник иначе давило в 2px строки). */
+  .kb-tactic-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .kb-tech-cell { flex: 0 0 auto; font-family: var(--mono); font-size: 11px; padding: 4px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--accent); border: 1px solid transparent; }
+  .kb-tech-cell:hover { border-color: var(--border); background: var(--surface-2); }
+  .kb-tech-cell.sub { margin-left: 12px; color: var(--muted); }
+  .kb-tech-cell.selected { border-color: var(--accent); color: var(--text); }
+  .kb-tech-cell.hidden { display: none; }
+  /* ссылки в просмотрщике техники - приглушённый серый вместо дефолтного синего браузера */
+  #kb-tech-detail-content a { color: var(--muted); text-decoration: underline; }
+  #kb-tech-detail-content a:hover { color: var(--text); }
 </style>
 </head>
 <body>
@@ -444,6 +474,8 @@
       <div class="tab active" id="tab-alerts" onclick="switchTab('alerts')">Алерты</div>
       <div class="tab" id="tab-events" onclick="switchTab('events')">События</div>
       <div class="tab" id="tab-sigma" onclick="switchTab('sigma')">Sigma-правила</div>
+      <div class="tab" id="tab-value-lists" onclick="switchTab('value-lists')">Списки</div>
+      <div class="tab" id="tab-kb" onclick="switchTab('kb')">База знаний</div>
     </div>
 
     <div class="row" style="margin-bottom:14px;">
@@ -460,71 +492,141 @@
     </div>
 
     <div id="view-source" style="display:none;">
+
+      <!-- Разовая загрузка (файл/вставка) - свёрнута выше «Потоковых источников»: обычный
+           поток работы теперь потоковый ingest с токеном, ручная загрузка - вторична. -->
+      <div class="row" style="margin-bottom:12px;">
+        <span class="toggle-link" id="ingest-oneshot-toggle" onclick="toggleIngestOneshot()">+ Разовая загрузка (файл на сервере / из браузера / вставка событий) &#9662;</span>
+      </div>
+      <div id="ingest-oneshot-panel" style="display:none; margin-bottom:18px; border-bottom:1px solid var(--border); padding-bottom:16px;">
+        <div class="row">
+          <label>Файл датасета (путь на сервере):</label>
+          <input type="text" id="ingest-path" placeholder="otrf-samples/empire_dcsync_....json" style="width:340px;">
+          <label>Формат:</label>
+          <select id="ingest-type">
+            <option value="json">json</option>
+            <option value="evtx">evtx</option>
+            <option value="auditd">auditd</option>
+            <option value="sysmon_linux">sysmon_linux</option>
+            <option value="xml">xml</option>
+            <option value="csv">csv</option>
+          </select>
+          <label>Ruleset:</label>
+          <select id="ingest-ruleset">
+            <option value="">по умолчанию (merged)</option>
+          </select>
+          <label>Метка:</label>
+          <input type="text" id="ingest-label" placeholder="my-batch-name" style="width:160px;">
+          <button type="button" onclick="runIngestFile()">Прогнать файл</button>
+        </div>
+
+        <div class="row" style="margin-top:14px; border-top:1px solid var(--border); padding-top:14px;">
+          <label style="width:100%; margin-bottom:6px;">Или выбрать файл через проводник (загрузка из браузера):</label>
+        </div>
+        <div class="row">
+          <input type="file" id="ingest-upload-file">
+          <label>Формат:</label>
+          <select id="ingest-upload-type">
+            <option value="auto">определить автоматически</option>
+            <option value="json">json</option>
+            <option value="evtx">evtx</option>
+            <option value="auditd">auditd</option>
+            <option value="sysmon_linux">sysmon_linux</option>
+            <option value="xml">xml</option>
+            <option value="csv">csv</option>
+          </select>
+          <label>Ruleset:</label>
+          <select id="ingest-upload-ruleset">
+            <option value="">по умолчанию (merged)</option>
+          </select>
+          <label>Метка:</label>
+          <input type="text" id="ingest-upload-label" placeholder="необязательно" style="width:160px;">
+          <button type="button" onclick="runIngestUpload()">Загрузить и прогнать</button>
+        </div>
+        <div class="row" style="margin-top:14px;">
+          <label style="width:100%;">Или вставить события напрямую (JSON-массив) — обрабатывается основным рулсетом:</label>
+        </div>
+        <div class="row">
+          <textarea id="ingest-events-json" placeholder='[{"EventID": 4688, "Channel": "Security", "Hostname": "HOST01", "CommandLine": "..."}]'></textarea>
+        </div>
+        <div class="row">
+          <label>Источник*:</label>
+          <select id="ingest-events-source"><option value="">— выберите —</option></select>
+          <input type="password" id="ingest-events-token" placeholder="токен (если источник создан не в этой сессии)" style="width:300px;">
+          <button type="button" onclick="runIngestEvents()">Прогнать события</button>
+        </div>
+        <div class="muted" style="font-size:11px;">
+          <code>/ingest/events</code> тоже требует токен источника. Если источник создан в этой
+          сессии, токен подставится автоматически — иначе вставьте сохранённый токен или перевыпустите его.
+        </div>
+        <div id="ingest-result" style="margin-top:10px; font-size:12px;"></div>
+      </div><!-- /#ingest-oneshot-panel -->
+
+      <!-- Потоковые источники: регистрация + токен доступа. Приём по /ingest/stream и
+           /ingest/events требует токен зарегистрированного здесь источника (см. app/main.py:
+           _authenticate_ingest, app/store.py: sources). Имя источника обязательно и уникально -
+           оно же метка source_batch всех его событий/алертов. -->
+      <div class="row" style="margin-bottom:10px;">
+        <label style="width:100%; font-weight:600; font-size:15px;">Потоковые источники</label>
+      </div>
       <div class="row">
-        <label>Файл датасета (путь на сервере):</label>
-        <input type="text" id="ingest-path" placeholder="otrf-samples/empire_dcsync_....json" style="width:340px;">
-        <label>Формат:</label>
-        <select id="ingest-type">
-          <option value="json">json</option>
-          <option value="evtx">evtx</option>
-          <option value="auditd">auditd</option>
-          <option value="sysmon_linux">sysmon_linux</option>
-          <option value="xml">xml</option>
-          <option value="csv">csv</option>
-        </select>
-        <label>Ruleset:</label>
-        <select id="ingest-ruleset">
-          <option value="">по умолчанию (merged)</option>
-        </select>
-        <label>Метка:</label>
-        <input type="text" id="ingest-label" placeholder="my-batch-name" style="width:160px;">
-        <button type="button" onclick="runIngestFile()">Прогнать файл</button>
+        <button type="button" onclick="toggleSourceCreate()">+ Создать источник</button>
+        <button type="button" class="ghost" onclick="loadRegisteredSources()">Обновить</button>
       </div>
 
-      <div class="row" style="margin-top:14px; border-top:1px solid var(--border); padding-top:14px;">
-        <label style="width:100%; margin-bottom:6px;">Или выбрать файл через проводник (загрузка из браузера):</label>
+      <div id="source-create-panel" class="filter-help" style="display:none; margin-top:10px; grid-template-columns:1fr;">
+        <div style="font-weight:600; margin-bottom:8px;">СОЗДАТЬ ИСТОЧНИК</div>
+        <div class="row">
+          <label>Источник*:</label>
+          <input type="text" id="source-create-name" placeholder="host01 / prod-web / linux-edge" style="width:220px;">
+          <label>Описание:</label>
+          <input type="text" id="source-create-desc" placeholder="необязательно" maxlength="64" style="width:260px;">
+          <button type="button" onclick="createSource()">Создать</button>
+        </div>
+        <div class="muted" style="font-size:11px; margin-top:6px;">
+          1–64 символа: буквы, цифры, пробел, точка, дефис, подчёркивание. После создания имя не меняется.
+        </div>
+        <div id="source-create-result" style="margin-top:8px; font-size:12px;"></div>
       </div>
-      <div class="row">
-        <input type="file" id="ingest-upload-file">
-        <label>Формат:</label>
-        <select id="ingest-upload-type">
-          <option value="auto">определить автоматически</option>
-          <option value="json">json</option>
-          <option value="evtx">evtx</option>
-          <option value="auditd">auditd</option>
-          <option value="sysmon_linux">sysmon_linux</option>
-          <option value="xml">xml</option>
-          <option value="csv">csv</option>
-        </select>
-        <label>Ruleset:</label>
-        <select id="ingest-upload-ruleset">
-          <option value="">по умолчанию (merged)</option>
-        </select>
-        <label>Метка:</label>
-        <input type="text" id="ingest-upload-label" placeholder="необязательно" style="width:160px;">
-        <button type="button" onclick="runIngestUpload()">Загрузить и прогнать</button>
+
+      <div id="source-token-reveal" class="filter-help" style="display:none; margin-top:10px; grid-template-columns:1fr;">
+        <div style="font-weight:600; margin-bottom:8px;">ТОКЕН ИСТОЧНИКА «<span id="source-token-name"></span>»</div>
+        <div class="muted" style="font-size:12px; margin-bottom:8px;">
+          Токен показывается <b>один раз</b>. Сохраните его сейчас — повторно посмотреть нельзя,
+          только перевыпустить.
+        </div>
+        <pre class="json-block" id="source-token-value" style="white-space:pre-wrap; word-break:break-all;"></pre>
+        <div class="row">
+          <button type="button" onclick="copyText(document.getElementById('source-token-value').textContent, this)">Скопировать токен</button>
+          <button type="button" class="ghost" onclick="document.getElementById('source-token-reveal').style.display='none'">Скрыть</button>
+        </div>
+        <div id="source-token-curl-wrap">
+          <div style="font-weight:600; margin:10px 0 4px 0; font-size:11px;">ПРИМЕР ОТПРАВКИ (curl)</div>
+          <pre class="json-block" id="source-token-curl" style="white-space:pre-wrap; word-break:break-all;"></pre>
+        </div>
       </div>
-      <div class="row" style="margin-top:14px;">
-        <label style="width:100%;">Или вставить события напрямую (JSON-массив) — обрабатывается основным рулсетом:</label>
+
+      <div class="table-scroll" id="sources-reg-scroll" style="margin-top:12px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Источник</th><th>Описание</th><th>Токен</th><th>Статус</th>
+              <th>Создан</th><th>Последнее событие</th><th>События</th><th>Алерты</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="sources-reg-tbody"></tbody>
+        </table>
+        <div id="sources-reg-empty" class="empty-state" style="display:none;">Потоковых источников пока нет — нажмите «Создать источник».</div>
       </div>
-      <div class="row">
-        <textarea id="ingest-events-json" placeholder='[{"EventID": 4688, "Channel": "Security", "Hostname": "HOST01", "CommandLine": "..."}]'></textarea>
-      </div>
-      <div class="row">
-        <label>Метка:</label>
-        <input type="text" id="ingest-events-label" value="manual-batch" style="width:160px;">
-        <button type="button" onclick="runIngestEvents()">Прогнать события</button>
-      </div>
-      <div id="ingest-result" style="margin-top:10px; font-size:12px;"></div>
 
       <div class="row" style="margin-top:18px; border-top:1px solid var(--border); padding-top:14px;">
-        <label style="width:100%;">Источники данных:</label>
+        <label style="width:100%; font-weight:600; font-size:15px;">Все источники</label>
       </div>
       <div class="table-scroll" id="sources-table-scroll">
         <table>
           <thead>
             <tr>
-              <th>Источник</th><th>События</th><th>Совпало</th><th>Алерты</th>
+              <th>Источник</th><th>События</th><th>Срабатывания</th><th>Алерты</th>
               <th>Первое событие</th><th>Последнее событие</th><th></th>
             </tr>
           </thead>
@@ -580,7 +682,7 @@
         <div id="alert-detail" class="detail-panel">
           <div class="resize-handle" id="alert-detail-handle"></div>
           <div class="panel-toolbar">
-            <button type="button" class="ghost" onclick="resetPanelWidth('alert-detail')">&#8634; Сбросить ширину</button>
+            <button type="button" class="ghost" onclick="resetPanelWidth('alert-detail')" title="Сбросить ширину">&#8634;</button>
           </div>
           <div id="alert-detail-content" class="detail-body">
             <p class="muted">Выбери алерт в списке слева, чтобы увидеть детали.</p>
@@ -694,7 +796,7 @@
         <label>Fields:</label>
         <input type="text" id="event-field-input" placeholder="напр. CommandLine" style="width:170px;" onkeydown="if(event.key==='Enter'){addEventField();}">
         <button type="button" class="ghost" onclick="addEventField()">+ колонка</button>
-        <button type="button" class="ghost" onclick="resetColumnWidths()">&#8634; Ширины</button>
+        <button type="button" class="ghost" onclick="resetColumnWidths()" title="Сбросить ширину колонок">&#8634;</button>
         <span id="event-fields-chips"></span>
       </div>
 
@@ -752,7 +854,7 @@
         <div id="event-detail" class="detail-panel">
           <div class="resize-handle" id="event-detail-handle"></div>
           <div class="panel-toolbar">
-            <button type="button" class="ghost" onclick="resetPanelWidth('event-detail')">&#8634; Сбросить ширину</button>
+            <button type="button" class="ghost" onclick="resetPanelWidth('event-detail')" title="Сбросить ширину">&#8634;</button>
           </div>
           <div id="event-detail-content" class="detail-body">
             <p class="muted">Выбери событие в списке слева, чтобы увидеть сырые данные.</p>
@@ -834,7 +936,7 @@
           <div id="rule-detail" class="detail-panel">
             <div class="resize-handle" id="rule-detail-handle"></div>
             <div class="panel-toolbar">
-              <button type="button" class="ghost" onclick="resetPanelWidth('rule-detail')">&#8634; Сбросить ширину</button>
+              <button type="button" class="ghost" onclick="resetPanelWidth('rule-detail')" title="Сбросить ширину">&#8634;</button>
             </div>
             <div id="rule-detail-content" class="detail-body">
               <p class="muted">Выбери правило в списке слева, чтобы увидеть детали.</p>
@@ -892,6 +994,125 @@ level: medium"></textarea>
           </div>
         </div>
         <div id="rule-editor-result" style="margin-top:8px; font-size:12px;"></div>
+      </div>
+    </div>
+
+    <div id="view-value-lists" style="display:none;">
+      <p class="muted" style="font-size:12px; margin:0 0 12px 0;">
+        Именованные наборы значений для кастомных Sigma-правил. Правило ссылается на список
+        плейсхолдером <code>%имя%</code> с модификатором <code>|expand</code>
+        (<code>Image|endswith|expand: ['%имя_списка%']</code>) — значения подставляются при
+        компиляции. Изменение списка пересобирает зависимые правила.
+      </p>
+      <div class="content-grid" id="vl-content-grid" style="margin-top:12px;">
+        <div style="min-width:0;">
+          <div class="row" style="margin-bottom:8px;">
+            <button type="button" onclick="vlNew()">+ Создать список</button>
+            <span class="toggle-link" id="vl-upload-toggle" onclick="toggleValueListUpload()">+ Загрузить список &#9662;</span>
+            <button type="button" class="ghost" onclick="loadValueLists()">Обновить</button>
+          </div>
+
+          <div id="vl-upload-panel" class="filter-help" style="display:none; grid-template-columns:1fr;">
+            <div class="fh-col">
+              <h5>Загрузить список</h5>
+              <p>YAML-файл. Форматы:
+                <br>• Sigma processing-pipeline: <code>transformations</code> с
+                  <code>type: value_placeholders</code> и блоком <code>mapping: {имя: [значения]}</code>
+                  — один файл может задавать несколько списков;
+                <br>• <code>{name, description, values: [...]}</code> (в т.ч. несколько документов через <code>---</code>);
+                <br>• «голый» словарь <code>{имя: [значения], ...}</code>.</p>
+              <div class="row">
+                <input type="file" id="vl-upload-file" accept=".yml,.yaml">
+              </div>
+              <div class="row" style="margin-top:6px;">
+                <label>При совпадении имени:</label>
+                <select id="vl-upload-mode">
+                  <option value="create">пропустить существующий</option>
+                  <option value="replace">перезаписать</option>
+                  <option value="merge">объединить значения</option>
+                </select>
+                <span class="muted" style="font-size:11px;">replace/merge пересобирают зависимые правила</span>
+              </div>
+              <div class="row" style="margin-top:8px;">
+                <button type="button" onclick="runValueListUpload()">Загрузить</button>
+              </div>
+              <div id="vl-upload-result" style="margin-top:8px; font-size:12px;"></div>
+            </div>
+          </div>
+
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Имя</th><th>Описание</th><th>Значений</th><th>Правил</th><th>Обновлён</th></tr></thead>
+              <tbody id="vl-table-body"><tr><td colspan="5" class="muted">Загрузка…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="detail-panel" id="vl-detail">
+          <div class="resize-handle" id="vl-detail-handle"></div>
+          <div class="panel-toolbar">
+            <button type="button" class="ghost" onclick="resetPanelWidth('vl-detail')" title="Сбросить ширину">&#8634;</button>
+          </div>
+          <div class="detail-body">
+            <p class="muted" id="vl-empty-hint">Выберите список слева, чтобы посмотреть его, — или создайте новый.</p>
+            <div id="vl-detail-main" style="display:none;">
+              <h3 id="vl-detail-title">—</h3>
+              <div id="vl-name-row" style="display:none; margin:6px 0;">
+                <label style="font-size:12px;">Имя (плейсхолдер <code>%имя%</code>, потом не меняется):</label>
+                <input type="text" id="vl-name" placeholder="hacktool_binaries" style="width:100%; margin-top:4px;">
+              </div>
+              <label style="font-size:12px;">Описание:</label>
+              <input type="text" id="vl-description" style="width:100%; margin:4px 0 10px 0;" readonly>
+              <label style="font-size:12px;">Значения (по одному в строке):</label>
+              <textarea id="vl-values" style="min-height:220px; font-family:var(--mono);" readonly></textarea>
+              <div class="row" style="margin-top:10px;">
+                <span id="vl-view-actions">
+                  <button type="button" onclick="vlEnterEdit()">Редактировать</button>
+                  <button type="button" class="ghost" onclick="vlDelete()">Удалить</button>
+                </span>
+                <span id="vl-edit-actions" style="display:none;">
+                  <button type="button" onclick="vlSave()">Сохранить</button>
+                  <button type="button" class="ghost" onclick="vlCancelEdit()">Отмена</button>
+                </span>
+              </div>
+              <div id="vl-save-result" style="margin-top:10px; font-size:12px;"></div>
+              <div id="vl-used-by" style="margin-top:12px; font-size:12px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-kb" style="display:none;">
+      <div class="kb-subtabs">
+        <div class="kb-subtab active" id="kb-subtab-mitre" onclick="switchKbSubTab('mitre')">MITRE ATT&amp;CK</div>
+        <div class="kb-subtab" id="kb-subtab-playbooks" onclick="switchKbSubTab('playbooks')">Playbooks</div>
+      </div>
+
+      <div id="kb-mitre-panel">
+        <div class="row" style="margin-bottom:8px; align-items:center;">
+          <input type="text" id="kb-mitre-q" placeholder="фильтр по ID/названию техники" style="flex:0 1 320px;" oninput="kbFilterMatrix()">
+          <button type="button" class="ghost" onclick="loadKbMitre(true)">Обновить</button>
+          <span class="muted" id="kb-mitre-meta" style="font-size:11px;"></span>
+        </div>
+        <div id="kb-mitre-notice" class="empty-state" style="display:none;"></div>
+        <div class="content-grid" id="kb-mitre-grid">
+          <div style="min-width:0;">
+            <div class="kb-matrix" id="kb-matrix"><div class="muted">Загрузка…</div></div>
+          </div>
+          <div class="detail-panel" id="kb-tech-detail">
+            <div class="resize-handle" id="kb-tech-detail-handle"></div>
+            <div class="panel-toolbar">
+              <button type="button" class="ghost" onclick="resetPanelWidth('kb-tech-detail')" title="Сбросить ширину">&#8634;</button>
+            </div>
+            <div class="detail-body" id="kb-tech-detail-content">
+              <p class="muted">Выберите технику в матрице слева.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="kb-playbooks-panel" style="display:none;">
+        <div class="empty-state">Раздел в разработке.</div>
       </div>
     </div>
   </div>
@@ -1121,7 +1342,7 @@ function currentBatch() {
 // таблицу (было только alerts/events, стало +sigma). Новая сортируемая таблица - это одна
 // строка в обоих объектах, без изменений в sortBy/thHtml.
 const SORT_STATES = { alerts: alertsSort, events: eventsSort, sigma: sigmaSort };
-const RELOAD_FNS = { alerts: loadAlerts, events: () => loadEvents(0), sigma: () => loadSigmaRules(0) };
+const RELOAD_FNS = { alerts: loadAlerts, events: () => loadEvents(0), sigma: () => loadSigmaRules(0), "value-lists": loadValueLists };
 
 function sortBy(tab, key) {
   if (!key) return;
@@ -1674,6 +1895,9 @@ async function refreshBatches() {
   } catch (e) {
     console.error(e);
   }
+  // Таблица зарегистрированных потоковых источников (счётчики событий/алертов приходят из
+  // /sources, который сам сводит их с /batches) - обновляем вместе с остальным на этой вкладке.
+  loadRegisteredSources();
 }
 
 // Таблица источников во вкладке "Источник данных" - тот же /batches, что уже используется для
@@ -1768,12 +1992,19 @@ async function runIngestUpload() {
 
 async function runIngestEvents() {
   const resultEl = document.getElementById("ingest-result");
+  const name = document.getElementById("ingest-events-source").value;
+  const token = sessionSourceTokens[name] || document.getElementById("ingest-events-token").value.trim();
+  if (!name) { resultEl.innerHTML = '<span class="error-state">Выберите источник (или создайте его выше)</span>'; return; }
+  if (!token) { resultEl.innerHTML = '<span class="error-state">Нет токена для источника — вставьте токен, полученный при создании, или перевыпустите его</span>'; return; }
   resultEl.innerHTML = '<span class="muted">Выполняется...</span>';
   try {
-    const raw = document.getElementById("ingest-events-json").value;
-    const events = JSON.parse(raw);
-    const body = { events: events, source_label: document.getElementById("ingest-events-label").value || "manual-batch" };
-    const res = await api("/ingest/events", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+    const events = JSON.parse(document.getElementById("ingest-events-json").value);
+    // source_label не шлём: сервер берёт метку из имени источника, привязанного к токену.
+    const res = await api("/ingest/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ events: events }),
+    });
     resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> событий ${res.events_processed}, правил сработало ${res.rules_matched}, алертов создано ${res.alerts_created}, ${res.duration_seconds}с`;
     await refreshBatches();
     await refreshActiveTab();
@@ -1782,16 +2013,170 @@ async function runIngestEvents() {
   }
 }
 
+// ---------- Потоковые источники: регистрация + токен доступа ----------
+// /ingest/stream и /ingest/events требуют токен зарегистрированного источника. В БД токен
+// лежит только хэшем и показывается ОДИН раз при создании/перевыпуске - поэтому свежий токен
+// держим в памяти на время сессии (sessionSourceTokens), чтобы форма "Прогнать события" в этой
+// же вкладке работала без ручной вставки. После перезагрузки страницы кэш пуст - тогда токен
+// вводится вручную (или источник перевыпускается).
+const sessionSourceTokens = {};   // { имя_источника: открытый_токен }
+
+function toggleSourceCreate() {
+  const p = document.getElementById("source-create-panel");
+  p.style.display = p.style.display === "none" ? "block" : "none";
+  if (p.style.display === "block") document.getElementById("source-create-name").focus();
+}
+
+function streamCurlSnippet(token) {
+  // Одна строка + маленькое тестовое событие в теле - можно скопировать и сразу отправить.
+  const sample = '{"EventID":1,"Hostname":"test-host","Image":"/usr/bin/whoami","CommandLine":"whoami","EventTime":"2026-09-02 12:00:00"}';
+  return `curl -X POST '${location.origin}/ingest/stream' -H 'Authorization: Bearer ${token}' -H 'Content-Type: application/json' -d '${sample}'`;
+}
+
+// showCurl=true только при СОЗДАНИИ источника (пример curl показываем один раз). При
+// перевыпуске токена панель тоже открывается (нужно показать новый одноразовый токен), но
+// блок с командой не дублируем.
+function showSourceToken(name, token, showCurl) {
+  sessionSourceTokens[name] = token;
+  document.getElementById("source-token-name").textContent = name;
+  document.getElementById("source-token-value").textContent = token;
+  const curlWrap = document.getElementById("source-token-curl-wrap");
+  if (showCurl) {
+    document.getElementById("source-token-curl").textContent = streamCurlSnippet(token);
+    curlWrap.style.display = "";
+  } else {
+    curlWrap.style.display = "none";
+  }
+  document.getElementById("source-token-reveal").style.display = "block";
+}
+
+async function copyText(text, btn, flash) {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btn) { const t = btn.textContent; btn.textContent = flash || "Скопировано"; setTimeout(() => { btn.textContent = t; }, 1200); }
+  } catch (e) {
+    alert("Не удалось скопировать: " + e.message);
+  }
+}
+
+async function createSource() {
+  const nameEl = document.getElementById("source-create-name");
+  const descEl = document.getElementById("source-create-desc");
+  const resultEl = document.getElementById("source-create-result");
+  const name = nameEl.value.trim();
+  if (!name) { resultEl.innerHTML = '<span class="error-state">Укажите имя источника</span>'; return; }
+  resultEl.innerHTML = '<span class="muted">Создаю…</span>';
+  try {
+    const res = await api("/sources", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name, description: descEl.value.trim() }),
+    });
+    resultEl.innerHTML = `<span style="color:var(--accent)">Источник «${escapeHtml(res.name)}» создан.</span>`;
+    nameEl.value = ""; descEl.value = "";
+    showSourceToken(res.name, res.token, true);   // пример curl — только при создании
+    await loadRegisteredSources();
+  } catch (e) {
+    resultEl.innerHTML = `<span class="error-state">Ошибка: ${escapeHtml(e.message)}</span>`;
+  }
+}
+
+async function rotateSourceToken(sourceId, name) {
+  if (!confirm(`Перевыпустить токен источника «${name}»?\nСтарый токен перестанет работать немедленно.`)) return;
+  try {
+    const res = await api(`/sources/${encodeURIComponent(sourceId)}/rotate`, { method: "POST" });
+    showSourceToken(name, res.token, false);
+    await loadRegisteredSources();
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+async function toggleSourceEnabled(sourceId, enabled) {
+  try {
+    await api(`/sources/${encodeURIComponent(sourceId)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: enabled }),
+    });
+    await loadRegisteredSources();
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+async function deleteRegisteredSource(sourceId, name) {
+  if (!confirm(`Снять регистрацию источника «${name}»?\nТокен перестанет работать. Уже загруженные события и алерты останутся — их удаляют отдельно в таблице ниже.`)) return;
+  try {
+    await api(`/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+    delete sessionSourceTokens[name];
+    await loadRegisteredSources();
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+async function loadRegisteredSources() {
+  const tbody = document.getElementById("sources-reg-tbody");
+  if (!tbody) return;  // разметка есть только во вкладке "Источник данных"
+  const emptyEl = document.getElementById("sources-reg-empty");
+  let rows;
+  try {
+    rows = await api("/sources");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="muted">Ошибка: ${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+  // Селектор источника для формы "Прогнать события" (только активные).
+  const sel = document.getElementById("ingest-events-source");
+  if (sel) {
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— выберите —</option>' + rows
+      .filter(r => r.enabled)
+      .map(r => `<option value="${escapeAttr(r.name)}">${escapeHtml(r.name)}</option>`).join("");
+    sel.value = prev;
+  }
+  if (!rows.length) {
+    tbody.innerHTML = "";
+    emptyEl.style.display = "block";
+    return;
+  }
+  emptyEl.style.display = "none";
+  tbody.innerHTML = rows.map(r => {
+    const hint = r.token_hint ? `…${escapeHtml(r.token_hint)}` : "—";
+    const last = r.last_event_at ? escapeHtml(r.last_event_at.slice(0, 19).replace("T", " ")) : "—";
+    const created = escapeHtml((r.created_at || "").slice(0, 19).replace("T", " "));
+    return `
+    <tr>
+      <td>${escapeHtml(r.name)}</td>
+      <td style="font-family:var(--sans);">${escapeHtml(r.description || "")}</td>
+      <td><code>${hint}</code></td>
+      <td>${r.enabled ? '<span style="color:var(--accent)">active</span>' : '<span style="color:var(--muted)">inactive</span>'}</td>
+      <td>${created}</td>
+      <td>${last}</td>
+      <td>${r.event_count}</td>
+      <td>${r.alert_count}</td>
+      <td style="white-space:nowrap;">
+        <button type="button" class="ghost" onclick="rotateSourceToken('${escapeAttr(r.source_id)}','${escapeAttr(r.name)}')">Перевыпустить</button>
+        <button type="button" class="ghost" onclick="toggleSourceEnabled('${escapeAttr(r.source_id)}',${r.enabled ? "false" : "true"})">${r.enabled ? "Выключить" : "Включить"}</button>
+        <button type="button" class="ghost" onclick="deleteRegisteredSource('${escapeAttr(r.source_id)}','${escapeAttr(r.name)}')">Удалить</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
 function switchTab(tab) {
   activeTab = tab;
   document.getElementById("tab-source").classList.toggle("active", tab === "source");
   document.getElementById("tab-alerts").classList.toggle("active", tab === "alerts");
   document.getElementById("tab-events").classList.toggle("active", tab === "events");
   document.getElementById("tab-sigma").classList.toggle("active", tab === "sigma");
+  document.getElementById("tab-value-lists").classList.toggle("active", tab === "value-lists");
+  document.getElementById("tab-kb").classList.toggle("active", tab === "kb");
   document.getElementById("view-source").style.display = tab === "source" ? "block" : "none";
   document.getElementById("view-alerts").style.display = tab === "alerts" ? "block" : "none";
   document.getElementById("view-events").style.display = tab === "events" ? "block" : "none";
   document.getElementById("view-sigma").style.display = tab === "sigma" ? "block" : "none";
+  document.getElementById("view-value-lists").style.display = tab === "value-lists" ? "block" : "none";
+  document.getElementById("view-kb").style.display = tab === "kb" ? "block" : "none";
   refreshActiveTab();
 }
 
@@ -1799,7 +2184,227 @@ function refreshActiveTab() {
   if (activeTab === "alerts") loadAlerts();
   else if (activeTab === "events") loadEvents(eventsOffset);
   else if (activeTab === "sigma") loadSigmaRules(0);
+  else if (activeTab === "value-lists") loadValueLists();
+  else if (activeTab === "kb") loadKb();
   // вкладка "source" ничего не подгружает - там только формы ingest
+}
+
+// ---------- Value lists (вкладка "Списки") ----------
+// Именованные списки значений для Sigma-плейсхолдеров %name% / |expand (см. app/value_lists.py,
+// app/main.py:/value-lists*). Простой 2-колоночный вид без resizable-панелей.
+let vlMode = "view";        // "view" | "create" - режим сохранения (PUT vs POST)
+let vlCurrent = null;       // имя выбранного списка
+let vlPanelState = "empty"; // "empty" | "view" | "edit" - что показывает правая панель
+
+async function loadValueLists() {
+  const body = document.getElementById("vl-table-body");
+  try {
+    const rows = await api("/value-lists");
+    if (!rows.length) {
+      body.innerHTML = `<tr><td colspan="5" class="muted">Списков пока нет. Нажми «Создать список».</td></tr>`;
+      return;
+    }
+    body.innerHTML = rows.map(r => `
+      <tr class="data-row ${r.name === vlCurrent ? "selected" : ""}" onclick="vlSelect('${r.name}')">
+        <td>${escapeHtml(r.name)}</td>
+        <td style="font-family:var(--sans);">${escapeHtml(r.description || "")}</td>
+        <td>${r.value_count}</td>
+        <td>${r.used_by_count}</td>
+        <td>${escapeHtml((r.updated_at || "").replace("T", " ").slice(0, 19))}</td>
+      </tr>`).join("");
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="muted">Ошибка: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+// Правая панель всегда на месте (как в Алертах/Sigma). Три состояния:
+//   empty - ничего не выбрано, показан плейсхолдер;
+//   view  - список открыт для ПРОСМОТРА, поля readonly, кнопки «Редактировать»/«Удалить»;
+//   edit  - редактирование (создание нового ИЛИ «Редактировать» существующего), поля активны.
+function vlSetPanelState(state) {
+  vlPanelState = state;
+  const editing = state === "edit";
+  document.getElementById("vl-empty-hint").style.display = state === "empty" ? "" : "none";
+  document.getElementById("vl-detail-main").style.display = state === "empty" ? "none" : "";
+  for (const id of ["vl-description", "vl-values", "vl-name"]) {
+    document.getElementById(id).readOnly = !editing;
+  }
+  document.getElementById("vl-view-actions").style.display = state === "view" ? "" : "none";
+  document.getElementById("vl-edit-actions").style.display = editing ? "" : "none";
+}
+
+async function vlSelect(name) {
+  vlMode = "view";
+  vlCurrent = name;
+  try {
+    const d = await api("/value-lists/" + name);
+    document.getElementById("vl-detail-title").textContent = d.name;
+    document.getElementById("vl-name-row").style.display = "none";
+    document.getElementById("vl-description").value = d.description || "";
+    document.getElementById("vl-values").value = (d.values || []).join("\n");
+    document.getElementById("vl-save-result").innerHTML = "";
+    vlRenderUsedBy(d.used_by || []);
+    vlSetPanelState("view");
+    loadValueLists();
+  } catch (e) {
+    alert("Ошибка: " + e.message);
+  }
+}
+
+// «Редактировать» - те же поля становятся активными (значения уже загружены vlSelect-ом).
+function vlEnterEdit() {
+  if (!vlCurrent) return;
+  vlMode = "view";  // сохранение пойдёт через PUT
+  document.getElementById("vl-save-result").innerHTML = "";
+  vlSetPanelState("edit");
+  document.getElementById("vl-description").focus();
+}
+
+// «Отмена» в режиме edit: для нового списка - назад к плейсхолдеру, для существующего -
+// перечитываем его с сервера (сбрасывая несохранённые правки) и возвращаемся в просмотр.
+function vlCancelEdit() {
+  if (vlMode === "create" || !vlCurrent) { vlDeselect(); return; }
+  vlSelect(vlCurrent);
+}
+
+function vlNew() {
+  vlMode = "create";
+  vlCurrent = null;
+  document.getElementById("vl-detail-title").textContent = "Новый список";
+  document.getElementById("vl-name-row").style.display = "block";
+  document.getElementById("vl-name").value = "";
+  document.getElementById("vl-description").value = "";
+  document.getElementById("vl-values").value = "";
+  document.getElementById("vl-save-result").innerHTML = "";
+  document.getElementById("vl-used-by").innerHTML = "";
+  vlSetPanelState("edit");
+  document.getElementById("vl-name").focus();
+  loadValueLists();
+}
+
+function vlDeselect() {
+  vlCurrent = null;
+  vlMode = "view";
+  document.getElementById("vl-save-result").innerHTML = "";
+  vlSetPanelState("empty");
+  loadValueLists();
+}
+
+function vlParseValues() {
+  return document.getElementById("vl-values").value.split("\n").map(s => s.trim()).filter(Boolean);
+}
+
+async function vlSave() {
+  const description = document.getElementById("vl-description").value;
+  const values = vlParseValues();
+  const resEl = document.getElementById("vl-save-result");
+  try {
+    if (vlMode === "create") {
+      const name = document.getElementById("vl-name").value.trim();
+      await api("/value-lists", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, description, values }),
+      });
+      resEl.innerHTML = `<span style="color:var(--accent);">Список создан.</span>`;
+      await loadValueLists();
+      vlSelect(name);
+    } else {
+      const r = await api("/value-lists/" + vlCurrent, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description, values }),
+      });
+      let msg = `<span style="color:var(--accent);">Сохранено.</span>`;
+      if (r.recompiled && r.recompiled.length) msg += ` Пересобрано правил: ${r.recompiled.length}.`;
+      if (r.errors && r.errors.length) {
+        msg += `<br><span style="color:var(--crit);">Не пересобрались (${r.errors.length}): `
+             + r.errors.map(e => escapeHtml(e.title || e.rule_id) + " — " + escapeHtml(e.error)).join("; ")
+             + `</span>`;
+      }
+      resEl.innerHTML = msg;
+      await loadValueLists();
+      vlSetPanelState("view");  // после сохранения - назад в просмотр
+    }
+  } catch (e) {
+    resEl.innerHTML = `<span style="color:var(--crit);">Ошибка: ${escapeHtml(e.message)}</span>`;
+  }
+}
+
+async function vlDelete() {
+  if (!vlCurrent) return;
+  if (!confirm(`Удалить список «${vlCurrent}»?`)) return;
+  let res = await fetch(API + "/value-lists/" + vlCurrent, { method: "DELETE" });
+  if (res.status === 409) {
+    const detail = (await res.json().catch(() => ({}))).detail || "Список используется в правилах.";
+    if (!confirm(detail + "\n\nВсё равно удалить?")) return;
+    res = await fetch(API + "/value-lists/" + vlCurrent + "?force=true", { method: "DELETE" });
+  }
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => ({}))).detail || res.statusText;
+    alert("Ошибка: " + detail);
+    return;
+  }
+  vlDeselect();
+}
+
+function vlRenderUsedBy(usedBy) {
+  const el = document.getElementById("vl-used-by");
+  if (!usedBy.length) {
+    el.innerHTML = `<span class="muted">Не используется ни одним правилом.</span>`;
+    return;
+  }
+  el.innerHTML = `<div class="muted" style="margin-bottom:4px;">Используется правилами (${usedBy.length}):</div>`
+    + usedBy.map(u => `<div style="font-family:var(--mono); font-size:11px;">• ${escapeHtml(u.title || u.rule_id)} <span class="muted">(${escapeHtml(u.ruleset)})</span></div>`).join("");
+}
+
+function toggleValueListUpload() {
+  const panel = document.getElementById("vl-upload-panel");
+  const toggle = document.getElementById("vl-upload-toggle");
+  const show = panel.style.display === "none";
+  panel.style.display = show ? "grid" : "none";
+  toggle.textContent = show ? "Свернуть ▴" : "+ Загрузить список ▾";
+}
+
+function toggleIngestOneshot() {
+  const panel = document.getElementById("ingest-oneshot-panel");
+  const toggle = document.getElementById("ingest-oneshot-toggle");
+  const show = panel.style.display === "none";
+  panel.style.display = show ? "block" : "none";
+  toggle.textContent = show
+    ? "Свернуть ▴"
+    : "+ Разовая загрузка (файл на сервере / из браузера / вставка событий) ▾";
+}
+
+function _vlNamesLine(label, names) {
+  return names && names.length ? ` ${label}: ${names.map(escapeHtml).join(", ")}.` : "";
+}
+
+async function runValueListUpload() {
+  const resultEl = document.getElementById("vl-upload-result");
+  const fileInput = document.getElementById("vl-upload-file");
+  if (!fileInput.files.length) {
+    resultEl.innerHTML = '<span style="color:var(--crit);">Сначала выбери файл</span>';
+    return;
+  }
+  resultEl.innerHTML = '<span class="muted">Загрузка...</span>';
+  try {
+    const fd = new FormData();
+    fd.append("file", fileInput.files[0]);
+    fd.append("mode", document.getElementById("vl-upload-mode").value);
+    const r = await api("/value-lists/upload", { method: "POST", body: fd });
+    let msg = '<span style="color:var(--accent);">Готово.</span>'
+      + _vlNamesLine("создано", r.created) + _vlNamesLine("перезаписано", r.replaced)
+      + _vlNamesLine("объединено", r.merged) + _vlNamesLine("пропущено", r.skipped);
+    if (r.recompiled && r.recompiled.length) msg += ` Пересобрано правил: ${r.recompiled.length}.`;
+    if (r.errors && r.errors.length) {
+      msg += `<br><span style="color:var(--crit);">Не пересобрались (${r.errors.length}): `
+           + r.errors.map(e => escapeHtml(e.title || e.rule_id) + " — " + escapeHtml(e.error)).join("; ") + `</span>`;
+    }
+    resultEl.innerHTML = msg;
+    fileInput.value = "";
+    await loadValueLists();
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:var(--crit);">Ошибка: ${escapeHtml(e.message)}</span>`;
+  }
 }
 
 // ---------- Alerts ----------
@@ -1851,6 +2456,29 @@ async function loadAlerts() {
   }
 }
 
+// Чипы MITRE в карточке алерта. enriched - гибрид от GET /alerts/{id} (см. app/kb.py): у
+// найденных в базе знаний техник есть name/url/tactics, у остальных matched=false и показываем
+// сырой тег как раньше. Нет enriched (KB недоступна/старый ответ) -> полный откат к сырым тегам.
+function renderMitreChips(enriched, rawFallback) {
+  if (!Array.isArray(enriched) || !enriched.length) {
+    const raw = (rawFallback || []).map(t => `<span class="tech-tag">${escapeHtml(t)}</span>`).join(" ");
+    return { techniquesHtml: raw || '<span class="muted">—</span>', tacticsHtml: "" };
+  }
+  const techniquesHtml = enriched.map(e => {
+    if (!e.matched) return `<span class="tech-tag" title="нет в базе знаний">${escapeHtml(e.tag)}</span>`;
+    const label = `${escapeHtml(e.technique_id)} · ${escapeHtml(e.name)}`;
+    return e.url
+      ? `<a class="tech-tag tech-matched" href="${attr(e.url)}" target="_blank" rel="noopener" title="${attr(e.name)}">${label}</a>`
+      : `<span class="tech-tag tech-matched" title="${attr(e.name)}">${label}</span>`;
+  }).join(" ");
+  const seen = new Set();
+  const tacticsHtml = enriched.flatMap(e => e.tactics || [])
+    .filter(t => t && !seen.has(t.shortname) && seen.add(t.shortname))
+    .map(t => `<span class="tactic-tag" title="${attr(t.tactic_id || "")}">${escapeHtml(t.name)}</span>`)
+    .join(" ");
+  return { techniquesHtml, tacticsHtml };
+}
+
 async function selectAlert(id) {
   const scrollY = window.scrollY;
   document.querySelectorAll("#alerts-tbody tr").forEach(tr => tr.classList.toggle("selected", tr.dataset.id === id));
@@ -1858,12 +2486,13 @@ async function selectAlert(id) {
   content.style.opacity = "0.45";
   try {
     const a = await api("/alerts/" + id);
-    const techs = a.mitre_techniques.map(t => `<span class="tech-tag">${t}</span>`).join(" ") || '<span class="muted">—</span>';
+    const mitre = renderMitreChips(a.mitre, a.mitre_techniques);
     const ent = a.entities;
     content.innerHTML = `
       <h3>${sevBar(a.rule_level)}${a.rule_title}</h3>
       <p class="muted">${a.description || "без описания"}</p>
-      <div style="margin:10px 0;">${techs}</div>
+      ${mitre.tacticsHtml ? `<div style="margin:8px 0 2px 0;">${mitre.tacticsHtml}</div>` : ""}
+      <div style="margin:4px 0 10px 0;">${mitre.techniquesHtml}</div>
       <div class="kv"><span>Хост</span><span>${a.host}</span></div>
       <div class="kv"><span>Уровень</span><span>${sevBar(a.rule_level)}${a.rule_level}</span></div>
       <div class="kv"><span>Источник</span><span>${a.source_batch}</span></div>
@@ -1984,8 +2613,12 @@ async function selectEvent(id) {
       <p class="muted" title="${attr(e.event_time || "")}">${e.event_time ? escapeHtml(formatEventTime(e.event_time)) : "время не определено"}</p>
       <div style="margin:10px 0;">${rules}</div>
       <div class="kv"><span>Источник</span><span>${e.source_batch}</span></div>
-      <p class="panel-title" style="margin-top:14px;">Сырое событие</p>
-      <pre class="json-block raw-event">${escapeHtml(JSON.stringify(e.raw_json, null, 2))}</pre>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin:14px 0 10px;">
+        <span class="panel-title" style="margin:0;">Сырое событие</span>
+        <button type="button" class="ghost ico" title="Скопировать сырое событие"
+                onclick="copyText(document.getElementById('raw-event-pre').textContent, this, '✓')">&#10064;</button>
+      </div>
+      <pre class="json-block raw-event" id="raw-event-pre">${escapeHtml(JSON.stringify(e.raw_json, null, 2))}</pre>
     `;
   } catch (e) {
     content.innerHTML = `<p class="error-state">Ошибка: ${e.message}</p>`;
@@ -2619,7 +3252,21 @@ async function runRulesetUpload() {
     if (target.ruleset) formData.append("ruleset", target.ruleset);
     if (target.new_ruleset_name) formData.append("new_ruleset_name", target.new_ruleset_name);
     const res = await api("/rulesets/upload", { method: "POST", body: formData });
-    resultEl.innerHTML = `<span style="color:var(--accent)">Готово:</span> ${escapeHtml(res.name)} (${res.rule_count} правил)`;
+    // res.name может отсутствовать, если в файле были ТОЛЬКО определения списков (рулсет не создан).
+    resultEl.innerHTML = res.name
+      ? `<span style="color:var(--accent)">Готово:</span> ${escapeHtml(res.name)} (${res.rule_count} правил)`
+      : `<span style="color:var(--accent)">Готово.</span> ${escapeHtml(res.note || "рулсет не создан")}`;
+    const imp = res.value_lists_imported;
+    if (imp) {
+      const parts = [];
+      for (const [k, label] of [["created","создано"],["replaced","перезаписано"],["merged","объединено"],["skipped","пропущено"]])
+        if (imp[k] && imp[k].length) parts.push(`${label}: ${imp[k].map(escapeHtml).join(", ")}`);
+      if (parts.length) resultEl.innerHTML += `<div style="margin-top:4px;">Списки — ${parts.join("; ")}.</div>`;
+    }
+    if (res.errors && res.errors.length) {
+      resultEl.innerHTML += `<div class="error-state" style="margin-top:4px;">Правила не пересобрались (${res.errors.length}): `
+        + res.errors.map(e => escapeHtml(e.title || e.rule_id) + " — " + escapeHtml(e.error)).join("; ") + `</div>`;
+    }
     if (res.collisions && res.collisions.length) {
       const rows = res.collisions.map(c => `<li>${escapeHtml(c.id)}.yml "${escapeHtml(c.title || "")}" - id уже занят правилом "${escapeHtml(c.conflict_title || "")}" в рулсете ${escapeHtml(c.conflict_ruleset)}; НЕ добавлено</li>`).join("");
       resultEl.innerHTML += `<div class="error-state" style="margin-top:6px;">Пропущено из-за конфликта id (${res.collisions.length}):<ul style="margin:4px 0 0 18px; padding:0;">${rows}</ul></div>`;
@@ -2627,8 +3274,10 @@ async function runRulesetUpload() {
     fileInput.value = "";
     document.getElementById("sigma-upload-target-new").value = "";
     await refreshRulesetOptions();
-    document.getElementById("sigma-ruleset-select").value = res.path;
-    loadSigmaRules(0);
+    if (res.path) {
+      document.getElementById("sigma-ruleset-select").value = res.path;
+      loadSigmaRules(0);
+    }
   } catch (e) {
     resultEl.innerHTML = `<span class="error-state">Ошибка: ${e.message}</span>`;
   }
@@ -2668,8 +3317,123 @@ async function deleteCustomRule(ruleId, ruleset) {
 // и в гриде оставалась пустая полоса между панелью и соседней колонкой.
 // anchor "end"   - панель справа (детали), тянем влево.
 // anchor "start" - панель слева (группировка), тянем вправо.
+// ---------- База знаний: MITRE ATT&CK (вкладка «База знаний») ----------
+// Read-only матрица из kb.db (GET /kb/mitre/*, см. app/kb.py). Данные один раз кэшируются в
+// kbMatrixCache; фильтр по ID/названию - чисто клиентский (show/hide ячеек), без запросов.
+let kbSubTab = "mitre";
+let kbMitreLoaded = false;
+let kbMatrixCache = null;
+
+function switchKbSubTab(name) {
+  kbSubTab = name;
+  document.getElementById("kb-subtab-mitre").classList.toggle("active", name === "mitre");
+  document.getElementById("kb-subtab-playbooks").classList.toggle("active", name === "playbooks");
+  document.getElementById("kb-mitre-panel").style.display = name === "mitre" ? "block" : "none";
+  document.getElementById("kb-playbooks-panel").style.display = name === "playbooks" ? "block" : "none";
+  if (name === "mitre") loadKbMitre();
+}
+
+function loadKb() {
+  if (kbSubTab === "mitre") loadKbMitre();
+}
+
+async function loadKbMitre(force) {
+  if (kbMitreLoaded && !force) return;
+  kbMitreLoaded = true;
+  const notice = document.getElementById("kb-mitre-notice");
+  const grid = document.getElementById("kb-mitre-grid");
+  const metaEl = document.getElementById("kb-mitre-meta");
+  try {
+    const [meta, matrix] = await Promise.all([api("/kb/mitre/meta"), api("/kb/mitre/matrix")]);
+    if (!meta.available || !matrix.available) {
+      notice.className = "empty-state";
+      notice.style.display = "block";
+      notice.textContent = "База знаний MITRE не собрана. Запустите scripts/build_kb.py --out kb/kb.db или пересоберите Docker-образ.";
+      grid.style.display = "none";
+      metaEl.textContent = "";
+      return;
+    }
+    notice.style.display = "none";
+    grid.style.display = "grid";
+    metaEl.textContent = `ATT&CK ${meta.attack_version || "?"} · тактик ${meta.tactic_count || "?"} · техник ${meta.technique_count || "?"} · собрано ${meta.built_at || "?"}`;
+    kbMatrixCache = matrix.tactics || [];
+    renderKbMatrix(kbMatrixCache);
+    kbFilterMatrix();
+  } catch (e) {
+    kbMitreLoaded = false;
+    notice.className = "error-state";
+    notice.style.display = "block";
+    notice.textContent = "Ошибка загрузки базы знаний: " + e.message;
+    grid.style.display = "none";
+  }
+}
+
+function renderKbMatrix(tactics) {
+  const box = document.getElementById("kb-matrix");
+  if (!tactics.length) { box.innerHTML = '<div class="muted">Матрица пуста.</div>'; return; }
+  box.innerHTML = tactics.map(tac => {
+    const cells = (tac.techniques || []).map(t =>
+      `<div class="kb-tech-cell${t.is_subtechnique ? " sub" : ""}" data-tid="${attr(t.technique_id)}" data-search="${attr((t.technique_id + " " + t.name).toLowerCase())}" onclick="selectKbTechnique('${escapeAttr(t.technique_id)}')" title="${attr(t.technique_id + " · " + t.name)}">${escapeHtml(t.technique_id)} ${escapeHtml(t.name)}</div>`
+    ).join("");
+    return `<div class="kb-tactic-col">
+      <div class="kb-tactic-head">${escapeHtml(tac.name)} <span class="muted">${escapeHtml(tac.tactic_id)}</span> · ${(tac.techniques || []).length}</div>
+      <div class="kb-tactic-body">${cells || '<div class="muted" style="font-size:11px;">—</div>'}</div>
+    </div>`;
+  }).join("");
+}
+
+function kbFilterMatrix() {
+  const q = (document.getElementById("kb-mitre-q").value || "").trim().toLowerCase();
+  document.querySelectorAll("#kb-matrix .kb-tech-cell").forEach(el => {
+    el.classList.toggle("hidden", q !== "" && !el.dataset.search.includes(q));
+  });
+}
+
+async function selectKbTechnique(tid) {
+  document.querySelectorAll("#kb-matrix .kb-tech-cell").forEach(el =>
+    el.classList.toggle("selected", el.dataset.tid === tid));
+  const box = document.getElementById("kb-tech-detail-content");
+  box.style.opacity = "0.45";
+  try {
+    const t = await api("/kb/mitre/techniques/" + encodeURIComponent(tid));
+    const chips = (arr) => (arr && arr.length)
+      ? arr.map(x => `<span class="tech-tag">${escapeHtml(x)}</span>`).join(" ")
+      : '<span class="muted">—</span>';
+    const tacticChips = (t.tactics || []).map(x => `<span class="tactic-tag">${escapeHtml(x.name)}</span>`).join(" ") || '<span class="muted">—</span>';
+    const mit = (t.mitigations || []).length
+      ? t.mitigations.map(m => `<div class="kv"><span>${escapeHtml(m.mitigation_id)}</span><span>${m.url ? `<a href="${attr(m.url)}" target="_blank" rel="noopener">${escapeHtml(m.name)}</a>` : escapeHtml(m.name)}</span></div>`).join("")
+      : '<p class="muted">—</p>';
+    const subs = (t.subtechniques || []).length
+      ? t.subtechniques.map(s => `<span class="tech-tag" style="cursor:pointer;" onclick="selectKbTechnique('${escapeAttr(s.technique_id)}')">${escapeHtml(s.technique_id)} ${escapeHtml(s.name)}</span>`).join(" ")
+      : '<span class="muted">—</span>';
+    box.innerHTML = `
+      <h3>${escapeHtml(t.technique_id)} · ${escapeHtml(t.name)}</h3>
+      <p class="muted" style="word-break:break-all;">${t.url ? `<a href="${attr(t.url)}" target="_blank" rel="noopener">${escapeHtml(t.url)}</a>` : ""}</p>
+      <div style="margin:8px 0;">${tacticChips}</div>
+      <div class="kv"><span>Тип</span><span>${t.is_subtechnique ? "сабтехника" : "техника"}${t.parent_id ? " (" + escapeHtml(t.parent_id) + ")" : ""}</span></div>
+      <p class="panel-title" style="margin-top:12px;">Платформы</p>
+      <div>${chips(t.platforms)}</div>
+      <p class="panel-title" style="margin-top:12px;">Источники данных</p>
+      <div>${chips(t.data_sources)}</div>
+      <p class="panel-title" style="margin-top:12px;">Описание</p>
+      <pre class="json-block">${escapeHtml(t.description || "—")}</pre>
+      <p class="panel-title" style="margin-top:12px;">Обнаружение</p>
+      <pre class="json-block">${escapeHtml(t.detection || "—")}</pre>
+      <p class="panel-title" style="margin-top:12px;">Митигации</p>
+      ${mit}
+      <p class="panel-title" style="margin-top:12px;">Сабтехники</p>
+      <div>${subs}</div>
+    `;
+  } catch (e) {
+    box.innerHTML = `<p class="error-state">Ошибка: ${escapeHtml(e.message)}</p>`;
+  } finally {
+    box.style.opacity = "1";
+  }
+}
+
 const PANEL_RESIZE_CONFIG = {
   "alert-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "alerts-content-grid", gridVar: "--alert-detail-w" },
+  "kb-tech-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "kb-mitre-grid", gridVar: "--alert-detail-w" },
   "event-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "events-grid", gridVar: "--event-detail-w" },
   "group-panel-wrap": { defaultWidth: 280, minWidth: 200, maxWidth: 640, anchor: "start", gridEl: "events-grid", gridVar: "--group-col-w" },
   // gridVar переиспользует имя "--alert-detail-w" - переменная резолвится per-element (JS пишет
@@ -2680,6 +3444,7 @@ const PANEL_RESIZE_CONFIG = {
   // #rule-editor-ref-toolbar), а НЕ #editor-grid - иначе CSS-переменная не дотягивалась бы до
   // toolbar, живущего выше editor-grid по DOM (см. комментарий у .editor-grid).
   "editor-reference-pane": { defaultWidth: 600, minWidth: 320, maxWidth: 780, anchor: "end", gridEl: "main-panel", gridVar: "--editor-ref-w" },
+  "vl-detail": { defaultWidth: 440, minWidth: 320, maxWidth: 760, anchor: "end", gridEl: "vl-content-grid", gridVar: "--alert-detail-w" },
 };
 
 function setGridTrackWidth(cfg, widthPx) {
@@ -2761,6 +3526,8 @@ makeResizable("editor-reference-handle", "editor-reference-pane");
 // Второй хэндл на границе editor/refyaml - управляет ТОЙ ЖЕ колонкой (см. комментарий у
 // .editor-reference-yaml в CSS), просто удобнее тянуть прямо на границе с самим редактором.
 makeResizable("editor-refyaml-handle", "editor-reference-pane");
+makeResizable("vl-detail-handle", "vl-detail");
+makeResizable("kb-tech-detail-handle", "kb-tech-detail");
 // rule-detail/editor-reference-pane имеют defaultWidth, ОТЛИЧНЫЙ от общего фолбэка var(...,380px)
 // в CSS grid-template-columns их грида (см. комментарии у #rule-detail/.editor-reference-pane) -
 // без явного resetPanelWidth тут грид-трек остался бы 380px, а сама панель отрисовалась бы шире
@@ -2769,6 +3536,7 @@ makeResizable("editor-refyaml-handle", "editor-reference-pane");
 // не требуют - их defaultWidth совпадает с фолбэком.
 resetPanelWidth("rule-detail");
 resetPanelWidth("editor-reference-pane");
+resetPanelWidth("vl-detail");
 wireGroupColumnResize();
 applyGroupValueWidth();
 

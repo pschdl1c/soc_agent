@@ -42,6 +42,21 @@ ProcessFn = Callable[[list[tuple[dict[str, Any], str]]], None]
 _SENTINEL = object()
 
 
+class IngestQueueFull(RuntimeError):
+    """Очередь ingest переполнена - принято `queued` из `total` событий запроса, остальные
+    отклонены БЕЗ ожидания места (HTTP-обработчик /ingest/stream не должен висеть на сокете).
+    app/main.py транслирует в HTTP 503 - форвардер повторяет запрос позже. Учитывать: `queued`
+    событий этого запроса уже приняты, полный ретрай батча форвардером даст по ним дубли
+    (event-level дедупа в store нет) - это осознанный компромисс для edge-случая перегрузки."""
+
+    def __init__(self, queued: int, total: int) -> None:
+        self.queued = queued
+        self.total = total
+        super().__init__(
+            f"принято {queued} из {total} событий, остальные отклонены (очередь заполнена)"
+        )
+
+
 class IngestWorker:
     def __init__(
         self,
@@ -96,10 +111,24 @@ class IngestWorker:
     # ------------------------------------------------------------------ producer
 
     def enqueue(self, events: list[dict[str, Any]], source_label: str) -> int:
-        """Кладёт события в очередь. Не блокирует надолго - при переполнении бросает исключение."""
+        """Ставит события в очередь БЕЗ блокировки (put_nowait) и возвращает число принятых.
+
+        Раньше здесь был блокирующий put() без таймаута: при полной очереди (max_queue)
+        HTTP-обработчик /ingest/stream зависал до освобождения места вместо быстрого ответа,
+        а заявленная в main.py ветка "503 при переполнении" была недостижима (put никогда не
+        бросал queue.Full). Теперь:
+          - воркер не запущен (очередь никто не дренирует) -> RuntimeError;
+          - очередь заполнилась по ходу -> IngestQueueFull с числом реально принятых событий.
+        Обе транслируются в HTTP 503 в app/main.py.
+        """
+        if not self._running:
+            raise RuntimeError("воркер ingest не запущен")
         queued = 0
         for event in events:
-            self._queue.put((event, source_label))
+            try:
+                self._queue.put_nowait((event, source_label))
+            except queue.Full:
+                raise IngestQueueFull(queued, len(events)) from None
             queued += 1
         return queued
 

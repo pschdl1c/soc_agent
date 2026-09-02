@@ -8,7 +8,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -19,7 +22,7 @@ from uuid import uuid4
 
 from app.fields import HOST_FIELDS, TIME_FIELDS, first_present
 from app.filter_lang import FILTER_OPS, IS_MATCHED_FIELD, RULE_FIELD, compile_condition, resolve_json_path
-from app.models import Alert
+from app.models import SOURCE_DESCRIPTION_MAX, Alert
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS alerts (
@@ -82,7 +85,45 @@ CREATE TABLE IF NOT EXISTS rule_hits (
     PRIMARY KEY (event_id, rule_title)
 );
 CREATE INDEX IF NOT EXISTS idx_rule_hits_lookup ON rule_hits(rule_title, source_batch, event_time);
+
+-- Зарегистрированные потоковые источники (вкладка «Источник данных» -> «Создать источник»).
+-- Каждый источник ОБЯЗАН иметь имя (name): оно уникально и служит меткой source_batch для всех
+-- его событий/алертов. Токен хранится ТОЛЬКО хэшем (sha256) - открытое значение отдаётся один
+-- раз в ответе на создание/перевыпуск (token_hint = последние 4 символа, чисто для UI). Приём
+-- по /ingest/stream и /ingest/events без валидного токена активного источника отклоняется 401,
+-- события в очередь не попадают (см. app/main.py:_authenticate_ingest). Таблица чисто аддитивна:
+-- уже накопленные в events/alerts метки source_batch (файловые загрузки, старые стримы) с ней
+-- никак не связаны и продолжают показываться в /batches как раньше.
+CREATE TABLE IF NOT EXISTS sources (
+    source_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    token_sha256 TEXT NOT NULL,
+    token_hint TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sources_token ON sources(token_sha256);
 """
+
+# Имя источника: 1..64 символов, буквы (в т.ч. кириллица - re.UNICODE у \w), цифры, пробел, . _ -
+# Ведущие/хвостовые пробелы отсекаются до проверки. Имя уходит в URL (DELETE /batches/{name}),
+# поэтому без слэшей/двоеточий/спецсимволов - те же ограничения, что у "тихих" меток батчей.
+_SOURCE_NAME_RE = re.compile(r"^[\w.\- ]{1,64}$", re.UNICODE)
+
+# Порог троттлинга записи last_seen_at на горячем ingest-пути (см. authenticate_source).
+_SOURCE_LAST_SEEN_THROTTLE_S = 60.0
+
+
+def _new_source_token() -> str:
+    """Криптостойкий токен источника (~43 символа, URL-safe base64). В БД не хранится - только
+    его sha256; открытое значение живёт лишь в ответе создающего/перевыпускающего запроса."""
+    return secrets.token_urlsafe(32)
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _normalize_event_time(event_time: str | None) -> str | None:
@@ -703,6 +744,137 @@ class Store:
             self._conn.execute("DELETE FROM rule_hits WHERE source_batch = ?", (source_batch,))
             self._conn.commit()
         return {"events_deleted": events_deleted, "alerts_deleted": alerts_deleted}
+
+    # ------------------------------------------------------------------ Sources (потоковые источники)
+
+    def _source_public(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        """Строка источника наружу: без token_sha256, enabled как bool."""
+        d = {k: row[k] for k in (
+            "source_id", "name", "description", "token_hint", "enabled", "created_at", "last_seen_at",
+        )}
+        d["enabled"] = bool(d["enabled"])
+        return d
+
+    def create_source(self, name: str, description: str = "") -> dict[str, Any]:
+        """Регистрирует потоковый источник. name ОБЯЗАТЕЛЕН, уникален, становится меткой
+        source_batch. Возвращает публичную строку источника + ОДНОРАЗОВЫЙ открытый токен в
+        поле "token" (в БД только его sha256). ValueError - пустое/некорректное имя или имя
+        уже занято (тогда транслируется в HTTP 400 в app/main.py)."""
+        name = (name or "").strip()
+        if not _SOURCE_NAME_RE.match(name):
+            raise ValueError("Имя источника: 1..64 символов, буквы/цифры/пробел/точка/дефис/подчёркивание")
+        token = _new_source_token()
+        row = {
+            "source_id": str(uuid4()),
+            "name": name,
+            "description": (description or "").strip()[:SOURCE_DESCRIPTION_MAX],
+            "token_sha256": _hash_token(token),
+            "token_hint": token[-4:],
+            "enabled": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_seen_at": None,
+        }
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO sources (source_id, name, description, token_sha256, token_hint, "
+                    "enabled, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (row["source_id"], row["name"], row["description"], row["token_sha256"],
+                     row["token_hint"], row["enabled"], row["created_at"], row["last_seen_at"]),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                raise ValueError(f"Источник с именем «{name}» уже существует") from None
+        return {**self._source_public(row), "token": token}
+
+    def list_sources(self) -> list[dict[str, Any]]:
+        with self._read_lock:
+            rows = self._read_conn.execute(
+                "SELECT * FROM sources ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._source_public(r) for r in rows]
+
+    def get_source(self, source_id: str) -> dict[str, Any] | None:
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT * FROM sources WHERE source_id = ?", (source_id,)
+            ).fetchone()
+        return self._source_public(row) if row is not None else None
+
+    def rotate_source_token(self, source_id: str) -> str | None:
+        """Новый токен, старый перестаёт работать сразу же. None - источник не найден."""
+        token = _new_source_token()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE sources SET token_sha256 = ?, token_hint = ? WHERE source_id = ?",
+                (_hash_token(token), token[-4:], source_id),
+            )
+            self._conn.commit()
+        return token if cur.rowcount > 0 else None
+
+    def update_source(
+        self, source_id: str, enabled: bool | None = None, description: str | None = None
+    ) -> dict[str, Any] | None:
+        """PATCH: меняет enabled и/или description (name и токен не трогает). None - не найден."""
+        sets: list[str] = []
+        params: list[Any] = []
+        if enabled is not None:
+            sets.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description.strip()[:SOURCE_DESCRIPTION_MAX])
+        if sets:
+            params.append(source_id)
+            with self._lock:
+                cur = self._conn.execute(
+                    f"UPDATE sources SET {', '.join(sets)} WHERE source_id = ?", params
+                )
+                self._conn.commit()
+            if cur.rowcount == 0:
+                return None
+        return self.get_source(source_id)
+
+    def delete_source(self, source_id: str) -> bool:
+        """Снимает РЕГИСТРАЦИЮ (токен отзывается). События/алерты этого источника не трогает -
+        для них отдельное действие DELETE /batches/{name} (source_batch не завязан на sources)."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM sources WHERE source_id = ?", (source_id,))
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def authenticate_source(self, token: str | None) -> dict[str, Any] | None:
+        """По открытому токену находит АКТИВНЫЙ источник (сравнение по sha256). None - токена
+        нет / не совпал / источник выключен. Обновляет last_seen_at, но не чаще раза в ~60с
+        (_SOURCE_LAST_SEEN_THROTTLE_S) - иначе на горячем пути /ingest/stream каждый запрос
+        форвардера порождал бы отдельную запись в БД под _lock."""
+        if not token:
+            return None
+        digest = _hash_token(token)
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT * FROM sources WHERE token_sha256 = ?", (digest,)
+            ).fetchone()
+        if row is None or not row["enabled"]:
+            return None
+        pub = self._source_public(row)
+        now = datetime.now(timezone.utc)
+        last = pub.get("last_seen_at")
+        stale = True
+        if last:
+            try:
+                stale = (now - datetime.fromisoformat(last)).total_seconds() > _SOURCE_LAST_SEEN_THROTTLE_S
+            except ValueError:
+                stale = True
+        if stale:
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE sources SET last_seen_at = ? WHERE source_id = ?",
+                    (now.isoformat(), pub["source_id"]),
+                )
+                self._conn.commit()
+            pub["last_seen_at"] = now.isoformat()
+        return pub
 
     def close(self) -> None:
         self._conn.close()

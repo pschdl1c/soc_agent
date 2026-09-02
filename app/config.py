@@ -22,6 +22,11 @@ DEFAULT_RULESET_PATH = os.getenv(
 )
 UPLOADS_DIR = Path(os.getenv("SIEM_UPLOADS_DIR", str(BASE_DIR / "data" / "uploads")))
 
+# База знаний MITRE ATT&CK (read-only SQLite, см. app/kb.py и scripts/build_kb.py). Собирается
+# на этапе docker build и вшивается в образ - НЕ монтируется как volume. Локально файла может
+# не быть вовсе (KB тогда деградирует до "недоступна", алерты матчатся по сырым тегам).
+KB_DB_PATH = os.getenv("SIEM_KB_DB_PATH", str(BASE_DIR / "kb" / "kb.db"))
+
 HOST = os.getenv("SIEM_HOST", "127.0.0.1")
 PORT = int(os.getenv("SIEM_PORT", "8000"))
 

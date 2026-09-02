@@ -28,11 +28,13 @@ AI-агента ещё нет (см. дорожную карту, этап 5).
 - **Zircolite** — движок Sigma-детекта. Импортируется НЕ из pip, а из локального клона
   репозитория `./Zircolite` через `sys.path` (см. `app/engine.py`).
 - **pySigma** (`sigma`, backend-sqlite, pipeline-windows/sysmon) — компиляция Sigma → SQL.
-- **SQLite** — хранилище (`siem.db`), плюс in-memory SQLite внутри Zircolite на каждый батч.
+- **SQLite** — хранилище (`siem.db`), плюс in-memory SQLite внутри Zircolite на каждый батч,
+  плюс отдельный read-only `kb.db` (база знаний MITRE ATT&CK, см. `app/kb.py` / §«База знаний»).
 - **Frontend** — один статический файл `app/static/index.html` (ванильный JS, без сборки).
 
-> Версии зафиксированы в `requirements.txt` (прод) / `requirements-dev.txt` (+ pytest). Конфиг
-> путей/хоста/порта — `.env` (см. `.env.example`, читается через `app/config.py`).
+> Версии зафиксированы в `pyproject.toml` (`[project].dependencies` — прод; `[project.optional-dependencies].dev`
+> — pytest/httpx/ruff). `requirements*.txt` из проекта убраны, Docker тоже ставит `pip install .`.
+> Конфиг путей/хоста/порта — `.env` (см. `.env.example`, читается через `app/config.py`).
 
 ---
 
@@ -52,7 +54,14 @@ uvicorn app.main:app --reload --port 8000
 Тестовые данные для прогона лежат в `artifacts/Security-Datasets/` (репозиторий OTRF
 Security-Datasets) и в `uploads/`.
 
-Тесты: `pip install -r requirements-dev.txt && pytest` (см. `tests/`, конфиг — `pytest.ini`).
+Тесты: `pip install -e ".[dev]" && pytest` (см. `tests/`, конфиг — `pyproject.toml`
+`[tool.pytest.ini_options]`).
+
+База знаний MITRE ATT&CK (вкладка «База знаний»): `python scripts/build_kb.py --out kb/kb.db
+--attack-version 15.1` — собирает компактный read-only `kb.db` из STIX-бандла
+`mitre-attack/attack-stix-data` (нужна сеть). В Docker собирается автоматически на этапе
+`build` и вшивается в образ. Без файла вкладка показывает заглушку, а карточки алертов
+матчат MITRE-теги по сырому значению (гибрид, см. `app/kb.py:enrich_techniques`).
 
 ---
 
@@ -89,17 +98,19 @@ Security-Datasets) и в `uploads/`.
 | Файл | Ответственность |
 |------|-----------------|
 | `config.py` | Конфигурация из окружения/`.env` (`python-dotenv`, см. `.env.example`): `DB_PATH`, `ZIRCOLITE_CONFIG_PATH`, `DEFAULT_RULESET_PATH`, `UPLOADS_DIR`, `HOST`/`PORT`, `INGEST_BATCH_SIZE`/`INGEST_FLUSH_INTERVAL`. Явная переменная окружения имеет приоритет над `.env`. Импортируется `main.py` и `ingest_queue.py` — единая точка правды для путей и портов вместо хардкода. |
-| `main.py` | FastAPI-приложение, все HTTP-ручки, оркестрация батча (`_process_batch` / `_process_events`), lifespan-хуки воркера. `_process_batch` после каждого `store.store_events(...)` также зовёт `correlation.evaluate_batch(...)` (см. `correlation.py`) — переоценка корреляций для затронутого батчем `source_batch`; `correlation.active_base_rule_titles(ruleset_path)` считается один раз до цикла и передаётся в `store_events(..., hit_worthy_titles=...)`. |
+| `main.py` | FastAPI-приложение, все HTTP-ручки, оркестрация батча (`_process_batch` / `_process_events`), lifespan-хуки воркера. `_process_batch` выбирает как получить правила по `ruleset_path`: `main` → `main_ruleset.resolve()`; `custom_rulesets/*` → `rules_catalog.load_rules()` (скомпилированный `.manifest.json` — там развёрнуты value-list-плейсхолдеры); builtin → `engine.run_batch(ruleset_path)` (кэш `_rulesets_cache`). После каждого `store.store_events(...)` также зовёт `correlation.evaluate_batch(...)` (см. `correlation.py`) — переоценка корреляций для затронутого батчем `source_batch`; `correlation.active_base_rule_titles(ruleset_path)` считается один раз до цикла и передаётся в `store_events(..., hit_worthy_titles=...)`. **Аутентификация ingest:** `_authenticate_ingest(request)` — общий гейт для `/ingest/stream` и `/ingest/events`: токен из `Authorization: Bearer` (или `X-Ingest-Token`) → `store.authenticate_source()`; нет/неизвестен/выключен → `401`, события НЕ в очередь. Метку `source_batch` для этих двух путей задаёт ИМЯ источника, привязанного к токену (не `?source=`, не `source_label` из тела — они игнорируются). `/ingest/file`·`/ingest/upload` (их дёргают из локального UI) остаются без токена. Ручки `/sources*` — CRUD реестра источников (`GET` подмешивает счётчики из `/batches` по `name==source_batch`; `POST`/`rotate` отдают ОДНОРАЗОВЫЙ открытый токен; `DELETE` снимает регистрацию, события/алерты не трогает). **База знаний:** `get_alert` дополняет ответ ключом `alert["mitre"] = kb.enrich_techniques(...)` (сырой `mitre_techniques` не трогает — обратная совместимость). Ручки `/kb/mitre/{meta,matrix,techniques,techniques/{id}}` — тонкие обёртки над `app/kb.py`; при отсутствии `kb.db` отдают валидную форму с `available:false` (не 5xx). |
 | `engine.py` | Обёртка над Zircolite. **Важно:** `RulesetHandler` создаётся один раз (компиляция правил — самая дорогая операция), `ZircoliteCore` — на каждый батч с in-memory БД. `invalidate(ruleset_path)` сбрасывает кэш по конкретному пути — звать после изменений в `rules_catalog.py` (add/delete кастомного правила или рулсета). `health()` — для `/health` (rules_loaded/cached_rulesets дефолтного рулсета). `_run_core` фильтрует `rule.get("correlation")` перед прогоном — чисто defense-in-depth: correlation-правила в норме сюда и не долетают (см. `rules_catalog.py`/`CORRELATION_EXT` — их вообще не видит `RulesetHandler`), их эвалуацией занимается `correlation.py`. |
 | `ingest_queue.py` | Потоковый ingest: очередь + фоновый поток `IngestWorker`, micro-batch flush («N событий ИЛИ T секунд»). Приём событий с форвардеров без блокировки HTTP. **Важно:** флаш отдаёт ВЕСЬ накопленный буфер `process_fn` ОДНИМ вызовом, без группировки по источнику — движок (тысячи скомпилированных правил, ~0.25с фиксированного оверхеда на батч независимо от числа событий) гоняется один раз на весь флаш, даже если в буфере вперемешку события от N разных источников. Разбивка обратно по `source_batch` — дело `main.py`/`normalize.py` (см. `INGEST_SOURCE_FIELD` в `fields.py`), уже ПОСЛЕ прогона движка, дёшево. |
-| `store.py` | SQLite-хранилище. Три логически независимые таблицы: `alerts`, `events`, `rule_hits`. Дедуп алертов по `dedup_key`. **Два соединения с раздельными локами**: `_conn`/`_lock` — только запись, `_read_conn`/`_read_lock` (с `PRAGMA query_only=ON`) — только чтение; БД в `PRAGMA journal_mode=WAL` (+`synchronous=NORMAL`) — читатели (просмотр/фильтр/группировка Событий) не блокируют писателя (ingest-воркер) и наоборот. Индекс на выражении (`idx_events_json_eventid`) для «горячих» JSON-полей (см. `filter_lang.INDEXED_JSON_FIELDS`) — иначе фильтр/группировка по кастомному полю сканируют всю таблицу. `health()` — для `/health` (`SELECT 1` через `_conn`, опционально счётчики строк/размер БД). `delete_batch(source_batch)` — удаляет из ВСЕХ ТРЁХ таблиц разом (для `DELETE /batches/{source_batch}`), не только events/alerts — иначе `rule_hits` копил бы осиротевшие строки. `rule_hits` — леджер для `correlation.py`: `(event_id, rule_title, source_batch, event_time)`, PK `(event_id, rule_title)`, индекс `(rule_title, source_batch, event_time)`; заполняется точечно через `store_events(..., hit_worthy_titles=...)` — только для правил, реально нужных активным correlation-правилам, не для всех сработавших. `evaluate_correlation_window()` — JOIN `rule_hits`↔`events` по индексу + `json_extract` по group-by полям, COUNT(*)/COUNT(DISTINCT ...). `upsert_correlation_alerts()` — как `upsert_alerts`, но OVERWRITE `event_count`/`sample_events` вместо increment (окно пересчитывается заново на каждый flush, не накапливается). |
+| `store.py` | SQLite-хранилище. Таблицы: `alerts`, `events`, `rule_hits`, `sources`. Дедуп алертов по `dedup_key`. **`sources`** — реестр потоковых источников (вкладка «Источник данных»): `(source_id, name UNIQUE, description, token_sha256, token_hint, enabled, created_at, last_seen_at)`. Токен ТОЛЬКО хэшем (`_hash_token`=sha256); открытое значение возвращается один раз из `create_source()`/`rotate_source_token()`. `authenticate_source(token)` — по sha256 находит АКТИВНЫЙ источник, `last_seen_at` пишет с троттлингом ~60с (горячий путь `/ingest/stream`). `create_source` валидирует имя (`_SOURCE_NAME_RE`: 1–64, `\w .-`, кириллица ок), дубль имени → `ValueError`. Таблица аддитивна: метки `source_batch` в `events`/`alerts` от файловых загрузок / старых стримов с ней не связаны. `delete_source` снимает только регистрацию (события/алерты — через `delete_batch`). **Два соединения с раздельными локами**: `_conn`/`_lock` — только запись, `_read_conn`/`_read_lock` (с `PRAGMA query_only=ON`) — только чтение; БД в `PRAGMA journal_mode=WAL` (+`synchronous=NORMAL`) — читатели (просмотр/фильтр/группировка Событий) не блокируют писателя (ingest-воркер) и наоборот. Индекс на выражении (`idx_events_json_eventid`) для «горячих» JSON-полей (см. `filter_lang.INDEXED_JSON_FIELDS`) — иначе фильтр/группировка по кастомному полю сканируют всю таблицу. `health()` — для `/health` (`SELECT 1` через `_conn`, опционально счётчики строк/размер БД). `delete_batch(source_batch)` — удаляет из ВСЕХ ТРЁХ таблиц разом (для `DELETE /batches/{source_batch}`), не только events/alerts — иначе `rule_hits` копил бы осиротевшие строки. `rule_hits` — леджер для `correlation.py`: `(event_id, rule_title, source_batch, event_time)`, PK `(event_id, rule_title)`, индекс `(rule_title, source_batch, event_time)`; заполняется точечно через `store_events(..., hit_worthy_titles=...)` — только для правил, реально нужных активным correlation-правилам, не для всех сработавших. `evaluate_correlation_window()` — JOIN `rule_hits`↔`events` по индексу + `json_extract` по group-by полям, COUNT(*)/COUNT(DISTINCT ...). `upsert_correlation_alerts()` — как `upsert_alerts`, но OVERWRITE `event_count`/`sample_events` вместо increment (окно пересчитывается заново на каждый flush, не накапливается). |
 | `normalize.py` | `raw_results` Zircolite → список `Alert`. Правила уровня `informational` пропускаются целиком (не заводят алерт ни на одном хосте) — этот уровень чисто шумовой, во вкладке «Алерты» его быть не должно; та же отсечка продублирована в `correlation.py` для correlation-алертов (единой точки для обоих движков нет — см. `evaluate_batch`). Один прогон правила разбивается на алерты по **(хосту, источнику)** — источник берётся из `INGEST_SOURCE_FIELD`, временно вписанного в событие перед прогоном движка (см. `ingest_queue.py`/`main.py`), с фолбэком на `default_source_batch`, если маркера нет (одноисточниковые `/ingest/file`·`/ingest/upload`). Извлекает `entities`, берёт sample-события (первые N + последние N). |
 | `models.py` | Pydantic-модели. `Alert`, `Severity`, `Entities`, `SigmaRuleRef` + модели запросов/ответов. |
+| `kb.py` | База знаний MITRE ATT&CK — доступ ТОЛЬКО НА ЧТЕНИЕ к отдельному `kb.db` (путь — `config.KB_DB_PATH`, дефолт `kb/kb.db`). Файл собирается `scripts/build_kb.py` на этапе `docker build` и вшивается в образ read-only (volume'ом НЕ монтируется — обновление = пересборка образа). Модуль файл НЕ создаёт и НЕ пишет: ленивое `sqlite3.connect(...?mode=ro)` под `_lock`, один неудачный заход (файла нет) кэшируется. Функции: `available()`, `meta()`, `list_tactics()`, `matrix()` (тактики-колонки с вложенными техниками для UI), `list_techniques(tactic/q/limit/offset)`, `get_technique(id)` (полная карточка: описание, detection, платформы, data sources, тактики, митигации, сабтехники — она же форма будущего агентского tool'а `lookup_mitre`), `enrich_techniques(tags)` — **гибридный матчинг** тегов правила (`attack.t*` → `T1059.001`): найдено в KB → `{name,url,tactics,matched:true}`, не найдено/KB нет → `{matched:false}` (UI покажет сырой тег). O(1) запросов. Зовётся ТОЛЬКО из `main.py:get_alert` (карточка алерта), НЕ в списке `/alerts` и НЕ в поиске по событиям. Если `kb.db` нет — всё деградирует тихо (пустой результат / `available:false`), исключений наружу нет. `configure(path)`/`_reset()` — тест-хуки. |
 | `fields.py` | Кандидаты имён полей (host/user/ip/process/time) для generic-извлечения из разнородных источников (EVTX/Sysmon/auditd называют поля по-разному). Также `INGEST_SOURCE_FIELD` — служебный маркер источника для слияния нескольких источников в один прогон движка (см. `ingest_queue.py`); ИМЯ ДОЛЖНО быть чисто алфанумерическим — Zircolite при flatten-е вырезает из имён полей без явного маппинга все не-alnum символы (`_NON_ALNUM_RE` в `streaming.py`), подчёркивания молча пропадают. |
 | `filter_lang.py` | Мини-язык фильтра Событий (строка ввода в UI, в духе MaxPatrol query bar): токенайзер + recursive-descent парсер + компилятор условий в parametrized SQL (`json_extract` — инъекция исключена). Поддерживает произвольную вложенность `and`/`or`/`not` через скобки; спецполя результата детекта `rule` и `is_matched` (не часть raw_json — отдельные колонки `matched_rules`/`is_matched` в `events`). У `rule` операторы `=`/`!=`/`contains`/`in`/`is null` — сравнение по НАЗВАНИЮ правила, а `>`/`<`/`>=`/`<=` — отдельная семантика: сравнение КОЛИЧЕСТВА сработавших правил (`json_array_length(matched_rules)`), напр. `rule > 1`. `INDEXED_JSON_FIELDS`/`resolve_json_path()` — узкий whitelist «горячих» полей (сейчас только `EventID`), для которых JSON-путь подставляется ЛИТЕРАЛОМ в текст SQL (не bound-параметром) — нужно, чтобы совпасть с expression-индексом `idx_events_json_eventid` в `store.py` (SQLite матчит индекс на выражении только по текстовому совпадению, bound-параметр для этого не годится); безопасность не страдает — литерал всегда один из фиксированных значений словаря по ключу, как у `_ALERT_SORT_COLUMNS`/`_EVENT_SORT_COLUMNS` в `store.py`. |
-| `rules_catalog.py` | Каталог Sigma-рулсетов/правил для вкладки «Sigma-правила»: built-in (`Zircolite/rules/*.json`, read-only) и любое число ИМЕНОВАННЫХ custom-рулсетов (`custom_rulesets/<id>/` — `meta.json` + `*.yml` на обычное правило, source of truth, + `.manifest.json` — кэш скомпилированных метаданных для быстрого браузинга). Просмотр builtin/custom — обычный `json.load()` с кэшем по mtime (без pySigma); компиляция через `zircolite.rules.RulesetHandler` нужна только при добавлении нового custom-правила/рулсета (`save_custom_rule`/`save_ruleset_yaml`, оба принимают `ruleset` — существующий, ИЛИ `new_ruleset_name` — создать новый; builtin как цель отклоняется). **Correlation-правила (`type: event_count`/`value_count`/`temporal`/`temporal_ordered`) хранятся ОТДЕЛЬНО** — файлом `<rule_id>{CORRELATION_EXT}` (`.sigmacorr`, НЕ `.yml`/`.yaml`) в той же директории рулсета: `RulesetHandler` глобит только `*.yml`/`*.yaml`, значит их вообще не видит при компиляции — это НЕ побочный эффект, а осознанный обход реального бага пинченного `pysigma-backend-sqlite` (правило, referenced корреляцией из ТОГО ЖЕ `SigmaCollection`, при компиляции возвращает сырую SQL-строку вместо dict и валит компиляцию всего файла целиком; воспроизведено эмпирически вплоть до последней опубликованной версии 1.2.4). Благодаря физической изоляции правило, на которое ссылается корреляция, компилируется как совершенно обычное правило под своим настоящим именем — никаких «правил-двойников» в контенте заводить не нужно. `compile_custom_rule`/`compile_ruleset_yaml` сами решают (по ключу `correlation:` в документе) — отдать документ в `RulesetHandler` или в свою лёгкую валидацию без pySigma (`_validate_correlation_doc`/`_compile_correlation_doc`, дают «псевдо-скомпилированную» запись для `.manifest.json`: id/title/level/tags/description, без `rule`-SQL). `load_correlation_rules(ruleset_path)` — структурные поля correlation-правила (`type`/`group-by`/`timespan`/`condition`/`rules`) читаются заново из raw `.sigmacorr` при каждом использовании (дёшево, файлов единицы), `correlation.rules` (ссылки по Sigma `name`/`id`) резолвится в настоящий `title` соседнего `*.yml`-правила — это и есть значение, которое реально попадёт в `events.matched_rules`/`rule_hits.rule_title`. `_find_rule_file()` — ищет файл правила по `rule_id` независимо от расширения (обычное/correlation), нужен `get_rule`/`update_custom_rule`/`delete_custom_rule` (тип правила может смениться при редактировании — файл переписывается под новым расширением). Ничего не знает про «основной рулсет» (main) — однонаправленная зависимость `main_ruleset.py → rules_catalog.py`. |
+| `rules_catalog.py` | Каталог Sigma-рулсетов/правил для вкладки «Sigma-правила»: built-in (`Zircolite/rules/*.json`, read-only) и любое число ИМЕНОВАННЫХ custom-рулсетов (`custom_rulesets/<id>/` — `meta.json` + `*.yml` на обычное правило, source of truth, + `.manifest.json` — кэш скомпилированных метаданных для быстрого браузинга). Просмотр builtin/custom — обычный `json.load()` с кэшем по mtime (без pySigma); компиляция через `zircolite.rules.RulesetHandler` нужна только при добавлении нового custom-правила/рулсета (`save_custom_rule`/`save_ruleset_yaml`, оба принимают `ruleset` — существующий, ИЛИ `new_ruleset_name` — создать новый; builtin как цель отклоняется). **Correlation-правила (`type: event_count`/`value_count`/`temporal`/`temporal_ordered`) хранятся ОТДЕЛЬНО** — файлом `<rule_id>{CORRELATION_EXT}` (`.sigmacorr`, НЕ `.yml`/`.yaml`) в той же директории рулсета: `RulesetHandler` глобит только `*.yml`/`*.yaml`, значит их вообще не видит при компиляции — это НЕ побочный эффект, а осознанный обход реального бага пинченного `pysigma-backend-sqlite` (правило, referenced корреляцией из ТОГО ЖЕ `SigmaCollection`, при компиляции возвращает сырую SQL-строку вместо dict и валит компиляцию всего файла целиком; воспроизведено эмпирически вплоть до последней опубликованной версии 1.2.4). Благодаря физической изоляции правило, на которое ссылается корреляция, компилируется как совершенно обычное правило под своим настоящим именем — никаких «правил-двойников» в контенте заводить не нужно. `compile_custom_rule`/`compile_ruleset_yaml` сами решают (по ключу `correlation:` в документе) — отдать документ в `RulesetHandler` или в свою лёгкую валидацию без pySigma (`_validate_correlation_doc`/`_compile_correlation_doc`, дают «псевдо-скомпилированную» запись для `.manifest.json`: id/title/level/tags/description, без `rule`-SQL). `load_correlation_rules(ruleset_path)` — структурные поля correlation-правила (`type`/`group-by`/`timespan`/`condition`/`rules`) читаются заново из raw `.sigmacorr` при каждом использовании (дёшево, файлов единицы), `correlation.rules` (ссылки по Sigma `name`/`id`) резолвится в настоящий `title` соседнего `*.yml`-правила — это и есть значение, которое реально попадёт в `events.matched_rules`/`rule_hits.rule_title`. `_find_rule_file()` — ищет файл правила по `rule_id` независимо от расширения (обычное/correlation), нужен `get_rule`/`update_custom_rule`/`delete_custom_rule` (тип правила может смениться при редактировании — файл переписывается под новым расширением). Ничего не знает про «основной рулсет» (main) — однонаправленная зависимость `main_ruleset.py → rules_catalog.py`. **Value lists:** `compile_custom_rule`/`compile_ruleset_yaml` зовут `value_lists.expand_placeholders()` (разворот `%name%`/`\|expand`) до `RulesetHandler`, `ValueListError` транслируется в `RuleValidationError`; соседи в scratch-каталоге тоже разворачиваются. `rules_using_value_list(name)`/`value_list_usage_counts()` — скан custom-правил на ссылки-плейсхолдеры; `recompile_rules_for_value_list(name)` — пересобирает зависимые правила и переписывает их `.manifest.json` (зовётся из `main.py:PUT /value-lists/{name}`, `engine.invalidate` затронутых рулсетов — там же). |
 | `main_ruleset.py` | Состав «основного рулсета» (виртуальная композиция правил из ЛЮБЫХ других рулсетов) — файл `custom_rulesets/main_ruleset.json`: список целиком добавленных рулсетов + точечные исключения/добавления отдельных правил (`resolve()` собирает плоский список для движка). Используется по умолчанию `/ingest/stream` и `/ingest/events` (там нет параметра `ruleset` — раньше молча падали на `engine.default_ruleset_path`, теперь на main). `resolve()` дешёвый — читает уже скомпилированные правила через кэш `rules_catalog`, без pySigma. `resolve_with_sources()` дополнительно переиспользует `correlation.py` — чтобы найти, какие custom-рулсеты реально дают активные correlation-правила для main. |
 | `correlation.py` | Стейтфул-корреляция (`event_count`/`value_count`; `temporal`/`temporal_ordered` — намеренно НЕ эвалуируются, следующая задача) поверх постоянной таблицы `events`/`rule_hits`, а не через `pysigma-backend-sqlite` (тот для этих типов генерирует SQL вовсе БЕЗ учёта `timespan`, плюс у Zircolite нет state между batch'ами — см. §8). Вызывается из `main.py:_process_batch` ПОСЛЕ каждого `store.store_events(...)`, т.е. после каждого flush ingest-воркера — с коротким замыканием: если ни одно активное correlation-правило не ссылается на правило, сработавшее В ЭТОМ батче, до БД дело не доходит. Окно `[anchor - timespan, anchor]` считается от `event_time` САМОГО ПОЗДНЕГО из новых событий (НЕ `datetime.now()` — иначе корреляции не срабатывали бы на replay исторических датасетов вроде OTRF Security-Datasets). `active_base_rule_titles(ruleset_path)` — какие названия правил стоит писать в `rule_hits` (зовётся `main.py` ДО `store_events`). Correlation-правило уровня `informational` пропускается (см. `normalize.py`) — до расчёта окна дело не доходит. Результат — обычный `Alert` в таблице `alerts` (переиспользует dedup-паттерн), помечен `engine="correlation"` (без миграции модели). |
+| `value_lists.py` | Именованные списки значений для Sigma-плейсхолдеров `%name%` + модификатора `\|expand` (вкладка «Списки»). Файл `data/value_lists/<name>.yml` (`name` = имя плейсхолдера, `[A-Za-z0-9_]{1,64}`, оно же id — отдельного индекса нет), `{name, description, values, created_at, updated_at}`. `expand_placeholders(yaml_text) -> yaml_text` — обходит `detection:`, для ключей с сегментом `expand` в `\|`-цепочке заменяет записи вида `%name%` на значения списка (OR), убирает `expand` из цепочки; неизвестный/пустой список → `ValueListError`. **Разворот делается САМИ ДО компиляции** (в `rules_catalog.compile_custom_rule`/`compile_ruleset_yaml`), НЕ через `pysigma ValuePlaceholderTransformation` — Zircolite `RulesetHandler` жёстко собирает pipeline из имён плагинов, свой `ProcessingPipeline` воткнуть нельзя без форка. На диск правило пишется с `%name%` (source of truth) — списки живые. Быстрый путь: если подстроки `expand` в тексте нет — возвращает текст как есть (не пересериализует, комментарии правила целы). Только кастомные правила (builtin приходят уже в SQL). Correlation-правила (`.sigmacorr`) не трогаются — у них нет `detection`. Модуль НЕ импортирует `rules_catalog` (цикла нет); `rules_using_value_list`/`value_list_usage_counts`/`recompile_rules_for_value_list` живут в `rules_catalog.py`, оркестрируются из `main.py`. **Загрузка файлом:** `parse_list_file(text)` понимает Sigma processing-pipeline YAML (`transformations` с `type: value_placeholders`/`query_expansion_placeholders` + `mapping: {имя: [значения]}` — один файл → много списков), наш `{name, description?, values}` (multi-doc) и «голый» `{имя: [значения]}`; `import_lists(parsed, mode)` (`create`/`replace`/`merge`) пишет их и возвращает `recompile_needed`. `is_list_document(doc)` — СТРОГАЯ проверка (только pipeline `value_placeholders` или `{name, values}`, без «голого» mapping) для `rules_catalog._peel_value_list_docs` — тот вынимает документы-списки из multi-doc `+ Загрузить рулсет` ПЕРЕД компиляцией правил пака. |
 
 ### Модель данных (SQLite, `siem.db`)
 
@@ -114,18 +125,25 @@ Security-Datasets) и в `uploads/`.
   сработавшее правило — только на те, что реально base_rule активной корреляции). Даёт индекс
   `(rule_title, source_batch, event_time)`, которого нет и не должно быть на `events` под
   произвольные Sigma-поля.
+- **`sources`** — реестр потоковых источников: `(source_id, name UNIQUE, description,
+  token_sha256, token_hint, enabled, created_at, last_seen_at)`. `name` обязателен и уникален,
+  он же метка `source_batch` всех событий/алертов источника. Токен хранится только хэшем;
+  `/ingest/stream` и `/ingest/events` без валидного токена активного источника → `401`. Никак
+  не связана с уже накопленными `source_batch` в `events`/`alerts` — чисто аддитивная.
 
 ### API (обзор)
 
 | Метод | Путь | Назначение |
 |-------|------|-----------|
-| POST | `/ingest/stream` | **Потоковый приём с форвардеров** (NDJSON/JSON-массив, `?source=`), 202 Accepted → очередь → micro-batch. Ruleset не выбирается per-request — всегда «основной рулсет» (`app/main_ruleset.py`). См. `docs/forwarder.md`. |
-| POST | `/ingest/file` | Прогон файла, уже лежащего на диске сервера (batch/тесты). `ruleset` — путь из `/rulesets` (в т.ч. `"main"` — основной рулсет) или пусто (движковый дефолт `rules_windows_merged.json`). |
-| POST | `/ingest/events` | Приём порции сырых событий в теле запроса (синхронный прогон). Ruleset не выбирается — всегда основной рулсет (как и `/ingest/stream`). |
-| POST | `/ingest/upload` | Загрузка файла из браузера (multipart), автоопределение типа по расширению. `ruleset` — как у `/ingest/file`. |
-| GET | `/batches` | Сводка по загруженным источникам (для селектора в UI). |
-| DELETE | `/batches/{source_batch}` | Удаление источника целиком: все его `events` И `alerts` (`source_batch` — не отдельная сущность, просто общая метка на обеих таблицах). `404`, если ничего не удалено. |
-| GET | `/alerts` · `/alerts/{id}` | Список / карточка алерта. Фильтры: `source_batch`, `status`, `rule_level`, `time_from/to`; сортировка `sort_by` (`rule`=severity/`host`/`event_count`/`status`/`created_at`) + `sort_dir`. |
+| POST | `/ingest/stream` | **Потоковый приём с форвардеров** (NDJSON/JSON-массив), 202 Accepted → очередь → micro-batch. **Требует токен** зарегистрированного источника: `Authorization: Bearer <token>` или `X-Ingest-Token` (иначе `401`, события не приняты). Метку `source_batch` задаёт ИМЯ источника по токену — `?source=` больше нет. Ruleset не выбирается per-request — всегда «основной рулсет» (`app/main_ruleset.py`). См. `docs/forwarder.md`. |
+| POST | `/ingest/file` | Прогон файла, уже лежащего на диске сервера (batch/тесты). Без токена (локальный путь). `ruleset` — путь из `/rulesets` (в т.ч. `"main"` — основной рулсет) или пусто (движковый дефолт `rules_windows_merged.json`). |
+| POST | `/ingest/events` | Приём порции сырых событий в теле запроса (синхронный прогон). **Требует токен источника** (как `/ingest/stream`); `source_label` в теле игнорируется — метка из имени источника. Ruleset не выбирается — всегда основной рулсет. |
+| POST | `/ingest/upload` | Загрузка файла из браузера (multipart), автоопределение типа по расширению. Без токена (локальный путь). `ruleset` — как у `/ingest/file`. |
+| GET · POST | `/sources` | Реестр потоковых источников (вкладка «Источник данных»). `GET` → `[{source_id, name, description, token_hint, enabled, created_at, last_seen_at, event_count, alert_count, last_event_at}]` (счётчики сведены с `/batches` по `name==source_batch`), токен НЕ отдаётся. `POST {name, description?}` → `201 {…, token}` — открытый токен ОДИН раз (в БД sha256). Имя обязательно/уникально/неизменяемо. |
+| POST · PATCH · DELETE | `/sources/{id}` … | `POST /sources/{id}/rotate` → `{token}` (новый одноразовый, старый мёртв сразу). `PATCH {enabled?, description?}` — вкл/выкл приём по токену, сменить описание. `DELETE` — снять регистрацию (токен отозван); события/алерты остаются, их чистит `DELETE /batches/{name}`. |
+| GET | `/batches` | Сводка по загруженным источникам-меткам (стримы, файлы, вставки) — для селектора в UI. |
+| DELETE | `/batches/{source_batch}` | Удаление источника-метки целиком: все его `events` И `alerts` (плюс `rule_hits`). `404`, если ничего не удалено. Регистрацию в `sources` (если есть) не трогает. |
+| GET | `/alerts` · `/alerts/{id}` | Список / карточка алерта. Фильтры: `source_batch`, `status`, `rule_level`, `time_from/to`; сортировка `sort_by` (`rule`=severity/`host`/`event_count`/`status`/`created_at`) + `sort_dir`. Карточка (`/alerts/{id}`) дополнительно несёт `mitre` — обогащение тегов через `app/kb.py` (`[{tag, technique_id, name?, url?, tactics?, matched}]`), список `/alerts` — нет. |
 | PATCH | `/alerts/{id}/status` | Смена статуса алерта. |
 | GET | `/events` · `/events/{id}` | Список / карточка сырого события. Фильтры: `source_batch`, `only_matched`, `time_from/to`; `query` — строка мини-языка фильтра (`app/filter_lang.py`: and/or/not, скобки, спецполя `rule`/`is_matched`), при синтаксической ошибке `400` с текстом и позицией; `group_cond` — drill-in по группе (всегда AND, отдельно от `query`); сортировка `sort_by`/`sort_dir` (в т.ч. по любому полю raw_json); `fields=A,B` — кастом-колонки. Отдельного параметра фильтра по хосту нет — выражается через `query` (напр. `Hostname contains "..."`). |
 | GET | `/events/group` | Агрегаторы для панели группировки: `group_by=<field>` (включая спецполя `rule`/`is_matched`) + те же фильтры (`query` и т.п.) → `[{value, count}]` по убыванию (фильтр применяется до группировки; `rule` — многозначное поле, разворачивается через `LEFT JOIN json_each`). |
@@ -138,6 +156,12 @@ Security-Datasets) и в `uploads/`.
 | DELETE | `/rules/custom/{rule_id}` | Удаление своего правила (обязательный query-параметр `ruleset` — из какого именованного custom-рулсета). |
 | POST | `/main-ruleset/rules` | Включить/выключить ОДНО правило в основном рулсете: тело `{ruleset, rule_id, include}`. |
 | POST | `/main-ruleset/rulesets` | Добавить/убрать рулсет ЦЕЛИКОМ в основной рулсет: тело `{ruleset, include}` (сбрасывает точечные исключения/добавления по этому рулсету). |
+| GET | `/value-lists` · `/value-lists/{name}` | Именованные списки значений (плейсхолдеры `%name%`/`\|expand` для Sigma-правил, см. `app/value_lists.py`). Список — `[{name, description, value_count, updated_at, used_by_count}]`; карточка — `+ values`, `used_by: [{ruleset, rule_id, title}]`. |
+| POST · PUT · DELETE | `/value-lists` · `/value-lists/{name}` | `POST {name, description, values}` (201, `name` потом неизменяемо). `PUT {description, values}` → СРАЗУ пересобирает зависимые правила, ответ `+ {recompiled, errors}`. `DELETE` → `409`, если список используется; `?force=true` — удалить всё равно (эти правила перестанут компилироваться). Всё — только для кастомных правил. |
+| POST | `/value-lists/upload` | Загрузка списков файлом (multipart `file` + `mode` = `create`\|`replace`\|`merge`). Форматы — Sigma pipeline с `value_placeholders.mapping` (один файл → много списков), наш `{name, values}`, «голый» `{имя: [значения]}` (см. `value_lists.parse_list_file`). `replace`/`merge` пересобирают зависимые правила. |
+| GET | `/kb/mitre/meta` · `/kb/mitre/matrix` | База знаний MITRE (вкладка «База знаний»), read-only, `app/kb.py`. `meta` → строки `mitre_meta` (`attack_version`/`built_at`/counts) + `available`. `matrix` → тактики-колонки в порядке kill-chain с вложенными техниками/сабтехниками. Нет `kb.db` → `{"available": false, ...}` (не 5xx). |
+| GET | `/kb/mitre/techniques` · `/kb/mitre/techniques/{id}` | Плоский список техник (`tactic`, `q`, `limit` 1..500, `offset`) / полная карточка техники (описание, detection, платформы, data sources, тактики, митигации, сабтехники). Неизвестный id → `404`. |
+| POST | `/rulesets/upload` | *(дополнено)* Multi-document файл может кроме правил нести документы-определения списков (Sigma pipeline `value_placeholders` или `{name, values}`) — они вынимаются и пишутся ПЕРВЫМИ (`mode=replace`), потом компилируются правила. Ответ `+ {value_lists_imported, recompiled, errors}`; если в файле ТОЛЬКО списки — рулсет не создаётся (`name`/`path` в ответе нет). |
 
 ---
 
@@ -155,10 +179,14 @@ Security-Datasets) и в `uploads/`.
     зарезервированный id для рулсета, созданного до введения именованных рулсетов, см. миграцию
     ниже). Внутри: `meta.json` (`{id, name, created_at}`), `<rule_id>.yml` на правило (raw Sigma
     YAML, source of truth), `.manifest.json` (кэш скомпилированных метаданных всех правил папки,
-    для быстрого браузинга). `custom_rulesets/<ruleset_id>` работает как `ruleset_path` для
-    `/ingest/file`·`/ingest/upload` «из коробки» — `RulesetHandler` для директории глобит
-    `*.yml`/`*.yaml`, `.json` внутри директории игнорирует, поэтому `.manifest.json`/`meta.json`
-    в детект не попадают. Правило/рулсет можно добавить только в существующий именованный
+    для быстрого браузинга И для детекта). `custom_rulesets/<ruleset_id>` как `ruleset_path` для
+    `/ingest/file`·`/ingest/upload` гоняется по УЖЕ скомпилированному `.manifest.json`
+    (`main.py:_process_batch` → `rules_catalog.load_rules` → `engine.run_batch_with_rules`), НЕ
+    пересборкой сырых `*.yml` через `RulesetHandler`: только в манифесте развёрнуты плейсхолдеры
+    value lists (`%name%`/`|expand`, `app/value_lists.py`) — `RulesetHandler`, глядя на сырой
+    `.yml` с `%name%`, молча уронил бы такое правило. Freshness манифеста держит mtime-кэш
+    `rules_catalog` (не `engine._rulesets_cache` — для custom-путей он больше не используется,
+    как и для `main`). Правило/рулсет можно добавить только в существующий именованный
     custom-рулсет или создать новый (`ruleset`/`new_ruleset_name` — ровно один из двух в
     `POST /rules/custom` и `POST /rulesets/upload`); встроенные рулсеты как цель — `400`.
   - `main_ruleset.json` — состав «основного рулсета» (см. `app/main_ruleset.py` в таблице
@@ -177,7 +205,28 @@ Security-Datasets) и в `uploads/`.
     `rules_catalog.py` при импорте один раз (идемпотентно) дописывает `meta.json` в `my_rules/`,
     если его там ещё нет, ничего не перемещая; `uploaded/` (если пустая) просто перестаёт
     использоваться.
-- **`scripts/`** — вспомогательные скрипты для ручного тестирования (не часть приложения):
+- **`data/value_lists/`** (создаётся автоматически, вкладка «Списки», `app/value_lists.py`) —
+  `<name>.yml` на список (`name` = имя плейсхолдера `%name%`, `[A-Za-z0-9_]{1,64}`),
+  `{name, description, values, created_at, updated_at}`. Разворачиваются в кастом-правила при
+  компиляции (`Field|...|expand: ['%name%']`), builtin не поддержаны. Под Docker — отдельный
+  named volume `siem_value_lists` (см. `docker-compose.yml`).
+- **`kb/kb.db`** — база знаний MITRE ATT&CK (Enterprise), read-only SQLite. Собирается
+  `scripts/build_kb.py` из STIX-бандла `mitre-attack/attack-stix-data`; в Docker — на этапе
+  `build` (`ARG ATTACK_STIX_REF`/`ATTACK_STIX_VERSION`), вшивается в образ, **volume'ом НЕ
+  монтируется** (обновление = пересборка). Таблицы `mitre_meta`/`mitre_tactic`/`mitre_technique`/
+  `mitre_technique_tactic`/`mitre_mitigation`/`mitre_technique_mitigation`. Путь — `SIEM_KB_DB_PATH`
+  (`app/config.py`). Читается только `app/kb.py`, никем не пишется в рантайме. Нет файла →
+  вкладка «База знаний» и MITRE-обогащение карточки деградируют тихо.
+- **`scripts/`** — вспомогательные скрипты для ручного тестирования (не часть приложения).
+  Исключение — `build_kb.py`: он часть сборки (COPY в builder-стадию Dockerfile), автономен
+  (stdlib + `requests`, без `import app.*`), логика разбита на `parse_bundle()`/`write_kb_db()`
+  для тестов (`tests/test_kb.py`).
+  Все, кто шлёт в `/ingest/stream` (`fake_forwarder.py`, `stream_main_ruleset_test.py`,
+  `stream_correlation_test.py`, `send_value_list_test_events.py`), теперь требуют токен
+  источника: флаг `--token` или переменная окружения `SIEM_INGEST_TOKEN` — сначала создайте
+  источник во вкладке «Источник данных» (по умолчанию с именем `SOURCE_LABEL` скрипта, иначе
+  `--source`), т.к. под этим именем скрипты потом поллят `/alerts?source_batch=...`. Прогоны
+  изолируются рандомизацией host/ip/user (а не суффиксом в имени источника, как раньше).
   - `fake_forwarder.py` — синтетический форвардер для `/ingest/stream`, режимы `burst`
     (много событий разом — проверка size-trigger флаша) и `drip` (медленно и долго —
     проверка time-trigger); печатает состояние очереди из `/health?detailed=true`.
@@ -221,8 +270,10 @@ Security-Datasets) и в `uploads/`.
 Легенда: ✅ готово · 🟡 частично · ⬜ не начато
 
 ### Этап 0 — Гигиена проекта ✅
-- ✅ `requirements.txt` (прод) / `requirements-dev.txt` (+ pytest) c фиксацией версий; `.venv`
-  из репо убран (`.gitignore`).
+- ✅ `pyproject.toml` — единственный манифест зависимостей (`[project].dependencies` — прод,
+  `[project.optional-dependencies].dev` — pytest/httpx/ruff, `[tool.pytest.ini_options]`,
+  `[tool.ruff]`); `requirements*.txt` и `pytest.ini` удалены, Docker ставит `pip install .`;
+  `.venv` из репо убран (`.gitignore`).
 - ✅ `.gitignore` (`*.db`, `.venv/`, `uploads/`, `custom_rulesets/`, `__pycache__/`, `Zircolite/`,
   `artifacts/` — последние два внешние клоны со своим `.git`, см. §1/§6); git-репозиторий
   инициализирован.
@@ -242,6 +293,11 @@ Security-Datasets) и в `uploads/`.
 - ✅ Дедупликация алертов, хранение всех событий, кэш скомпилированных правил.
 - ✅ **Потоковый ingest с форвардеров**: `POST /ingest/stream` → очередь → фоновый воркер
   (`app/ingest_queue.py`), micro-batch flush по «N событий ИЛИ T секунд». `docs/forwarder.md`.
+- ✅ **Аутентификация форвардеров по токену источника**: каждый поток (`/ingest/stream`,
+  `/ingest/events`) требует bearer-токен зарегистрированного источника (таблица `sources`,
+  токен хранится sha256, отдаётся один раз, есть перевыпуск/выключение). Регистрация и токен —
+  вкладка «Источник данных» → «Создать источник». Имя источника обязательно и уникально, оно
+  же метка `source_batch`. `/ingest/file`·`/ingest/upload` (локальный UI) — без токена.
 - ✅ **`/health` отражает реальное состояние**, не заглушку: `SELECT 1` по БД (`Store.health`),
   жив ли фоновый поток `IngestWorker` (`IngestWorker.health`), загружен ли Zircolite-ruleset
   (`ZircoliteEngine.health`); `?detailed=true` добавляет счётчики строк/размер БД. UI (светофор
@@ -249,7 +305,11 @@ Security-Datasets) и в `uploads/`.
   по подсистемам.
 - ⬜ **Точная привязка entity**: маппинг полей под конкретный источник (EVTX Security /
   Sysmon / Auditd) вместо общих кандидатов из `fields.py`.
-- ⬜ **Обогащение MITRE ATT&CK**: из тегов Sigma достраивать tactic/technique в удобный вид.
+- 🟡 **Обогащение MITRE ATT&CK**: ✅ база знаний MITRE (Enterprise) в отдельном read-only
+  `kb.db` (`app/kb.py`, `scripts/build_kb.py`, собирается в `docker build`), вкладка «База
+  знаний» с матрицей тактик/техник, карточка алерта достраивает tactic/technique/ссылку по
+  тегам (гибрид: нет в KB → сырой тег). ⬜ Осталось: MITRE-обогащение в списке алертов/
+  дашборде, tool `lookup_mitre` для агента поверх `app/kb.py` (Этап 4).
 - 🟡 **Стейтфул-корреляция** Sigma-правил (`event_count`/`value_count`) поверх постоянной
   таблицы `events`/`rule_hits` (`app/correlation.py`) — независимо от micro-batch flush'а
   ingest-воркера, окно реального времени (`timespan`), не размера батча. Не через
@@ -260,7 +320,12 @@ Security-Datasets) и в `uploads/`.
 - ⬜ Ретеншн/архивация `siem.db`, при росте — рассмотреть Postgres/Elastic.
 
 ### Этап 2 — UI SIEM 🟡 (одна страница есть, расширяем)
-- ✅ Вкладки: Источник данных / Алерты / События; карточки алерта и события; смена статуса.
+- ✅ Вкладки: Источник данных / Алерты / События / Sigma-правила / Списки / База знаний; карточки алерта и события; смена статуса.
+- ✅ **Вкладка «База знаний»** (`app/kb.py`, `/kb/mitre/*`) — подвкладки MITRE ATT&CK (матрица
+  тактик-колонок с техниками/сабтехниками, клиентский фильтр по ID/названию, resizable
+  детейл-панель техники: описание/detection/платформы/data sources/тактики/митигации/сабтехники)
+  и Playbooks (заглушка). Карточка алерта показывает названия сматчившихся техник (ссылки на
+  attack.mitre.org) + чипы тактик; несматчившийся тег остаётся сырым (`renderMitreChips`).
 - ✅ Сортировка по клику на заголовок (Алерты: Правило=severity/Хост/События/Статус/Создан;
   События: Время/Хост), серверная — корректна с пагинацией.
 - ✅ Колонки в Событиях: кастомные из сырого JSON (`json_extract`, пусто если поля нет) +
@@ -397,6 +462,12 @@ Security-Datasets) и в `uploads/`.
 - ✅ **Удаление источника** (`DELETE /batches/{source_batch}`) — таблица источников во
   вкладке «Источник данных» (переиспользует уже загружаемый `/batches`), кнопка «Удалить» с
   `confirm()`-предупреждением перед необратимым действием; удаляет и `events`, и `alerts`.
+- ✅ **Регистрация потоковых источников + токен** (`/sources*`, таблица `sources`) — во вкладке
+  «Источник данных» блок «Потоковые источники»: «Создать источник» (имя обязательно/уникально +
+  описание) → одноразовый показ токена, curl-сниппет показывается ТОЛЬКО при создании (при
+  перевыпуске — только новый токен). Таблица с перевыпуском/вкл-выкл/снятием регистрации.
+  Форма «вставить события напрямую» теперь тоже требует источник+токен (свежий токен сессии
+  подставляется сам). Отдельно от таблицы «все загруженные метки `source_batch`».
 - ⬜ Дашборд: счётчики по severity, топ правил/хостов/MITRE, таймлайн.
 - ⬜ Полноценный **триаж-воркфлоу**: назначение аналитика, комментарии, метки TP/FP.
 - ⬜ Поиск/фильтры по событиям (полнотекст, по полям), пивот из алерта в связанные события.
@@ -411,6 +482,11 @@ Security-Datasets) и в `uploads/`.
   multi-document) + написание своих правил, обязательный выбор целевого рулсета — см. вкладку
   «Sigma-правила» (Этап 2), `app/rules_catalog.py`. ⬜ Осталось: версионирование, включение/
   выключение по тегам.
+- ✅ **Именованные списки значений** (`%name%` + `|expand`, `app/value_lists.py`, вкладка
+  «Списки», `/value-lists*`) — длинные перечни (recon-утилиты, LOLBIN и т.п.) выносятся в
+  отдельный файл `data/value_lists/<name>.yml` и подставляются в кастом-правило плейсхолдером
+  при компиляции; правка списка сразу пересобирает зависимые правила. Только кастомные правила
+  (builtin приходят уже в SQL). v1: запись целиком `%name%`, без встроенных `foo%name%bar`.
 - ✅ **`ruleset` для `/ingest/stream`/`/ingest/events`** — оба теперь используют «основной
   рулсет» (`app/main_ruleset.py`, `MAIN_RULESET_ID = "main"`) вместо жёсткого дефолта движка:
   `_process_events` в `app/main.py` подставляет `ruleset_path = ruleset_path or
@@ -525,4 +601,15 @@ Security-Datasets) и в `uploads/`.
   прошлом) - потоковый ingest живых логов при этом работает так же корректно, `event_time`
   свежих событий и так близок к текущему моменту. `DELETE /batches/{source_batch}` чистит и
   `rule_hits`, не только `events`/`alerts` - если добавляешь ЕЩЁ одну таблицу, привязанную к
-  `source_batch`, не забудь то же самое в `Store.delete_batch`.
+  `source_batch`, не забудь то же самое в `Store.delete_batch`. **Таблица `sources` под это
+  правило НЕ подпадает намеренно**: `delete_batch` удаляет накопленные данные, но НЕ снимает
+  регистрацию источника (его токен продолжает работать) - это разные действия (`DELETE
+  /sources/{id}` vs `DELETE /batches/{name}`), и в UI это две разные таблицы/кнопки.
+- **`/ingest/stream` и `/ingest/events` теперь за токеном источника** (`_authenticate_ingest`
+  в `app/main.py`, таблица `sources` в `app/store.py`). Токен только из заголовка
+  (`Authorization: Bearer` / `X-Ingest-Token`), НЕ из query - query светится в логах прокси
+  (правило про секреты в URL). Токен в БД только sha256, открытый отдаётся один раз из
+  `create_source`/`rotate_source_token`. Схема `sources` - обычный `CREATE TABLE IF NOT
+  EXISTS` в `_SCHEMA`, миграции не нужно: существующая `siem.db` получает таблицу на старте,
+  уже накопленные метки `source_batch` с ней никак не связаны. UI держит свежий токен в
+  памяти сессии (`sessionSourceTokens`) - хэш из БД повторно не показать.

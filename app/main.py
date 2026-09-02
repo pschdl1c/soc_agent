@@ -22,7 +22,7 @@ from app import correlation
 from app.engine import ZircoliteEngine
 from app.fields import INGEST_SOURCE_FIELD
 from app.filter_lang import FilterSyntaxError, compile_filter_query
-from app.ingest_queue import IngestWorker
+from app.ingest_queue import IngestQueueFull, IngestWorker
 from app.models import (
     AlertStatusUpdate,
     CustomRuleSubmit,
@@ -32,11 +32,18 @@ from app.models import (
     IngestResponse,
     MainRulesetRuleToggle,
     MainRulesetToggle,
+    SourceCreate,
+    SourceUpdate,
+    ValueListCreate,
+    ValueListUpdate,
 )
 from app.normalize import zircolite_results_to_alerts
+from app import kb
 from app import main_ruleset
 from app import rules_catalog
 from app.rules_catalog import CatalogError, RuleValidationError
+from app import value_lists
+from app.value_lists import ValueListError
 from app.store import Store
 
 BASE_DIR = config.BASE_DIR
@@ -95,6 +102,19 @@ def _split_events_by_source(events: list[dict], default_label: str) -> dict[str,
 def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, source_label: str) -> IngestResponse:
     if ruleset_path == main_ruleset.MAIN_RULESET_ID:
         rules = main_ruleset.resolve()
+        raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
+            events_path=events_path, rules=rules, input_type=input_type,
+        )
+    elif ruleset_path and ruleset_path.startswith("custom_rulesets/"):
+        # Кастомные рулсеты гоняем по УЖЕ скомпилированному .manifest.json
+        # (rules_catalog.load_rules), а не пересборкой сырых .yml в RulesetHandler: только в
+        # манифесте плейсхолдеры value lists (%name% / |expand, см. app/value_lists.py) уже
+        # развёрнуты - RulesetHandler, глядя на сырой .yml с %name%, молча уронил бы такое
+        # правило (0 правил в рулсете). Freshness манифеста держит mtime-кэш rules_catalog.
+        try:
+            rules = rules_catalog.load_rules(ruleset_path)
+        except CatalogError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
             events_path=events_path, rules=rules, input_type=input_type,
         )
@@ -206,6 +226,33 @@ def health(detailed: bool = False) -> dict:
     return {"status": overall, "checks": checks}
 
 
+def _authenticate_ingest(request: Request) -> dict:
+    """Токен из заголовка 'Authorization: Bearer <token>' ЛИБО 'X-Ingest-Token: <token>'.
+    Возвращает dict активного источника (его name - метка source_batch). Иначе 401 - события
+    НЕ попадают в очередь ("остальные события без токена игнорируются", см. постановку).
+
+    Токен принимается ТОЛЬКО из заголовка, не из query-параметра: query светится в логах
+    reverse-proxy / веб-сервера (см. правило про секреты в URL в CLAUDE.md). Гейтом закрыты
+    /ingest/stream и /ingest/events - "безголовые" пути приёма событий с форвардеров;
+    /ingest/file и /ingest/upload остаются открытыми (их дёргают из локального UI)."""
+    token: str | None = None
+    auth = request.headers.get("authorization") or ""
+    if auth[:7].lower() == "bearer ":
+        token = auth[7:].strip() or None
+    if not token:
+        token = (request.headers.get("x-ingest-token") or "").strip() or None
+    source = store.authenticate_source(token)
+    if source is None:
+        raise HTTPException(
+            status_code=401,
+            detail=("Нужен токен зарегистрированного источника. Создайте источник во вкладке "
+                    "«Источник данных» и передавайте его токен в заголовке "
+                    "'Authorization: Bearer <token>' (или 'X-Ingest-Token')."),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return source
+
+
 @app.post("/ingest/file", response_model=IngestResponse)
 def ingest_file(request: IngestFileRequest) -> IngestResponse:
     events_path = Path(request.events_path)
@@ -216,10 +263,14 @@ def ingest_file(request: IngestFileRequest) -> IngestResponse:
 
 
 @app.post("/ingest/events", response_model=IngestResponse)
-def ingest_events(request: IngestEventsRequest) -> IngestResponse:
-    if not request.events:
+def ingest_events(request: Request, body: IngestEventsRequest) -> IngestResponse:
+    """Приём порции сырых событий в теле (синхронный прогон). Как и /ingest/stream, требует
+    токен зарегистрированного источника - метку source_batch задаёт САМ источник (его имя),
+    поле source_label в теле игнорируется."""
+    source = _authenticate_ingest(request)
+    if not body.events:
         raise HTTPException(status_code=400, detail="Пустой список событий")
-    return _process_events([(e, request.source_label) for e in request.events])
+    return _process_events([(e, source["name"]) for e in body.events])
 
 
 def _parse_stream_body(raw: bytes) -> list[dict]:
@@ -241,16 +292,23 @@ def _parse_stream_body(raw: bytes) -> list[dict]:
 
 
 @app.post("/ingest/stream")
-async def ingest_stream(request: Request, source: str = "live-stream") -> JSONResponse:
+async def ingest_stream(request: Request) -> JSONResponse:
     """
     Потоковый приём событий с форвардеров (Fluent Bit / NXLog / curl и т.п.).
-    Тело - NDJSON (application/x-ndjson) или JSON-массив. Параметр ?source=<label>
-    задаёт источник (обычно имя хоста) - под ним события группируются в хранилище.
+    Тело - NDJSON (application/x-ndjson) или JSON-массив.
+
+    ТРЕБУЕТ токен зарегистрированного источника: заголовок 'Authorization: Bearer <token>'
+    (или 'X-Ingest-Token: <token>'). Запросы без валидного токена активного источника
+    отклоняются 401, события в очередь не попадают. Метку source_batch задаёт САМ источник
+    (его имя, заданное при создании во вкладке «Источник данных») - query-параметр ?source=
+    больше не используется.
 
     Не запускает детект синхронно: кладёт события в очередь и сразу отвечает 202,
     чтобы форвардер не ждал прогона Zircolite. Реальный прогон - в фоновом воркере
     батчами (см. app/ingest_queue.py).
     """
+    source = _authenticate_ingest(request)
+    label = source["name"]
     raw = await request.body()
     try:
         events = _parse_stream_body(raw)
@@ -258,14 +316,19 @@ async def ingest_stream(request: Request, source: str = "live-stream") -> JSONRe
         raise HTTPException(status_code=400, detail=f"Не удалось разобрать тело запроса: {exc}")
 
     if not events:
-        return JSONResponse(status_code=202, content={"queued": 0, "source": source})
+        return JSONResponse(status_code=202, content={"queued": 0, "source": label})
 
     try:
-        queued = ingest_worker.enqueue(events, source_label=source)
-    except Exception as exc:  # очередь переполнена / воркер не запущен
+        queued = ingest_worker.enqueue(events, source_label=label)
+    except IngestQueueFull as exc:  # очередь заполнена - часть событий (exc.queued) уже принята
+        raise HTTPException(
+            status_code=503,
+            detail=f"Очередь ingest переполнена: {exc}. Повтори запрос позже.",
+        )
+    except RuntimeError as exc:  # воркер не запущен
         raise HTTPException(status_code=503, detail=f"Очередь ingest недоступна: {exc}")
 
-    return JSONResponse(status_code=202, content={"queued": queued, "source": source})
+    return JSONResponse(status_code=202, content={"queued": queued, "source": label})
 
 
 @app.post("/ingest/upload", response_model=IngestResponse)
@@ -311,6 +374,67 @@ def delete_batch(source_batch: str) -> dict:
     return {"source_batch": source_batch, **result}
 
 
+# ------------------------------------------------------------------ Registered sources (потоковые источники)
+
+@app.get("/sources")
+def list_sources() -> list[dict]:
+    """Зарегистрированные потоковые источники (вкладка «Источник данных»). Токен НЕ отдаётся -
+    только token_hint (последние 4 символа). Счётчики событий/алертов и время последнего
+    события подтягиваются из /batches по совпадению name == source_batch (регистрация и
+    накопленные данные - независимые вещи, у только что созданного источника счётчики нулевые)."""
+    batch_stats = {b["source_batch"]: b for b in store.list_batches()}
+    result = []
+    for s in store.list_sources():
+        b = batch_stats.get(s["name"])
+        result.append({
+            **s,
+            "event_count": b["event_count"] if b else 0,
+            "alert_count": b["alert_count"] if b else 0,
+            "last_event_at": b["last_ingested_at"] if b else None,
+        })
+    return result
+
+
+@app.post("/sources", status_code=201)
+def create_source(body: SourceCreate) -> dict:
+    """Регистрирует источник и возвращает ОДНОРАЗОВЫЙ токен (поле "token"). Повторно токен не
+    посмотреть - только POST /sources/{id}/rotate. Имя обязательно, уникально, оно же метка
+    source_batch всех событий/алертов источника."""
+    try:
+        return store.create_source(body.name, body.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/sources/{source_id}/rotate")
+def rotate_source_token(source_id: str) -> dict:
+    """Перевыпуск токена: старый перестаёт работать немедленно. Ответ несёт новый одноразовый
+    токен в поле "token"."""
+    token = store.rotate_source_token(source_id)
+    if token is None:
+        raise HTTPException(status_code=404, detail="Источник не найден")
+    return {"source_id": source_id, "token": token}
+
+
+@app.patch("/sources/{source_id}")
+def update_source(source_id: str, body: SourceUpdate) -> dict:
+    """Включить/выключить приём по токену источника и/или поменять описание. Выключенный
+    источник сразу перестаёт приниматься на /ingest/stream и /ingest/events (401)."""
+    updated = store.update_source(source_id, body.enabled, body.description)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Источник не найден")
+    return updated
+
+
+@app.delete("/sources/{source_id}")
+def delete_source(source_id: str) -> dict:
+    """Снимает регистрацию (токен отзывается сразу). Уже принятые события и алерты этого
+    источника ОСТАЮТСЯ - их отдельно удаляет DELETE /batches/{имя}."""
+    if not store.delete_source(source_id):
+        raise HTTPException(status_code=404, detail="Источник не найден")
+    return {"deleted": source_id}
+
+
 @app.get("/alerts")
 def list_alerts(
     source_batch: str | None = None,
@@ -335,6 +459,10 @@ def get_alert(alert_id: str) -> dict:
     alert = store.get_alert(alert_id)
     if alert is None:
         raise HTTPException(status_code=404, detail="Алерт не найден")
+    # Обогащение MITRE только в КАРТОЧКЕ (не в списке): сырой mitre_techniques (list[str]) не
+    # трогаем ради обратной совместимости, добавляем отдельный ключ mitre - гибрид, где техника
+    # без совпадения в KB помечена matched=false (UI покажет её как сырой тег).
+    alert["mitre"] = kb.enrich_techniques(alert.get("mitre_techniques", []))
     return alert
 
 
@@ -522,10 +650,16 @@ async def upload_ruleset(
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл как UTF-8: {exc}")
     try:
-        info, _target_path, collisions = rules_catalog.save_ruleset_yaml(yaml_text, ruleset, new_ruleset_name)
-    except (CatalogError, RuleValidationError) as exc:
+        info, _target_path, collisions, imported = rules_catalog.save_ruleset_yaml(
+            yaml_text, ruleset, new_ruleset_name,
+        )
+    except (CatalogError, RuleValidationError, ValueListError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {**info, "collisions": collisions}
+    # Файл мог нести документы-определения списков (Sigma pipeline value_placeholders и т.п.) -
+    # они уже записаны; пересобираем правила ДРУГИХ рулсетов, если те списки изменились.
+    recompile = _recompile_for_value_lists(imported["recompile_needed"])
+    base = info if info is not None else {"rules": 0, "note": "в файле только определения списков - рулсет не создан"}
+    return {**base, "collisions": collisions, "value_lists_imported": imported, **recompile}
 
 
 @app.delete("/rulesets")
@@ -587,6 +721,141 @@ def toggle_main_ruleset_ruleset(body: MainRulesetToggle) -> dict:
     except CatalogError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"ruleset": body.ruleset, "main_status": status}
+
+
+def _recompile_for_value_lists(names: list[str]) -> dict:
+    """Пересобирает правила, ссылающиеся на изменённые списки значений, + invalidate кэша
+    движка по затронутым рулсетам. Общий хвост для PUT /value-lists/{name},
+    POST /value-lists/upload и POST /rulesets/upload (когда в файле были документы-списки)."""
+    recompiled: list[dict] = []
+    errors: list[dict] = []
+    affected: set[str] = set()
+    for name in names:
+        r = rules_catalog.recompile_rules_for_value_list(name)
+        recompiled += r["recompiled"]
+        errors += r["errors"]
+        affected.update(r["affected_rulesets"])
+    for ruleset_path in affected:
+        engine.invalidate(ruleset_path)
+    return {"recompiled": recompiled, "errors": errors}
+
+
+@app.get("/value-lists")
+def list_value_lists() -> list[dict]:
+    """Именованные списки значений (плейсхолдеры %name% / |expand для Sigma-правил,
+    см. app/value_lists.py) - для вкладки «Списки». used_by_count считается одним проходом."""
+    counts = rules_catalog.value_list_usage_counts()
+    entries = value_lists.list_lists()
+    for entry in entries:
+        entry["used_by_count"] = counts.get(entry["name"], 0)
+    return entries
+
+
+@app.get("/value-lists/{name}")
+def get_value_list(name: str) -> dict:
+    data = value_lists.get_list(name)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Список не найден")
+    data["used_by"] = rules_catalog.rules_using_value_list(name)
+    return data
+
+
+@app.post("/value-lists", status_code=201)
+def create_value_list(body: ValueListCreate) -> dict:
+    try:
+        return value_lists.create_list(body.name, body.description, body.values)
+    except ValueListError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/value-lists/{name}")
+def update_value_list(name: str, body: ValueListUpdate) -> dict:
+    """Правка списка -> СРАЗУ пересобирает все правила, которые на него ссылаются (переписывает
+    их .manifest.json + invalidate кэша движка по затронутым рулсетам). Ответ несёт recompiled/
+    errors - список сохраняется всегда, правила с ошибкой компиляции остаются на прежнем SQL."""
+    try:
+        updated = value_lists.update_list(name, body.description, body.values)
+    except ValueListError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Список не найден")
+    return {**updated, **_recompile_for_value_lists([name])}
+
+
+@app.post("/value-lists/upload")
+async def upload_value_lists(
+    file: UploadFile = File(...),
+    mode: str = Form("create"),
+) -> dict:
+    """Загрузка списков значений файлом (вкладка «Списки» → «+ Загрузить список»). Форматы -
+    см. value_lists.parse_list_file: Sigma processing-pipeline YAML с value_placeholders.mapping
+    (один файл → много списков), наш {name, description?, values}, или «голый» {имя: [значения]}.
+    mode: create (не трогать существующие) | replace (перезаписать) | merge (объединить значения).
+    replace/merge пересобирают правила, ссылающиеся на изменённые списки (recompiled/errors)."""
+    if not file.filename or not file.filename.lower().endswith((".yml", ".yaml")):
+        raise HTTPException(status_code=400, detail="Ожидается YAML-файл (.yml/.yaml)")
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Не удалось прочитать файл как UTF-8: {exc}")
+    try:
+        parsed = value_lists.parse_list_file(text)
+        result = value_lists.import_lists(parsed, mode)
+    except ValueListError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {**result, **_recompile_for_value_lists(result["recompile_needed"])}
+
+
+@app.delete("/value-lists/{name}")
+def delete_value_list(name: str, force: bool = False) -> dict:
+    used_by = rules_catalog.rules_using_value_list(name)
+    if used_by and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Список используется в {len(used_by)} правилах - повтори с ?force=true, "
+                    "чтобы удалить (эти правила перестанут компилироваться)."),
+        )
+    if not value_lists.delete_list(name):
+        raise HTTPException(status_code=404, detail="Список не найден")
+    return {"deleted": name, "was_used_by": used_by}
+
+
+# ----------------- База знаний (вкладка «База знаний»): матрица MITRE ATT&CK -----------------
+# Read-only, данные в отдельном kb.db (см. app/kb.py, scripts/build_kb.py). Если база не собрана,
+# ручки отдают валидную форму с "available": false (не 5xx) - так проще UI.
+
+
+@app.get("/kb/mitre/meta")
+def kb_mitre_meta() -> dict:
+    return kb.meta()
+
+
+@app.get("/kb/mitre/matrix")
+def kb_mitre_matrix() -> dict:
+    return kb.matrix()
+
+
+@app.get("/kb/mitre/techniques")
+def kb_mitre_techniques(
+    tactic: str | None = None,
+    q: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    if not (1 <= limit <= 500):
+        raise HTTPException(status_code=400, detail="limit: 1..500")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset: >= 0")
+    return kb.list_techniques(tactic=tactic, q=q, limit=limit, offset=offset)
+
+
+@app.get("/kb/mitre/techniques/{technique_id}")
+def kb_mitre_technique(technique_id: str) -> dict:
+    tech = kb.get_technique(technique_id.upper())
+    if tech is None:
+        raise HTTPException(status_code=404, detail="Техника не найдена в базе знаний")
+    return tech
 
 
 @app.get("/", response_class=HTMLResponse)

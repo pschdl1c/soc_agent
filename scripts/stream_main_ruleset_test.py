@@ -16,8 +16,13 @@ ruleset вообще и всегда бил в дефолтный движков
     3. Добавь это правило в основной рулсет: найди его в списке (тот рулсет, куда сохранил на
        шаге 2) и нажми "+" в колонке слева от строки правила (или включи toggle "Только
        основной рулсет", чтобы проверить, что его там ещё нет).
-    4. Запусти сервис (uvicorn app.main:app --port 8000), если ещё не запущен.
-    5. Запусти этот скрипт: python scripts/stream_main_ruleset_test.py
+    4. Вкладка "Источник данных" -> "Создать источник" с именем main-stream-test (или своим,
+       тогда передай его в --source). Сохрани показанный токен - /ingest/stream без него
+       отвечает 401.
+    5. Запусти сервис (uvicorn app.main:app --port 8000), если ещё не запущен.
+    6. Запусти этот скрипт:
+         python scripts/stream_main_ruleset_test.py --token <токен_источника>
+         (или SIEM_INGEST_TOKEN=<токен> python scripts/stream_main_ruleset_test.py)
        Он шлёт события через /ingest/stream (асинхронно, очередь+микробатч, см.
        app/ingest_queue.py), затем ждёт флаша (SIEM_INGEST_FLUSH_INTERVAL, дефолт 5с) и
        поллит /alerts?source_batch=... пока не появятся алерты (таймаут 30с).
@@ -57,14 +62,15 @@ tags:
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from uuid import uuid4
 
 DEFAULT_URL = "http://localhost:8000"
 SOURCE_LABEL = "main-stream-test"
@@ -113,13 +119,14 @@ def build_events() -> list[dict]:
     return matching + non_matching
 
 
-def _post_stream(url: str, source: str, events: list[dict]) -> dict | None:
+def _post_stream(url: str, token: str, events: list[dict]) -> dict | None:
+    """Метку источника задаёт сам сервис по токену (?source= больше не используется)."""
     body = "\n".join(json.dumps(e, default=str) for e in events).encode("utf-8")
     req = urllib.request.Request(
-        f"{url}/ingest/stream?{urllib.parse.urlencode({'source': source})}",
+        f"{url}/ingest/stream",
         data=body,
         method="POST",
-        headers={"Content-Type": "application/x-ndjson"},
+        headers={"Content-Type": "application/x-ndjson", "Authorization": f"Bearer {token}"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -169,12 +176,20 @@ def _poll_alerts(url: str, source_batch: str, timeout: float = 30.0) -> list[dic
 
 
 def main() -> None:
-    url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
-    source = f"{SOURCE_LABEL}-{uuid4().hex[:6]}"
+    parser = argparse.ArgumentParser(description="Проверка основного рулсета через /ingest/stream")
+    parser.add_argument("url", nargs="?", default=DEFAULT_URL)
+    parser.add_argument("--token", default=os.environ.get("SIEM_INGEST_TOKEN"),
+                        help="токен зарегистрированного источника (или переменная SIEM_INGEST_TOKEN)")
+    parser.add_argument("--source", default=SOURCE_LABEL,
+                        help=f"имя источника, созданного в UI (default: {SOURCE_LABEL}) - под ним поллятся алерты")
+    args = parser.parse_args()
+    if not args.token:
+        parser.error("нужен --token (или SIEM_INGEST_TOKEN): создайте источник во вкладке «Источник данных»")
+    url, source = args.url, args.source
     events = build_events()
 
     print(f"Отправляю {len(events)} события в /ingest/stream (source={source!r}) -> {url}")
-    res = _post_stream(url, source, events)
+    res = _post_stream(url, args.token, events)
     print(f"202 Accepted: queued={res.get('queued') if res else '?'}")
 
     _wait_for_flush(url)
@@ -185,6 +200,7 @@ def main() -> None:
             "\nАлертов не появилось. Проверь:\n"
             "  - rules_windows_merged.json добавлен ЦЕЛИКОМ в основной рулсет (шаг 1);\n"
             "  - кастомное правило из докстрайна сохранено И добавлено в основной рулсет (шаги 2-3);\n"
+            f"  - источник с именем {source!r} создан в UI, --token соответствует ему и он включён;\n"
             "  - сервис вообще запущен и /ingest/stream доступен."
         )
         sys.exit(1)

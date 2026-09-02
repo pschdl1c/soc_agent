@@ -18,16 +18,23 @@ EventTime, см. docs/forwarder.md) - проходит весь пайплайн
 не только саму очередь. source specifically помечен "fake-*", чтобы легко отличить
 от настоящих батчей в UI и почистить отдельно.
 
+/ingest/stream требует токен зарегистрированного источника (вкладка «Источник данных» ->
+«Создать источник»): заголовок Authorization: Bearer <token>. Токен передаётся флагом
+--token либо через переменную окружения SIEM_INGEST_TOKEN. Метку источника (source_batch)
+задаёт сам источник по токену - параметр --source остался только для подписи в выводе и
+должен совпадать с именем созданного источника, если хотите чистить его через UI.
+
 Примеры:
-    python scripts/fake_forwarder.py burst --count 1200 --source fake-burst
-    python scripts/fake_forwarder.py drip --rate 2 --duration 30 --source fake-drip
-    python scripts/fake_forwarder.py drip --rate 1                 # без --duration - бесконечно, Ctrl+C для остановки
-    python scripts/fake_forwarder.py burst --count 150000 --chunk 2000   # проверка backpressure/переполнения очереди
+    SIEM_INGEST_TOKEN=... python scripts/fake_forwarder.py burst --count 1200 --source fake-burst
+    python scripts/fake_forwarder.py drip --rate 2 --duration 30 --token <token> --source fake-drip
+    python scripts/fake_forwarder.py drip --rate 1 --token <token>   # без --duration - бесконечно, Ctrl+C
+    python scripts/fake_forwarder.py burst --count 150000 --chunk 2000 --token <token>   # backpressure/переполнение очереди
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -69,15 +76,16 @@ def _make_event(seq: int) -> dict:
     return event
 
 
-def _send(url: str, source: str, events: list[dict]) -> dict | None:
+def _send(url: str, token: str, events: list[dict]) -> dict | None:
     """POST одной NDJSON-порции. Возвращает распарсенный ответ или None при ошибке
-    (печатает причину и не роняет форвардер - ретраи форвардеру не нужны, это просто тест)."""
+    (печатает причину и не роняет форвардер - ретраи форвардеру не нужны, это просто тест).
+    Метку источника задаёт сам сервис по токену - ?source= больше не используется."""
     body = "\n".join(json.dumps(e, default=str) for e in events).encode("utf-8")
     req = urllib.request.Request(
-        f"{url}/ingest/stream?{urllib.parse.urlencode({'source': source})}",
+        f"{url}/ingest/stream",
         data=body,
         method="POST",
-        headers={"Content-Type": "application/x-ndjson"},
+        headers={"Content-Type": "application/x-ndjson", "Authorization": f"Bearer {token}"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -113,7 +121,7 @@ def cmd_burst(args: argparse.Namespace) -> None:
     while sent < args.count:
         chunk = [_make_event(seq + i) for i in range(min(args.chunk, args.count - sent))]
         seq += len(chunk)
-        res = _send(args.url, args.source, chunk)
+        res = _send(args.url, args.token, chunk)
         sent += len(chunk)
         print(f"[{sent}/{args.count}] отправлено, queued={res.get('queued') if res else '?'}")
         _print_queue_status(args.url)
@@ -131,7 +139,7 @@ def cmd_drip(args: argparse.Namespace) -> None:
     t0 = time.monotonic()
     try:
         while args.duration <= 0 or (time.monotonic() - t0) < args.duration:
-            res = _send(args.url, args.source, [_make_event(seq)])
+            res = _send(args.url, args.token, [_make_event(seq)])
             seq += 1
             elapsed = time.monotonic() - t0
             print(f"[{elapsed:6.1f}с] отправлено {seq}, queued={res.get('queued') if res else '?'}")
@@ -146,21 +154,28 @@ def cmd_drip(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", default=DEFAULT_URL, help=f"базовый URL сервиса (default: {DEFAULT_URL})")
+    parser.add_argument(
+        "--token", default=os.environ.get("SIEM_INGEST_TOKEN"),
+        help="токен зарегистрированного источника (или переменная окружения SIEM_INGEST_TOKEN)",
+    )
     sub = parser.add_subparsers(dest="mode", required=True)
 
     p_burst = sub.add_parser("burst", help="отправить N событий разом, порциями - проверка size-trigger флаша")
     p_burst.add_argument("--count", type=int, default=1200, help="сколько событий отправить всего (default: 1200)")
     p_burst.add_argument("--chunk", type=int, default=100, help="сколько событий в одном HTTP-запросе (default: 100)")
-    p_burst.add_argument("--source", default="fake-burst", help="метка источника (?source=)")
+    p_burst.add_argument("--source", default="fake-burst", help="имя созданного источника - только для подписи в выводе")
     p_burst.set_defaults(func=cmd_burst)
 
     p_drip = sub.add_parser("drip", help="слать события медленно и долго - проверка time-trigger флаша")
     p_drip.add_argument("--rate", type=float, default=2.0, help="событий в секунду (default: 2.0)")
     p_drip.add_argument("--duration", type=float, default=30.0, help="сколько секунд слать, 0 = бесконечно (default: 30)")
-    p_drip.add_argument("--source", default="fake-drip", help="метка источника (?source=)")
+    p_drip.add_argument("--source", default="fake-drip", help="имя созданного источника - только для подписи в выводе")
     p_drip.set_defaults(func=cmd_drip)
 
     args = parser.parse_args()
+    if not args.token:
+        parser.error("нужен --token (или переменная окружения SIEM_INGEST_TOKEN): "
+                     "создайте источник во вкладке «Источник данных» и возьмите его токен")
     args.func(args)
 
 

@@ -175,6 +175,56 @@ selection:
 ```
 Wildcards `*` и `?` поддерживаются нативно в значениях без модификаторов (`Image: '*\temp\*.exe'`).
 
+### 4.5. Именованные списки значений (`%name%` + `|expand`)
+
+Длинные перечни (утилиты recon, LOLBIN-бинарники, известные плохие хеши) не нужно копировать
+в каждое правило — они выносятся в **именованный список** и подставляются плейсхолдером:
+
+```yaml
+detection:
+  selection_image:
+    Image|endswith|expand:
+      - '%recon_binaries%'
+  selection_cli:
+    CommandLine|windash|contains|expand: '%recon_flags%'
+  condition: selection_image and selection_cli
+```
+
+- Список создаётся/правится во вкладке **«Списки»** UI (или через `POST/PUT /value-lists`),
+  хранится в `data/value_lists/<name>.yml` (`name` = имя плейсхолдера, `[A-Za-z0-9_]{1,64}`).
+- **Загрузка файлом** (вкладка «Списки» → «+ Загрузить список», или `POST /value-lists/upload`).
+  Форматы YAML:
+    - Sigma processing-pipeline — трансформация `value_placeholders` (или
+      `query_expansion_placeholders`) с блоком `mapping: {имя: [значения]}`. Один файл может
+      задавать несколько списков:
+      ```yaml
+      name: Recon value lists
+      transformations:
+        - type: value_placeholders
+          mapping:
+            recon_binaries: [/usr/bin/whoami, /usr/bin/netstat]
+            recon_flags:    ['-a', '-n']
+      ```
+    - наш формат `{name, description?, values: [...]}` (в т.ч. multi-document через `---`);
+    - «голый» словарь `{имя: [значения], ...}`.
+  `mode` = `create` (не трогать существующие) | `replace` | `merge` (объединить значения).
+  Те же документы-списки можно **подмешать в файл `+ Загрузить рулсет`** (Sigma-правила):
+  documents-списки распознаются строго (только pipeline `value_placeholders` или `{name, values}`),
+  пишутся ПЕРВЫМИ, правила пака компилируются уже с их значениями.
+- `|expand` — последний модификатор в цепочке; значение вида `%name%` (целиком) заменяется
+  **при компиляции** на все значения списка с OR-семантикой, `expand` из цепочки убирается.
+  Остальные модификаторы (`endswith`, `windash`, …) сохраняются. Можно смешивать плейсхолдер
+  с явными значениями в одном списке.
+- На диске правило хранится с `%name%` (source of truth) — **списки живые**: правка списка
+  сразу пересобирает все правила, которые на него ссылаются.
+- Неизвестный плейсхолдер или пустой список → ошибка компиляции правила с внятным текстом.
+- **Только кастомные правила.** Встроенные рулсеты (`Zircolite/rules/*.json`) приходят уже
+  скомпилированными в SQL — плейсхолдеры в них не работают.
+- v1: поддержана только запись целиком `%name%` (встроенные `foo%name%bar` — нет).
+
+Реализация — свой разворот текста до компиляции (`app/value_lists.py`), не через
+`pysigma ValuePlaceholderTransformation` (Zircolite не даёт воткнуть свой pipeline).
+
 ---
 
 ## 5. Correlation rules — корреляция между событиями/правилами

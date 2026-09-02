@@ -9,6 +9,18 @@ from app.fields import INGEST_SOURCE_FIELD
 from app.normalize import _dedup_key, _pick_sample_events, zircolite_results_to_alerts
 
 
+def test_alert_created_at_is_naive_utc():
+    """Контракт формата времени алерта: Alert.created_at должен быть НАИВНЫМ (без tzinfo),
+    а его .isoformat() - без суффикса 'Z'/'+00:00'. store.list_alerts сравнивает/сортирует
+    его строкой с наивными границами из UI; aware-объект (или переход обратно на deprecated
+    datetime.utcnow) этот контракт нарушит. См. app/models.py:utcnow_naive."""
+    matches = [{"Hostname": "HOST-A"}]
+    alert = zircolite_results_to_alerts([_rule(matches)], default_source_batch="batch-1")[0]
+    assert alert.created_at.tzinfo is None
+    iso = alert.created_at.isoformat()
+    assert "+" not in iso and not iso.endswith("Z")
+
+
 def _rule(matches: list[dict], **overrides) -> dict:
     base = {
         "id": "rule-1",

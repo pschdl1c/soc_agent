@@ -67,7 +67,8 @@ AI-агент расследования — следующий этап (см. 
 | SQLite | хранилище (`siem.db`, WAL-режим) + in-memory SQLite внутри Zircolite на каждый батч |
 | Frontend | один статический файл `app/static/index.html`, ванильный JS без сборки |
 
-Версии зафиксированы в [`requirements.txt`](./requirements.txt) (+ [`requirements-dev.txt`](./requirements-dev.txt) для тестов).
+Версии зафиксированы в [`pyproject.toml`](./pyproject.toml) (секция `[project].dependencies`;
+dev-инструменты — `[project.optional-dependencies].dev`).
 
 ## Установка
 
@@ -78,9 +79,9 @@ cd soc_agent
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+pip install .
 # для разработки/тестов:
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 ```
 
 Также нужен клон **Zircolite** рядом (используется как библиотека, не как pip-пакет):
@@ -188,11 +189,11 @@ docker compose up -d --build
 ## Тесты
 
 ```powershell
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 pytest
 ```
 
-Мини-набор в `tests/` (pytest, конфигурация — `pytest.ini`): unit-тесты `engine.py` (кэш
+Мини-набор в `tests/` (pytest, конфигурация — `pyproject.toml` `[tool.pytest.ini_options]`): unit-тесты `engine.py` (кэш
 скомпилированного рулсета, матчинг правил), `normalize.py` (группировка алертов по хост+источник,
 dedup-ключ, entities) и `store.py` (upsert/дедуп, фильтр/группировка событий, удаление батча,
 health), плюс один e2e-тест на весь пайплайн ingest → детект → alert/event storage. Все тесты
@@ -323,11 +324,12 @@ soc_agent/
 
 | Метод | Путь | Назначение |
 |-------|------|-----------|
-| POST | `/ingest/stream` | Потоковый приём с форвардеров (NDJSON/JSON-массив), 202 → очередь → микро-батч |
-| POST | `/ingest/file` | Прогон файла на диске сервера |
-| POST | `/ingest/events` | Синхронный прогон порции сырых событий из тела запроса |
-| POST | `/ingest/upload` | Загрузка файла из браузера (multipart) |
-| GET/DELETE | `/batches` | Сводка по источникам / удаление источника целиком |
+| POST | `/ingest/stream` | Потоковый приём с форвардеров (NDJSON/JSON-массив), 202 → очередь → микро-батч. **Требует токен источника** (`Authorization: Bearer`) |
+| POST | `/ingest/file` | Прогон файла на диске сервера (без токена) |
+| POST | `/ingest/events` | Синхронный прогон порции сырых событий из тела запроса. **Требует токен источника** |
+| POST | `/ingest/upload` | Загрузка файла из браузера (multipart, без токена) |
+| GET/POST/PATCH/DELETE | `/sources`, `/sources/{id}` | Реестр потоковых источников: регистрация (имя + одноразовый токен), перевыпуск (`/rotate`), вкл/выкл, снятие регистрации |
+| GET/DELETE | `/batches` | Сводка по загруженным меткам `source_batch` / удаление всех данных метки |
 | GET/PATCH | `/alerts` | Список, карточка, смена статуса алерта |
 | GET | `/events`, `/events/group` | Список/карточка событий, агрегаторы для группировки |
 | GET | `/rulesets`, `/rulesets/rules`, `/rulesets/rule` | Каталог рулсетов и правил |
@@ -340,11 +342,17 @@ Swagger UI со всеми схемами запросов/ответов — ht
 
 ## Потоковый ingest с форвардеров
 
-`POST /ingest/stream` принимает NDJSON или JSON-массив событий (`?source=<имя>`), кладёт их в
-очередь и сразу отвечает `202 Accepted` — фоновый воркер (`app/ingest_queue.py`) флашит буфер по
-правилу «N событий ИЛИ T секунд» (`SIEM_INGEST_BATCH_SIZE`=500, `SIEM_INGEST_FLUSH_INTERVAL`=5.0,
+`POST /ingest/stream` принимает NDJSON или JSON-массив событий, кладёт их в очередь и сразу
+отвечает `202 Accepted` — фоновый воркер (`app/ingest_queue.py`) флашит буфер по правилу
+«N событий ИЛИ T секунд» (`SIEM_INGEST_BATCH_SIZE`=500, `SIEM_INGEST_FLUSH_INTERVAL`=5.0,
 настраиваются переменными окружения). Рулсет для этого пути не выбирается per-request — всегда
 «основной рулсет» (`app/main_ruleset.py`).
+
+Каждый источник аутентифицируется bearer-токеном: вкладка **«Источник данных» → «Создать
+источник»** (имя обязательно и уникально — оно же метка `source_batch`), токен показывается
+один раз (в БД — только sha256). Форвардер шлёт его в заголовке `Authorization: Bearer <token>`
+(или `X-Ingest-Token`); запрос без валидного токена активного источника отклоняется `401`.
+То же требование у `POST /ingest/events`. Локальные `/ingest/file` и `/ingest/upload` — без токена.
 
 Протокол и примеры конфигурации форвардеров — в [`docs/forwarder.md`](./docs/forwarder.md).
 
@@ -366,7 +374,7 @@ Swagger UI со всеми схемами запросов/ответов — ht
 
 ## Хранилище данных
 
-SQLite (`siem.db`), WAL-режим, две таблицы:
+SQLite (`siem.db`), WAL-режим:
 
 - **`alerts`** — нормализованные алерты. Дедуп по `dedup_key = sha256(rule_id:host:main_entity)[:16]`
   — повторное срабатывание инкрементит `event_count`, а не создаёт новый алерт.
@@ -374,6 +382,8 @@ SQLite (`siem.db`), WAL-режим, две таблицы:
   `is_matched` и списком `matched_rules` — нужны для ручного пивота и будущего RAG-агента.
 - **`rule_hits`** — леджер для стейтфул-корреляции (`app/correlation.py`, см. ниже) — какие
   события матчили какое правило когда, индексирован для быстрой выборки по временному окну.
+- **`sources`** — реестр потоковых источников: имя (уникально, оно же метка `source_batch`),
+  sha256 токена, флаг активности. Аутентифицирует `/ingest/stream` и `/ingest/events`.
 
 Раздельные read/write SQLite-соединения (читатели не блокируют ingest-воркер и наоборот) плюс
 expression-индекс на `EventID` для быстрой фильтрации/группировки по этому «горячему» полю —
@@ -395,7 +405,9 @@ expression-индекс на `EventID` для быстрой фильтраци�
 
 ## Вспомогательные скрипты
 
-`scripts/` — не часть приложения, для ручной проверки:
+`scripts/` — не часть приложения, для ручной проверки. Скрипты, шлющие в `/ingest/stream`,
+требуют токен источника: `--token <token>` или переменная `SIEM_INGEST_TOKEN` (сначала создайте
+источник во вкладке «Источник данных»; по умолчанию под именем `SOURCE_LABEL` скрипта, иначе `--source`).
 
 | Скрипт | Назначение |
 |---|---|
@@ -411,7 +423,7 @@ expression-индекс на `EventID` для быстрой фильтраци�
 
 | Этап | Статус | Суть |
 |---|---|---|
-| 0. Гигиена проекта | ✅ | `requirements.txt`/`requirements-dev.txt`, `.gitignore`, git-инициализация, pytest (`tests/`), `.env`-конфиг (`app/config.py`) |
+| 0. Гигиена проекта | ✅ | `pyproject.toml` (deps + dev + pytest + ruff), `.gitignore`, git-инициализация, pytest (`tests/`), `.env`-конфиг (`app/config.py`) |
 | 1. Архитектура SIEM | 🟡 | Ingest → детект → хранение готовы; стейтфул-корреляция (`event_count`/`value_count`) готова, `temporal`/цепочки — нет; впереди — точная привязка entity, MITRE-обогащение, инциденты |
 | 2. UI SIEM | 🟡 | Алерты/События/Sigma-правила готовы; впереди — дашборд, триаж-воркфлоу, живое обновление, аутентификация |
 | 3. Ingest и нормализация | 🟡 | Потоковый ingest и управление рулсетами готовы; впереди — версионирование правил |
