@@ -1,5 +1,5 @@
 """
-Тесты app/value_lists.py: CRUD списков и разворот Sigma-плейсхолдеров `%name%` / `|expand`
+Тесты app/rules/value_lists.py: CRUD списков и разворот Sigma-плейсхолдеров `%name%` / `|expand`
 до компиляции. Чистый модуль - реальный data/value_lists не трогаем, VALUE_LISTS_ROOT
 переставляется на tmp_path фикстурой.
 """
@@ -8,8 +8,8 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from app import value_lists
-from app.value_lists import ValueListError
+from app.rules import value_lists
+from app.rules.value_lists import ValueListError
 
 
 @pytest.fixture(autouse=True)

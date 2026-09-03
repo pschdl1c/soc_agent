@@ -3396,6 +3396,11 @@ async function selectKbTechnique(tid) {
   box.style.opacity = "0.45";
   try {
     const t = await api("/kb/mitre/techniques/" + encodeURIComponent(tid));
+    // MITRE-тексты содержат (Citation: …) и markdown-ссылки [text](url) — чистим до escapeHtml.
+    const mdClean = (s) => String(s || "")
+      .replace(/\(Citation:[^)]*\)/g, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/<\/?code>/g, "").trim();
     const chips = (arr) => (arr && arr.length)
       ? arr.map(x => `<span class="tech-tag">${escapeHtml(x)}</span>`).join(" ")
       : '<span class="muted">—</span>';
@@ -3406,6 +3411,36 @@ async function selectKbTechnique(tid) {
     const subs = (t.subtechniques || []).length
       ? t.subtechniques.map(s => `<span class="tech-tag" style="cursor:pointer;" onclick="selectKbTechnique('${escapeAttr(s.technique_id)}')">${escapeHtml(s.technique_id)} ${escapeHtml(s.name)}</span>`).join(" ")
       : '<span class="muted">—</span>';
+
+    // Обнаружение: структурные стратегии + аналитики (ATT&CK v18+). Фолбэк на legacy-текст.
+    const strat = t.detection_strategies || [];
+    const detHtml = strat.length
+      ? strat.map(s => `
+          <div style="margin:4px 0 10px 0;">
+            <div style="font-weight:600; font-size:12px;">${escapeHtml(s.name)} <span class="muted" style="font-weight:400; font-family:var(--mono);">${escapeHtml(s.strategy_id)}</span></div>
+            ${(s.analytics || []).map(a => `
+              <div style="margin:6px 0 6px 10px; border-left:2px solid var(--border); padding-left:8px;">
+                <div class="muted" style="font-family:var(--mono); font-size:10px;">${escapeHtml(a.analytic_id)}${(a.platforms||[]).length ? " · " + a.platforms.map(escapeHtml).join(", ") : ""}</div>
+                <div style="font-size:12px; margin:2px 0;">${escapeHtml(mdClean(a.description)) || "—"}</div>
+                ${(a.log_sources||[]).length ? `<div>${a.log_sources.map(ls => `<span class="tech-tag">${escapeHtml(ls.name)}${ls.channel ? " · " + escapeHtml(ls.channel) : ""}</span>`).join(" ")}</div>` : ""}
+                ${(a.mutable_elements||[]).length ? `<div class="muted" style="font-size:11px; margin-top:3px;">Тюнинг: ${a.mutable_elements.map(m => escapeHtml(m.field)).join(", ")}</div>` : ""}
+              </div>`).join("")}
+          </div>`).join("")
+      : `<pre class="json-block">${escapeHtml(mdClean(t.detection)) || "—"}</pre>`;
+
+    // Примеры применения (procedure examples) — кто и как использовал технику.
+    const procs = t.procedures || [];
+    const PROC_MAX = 20;
+    const typeLabel = { group: "группа", malware: "malware", tool: "tool" };
+    const procHtml = procs.length
+      ? procs.slice(0, PROC_MAX).map(p => `
+          <div style="margin:6px 0; font-size:12px;">
+            <b>${escapeHtml(p.source_id)} · ${escapeHtml(p.source_name)}</b>
+            <span class="muted">${escapeHtml(typeLabel[p.source_type] || p.source_type)}</span><br>
+            ${escapeHtml(mdClean(p.description))}
+          </div>`).join("") + (procs.length > PROC_MAX ? `<div class="muted" style="font-size:11px;">…показано ${PROC_MAX} из ${procs.length}</div>` : "")
+      : '<p class="muted">—</p>';
+
     box.innerHTML = `
       <h3>${escapeHtml(t.technique_id)} · ${escapeHtml(t.name)}</h3>
       <p class="muted" style="word-break:break-all;">${t.url ? `<a href="${attr(t.url)}" target="_blank" rel="noopener">${escapeHtml(t.url)}</a>` : ""}</p>
@@ -3413,14 +3448,14 @@ async function selectKbTechnique(tid) {
       <div class="kv"><span>Тип</span><span>${t.is_subtechnique ? "сабтехника" : "техника"}${t.parent_id ? " (" + escapeHtml(t.parent_id) + ")" : ""}</span></div>
       <p class="panel-title" style="margin-top:12px;">Платформы</p>
       <div>${chips(t.platforms)}</div>
-      <p class="panel-title" style="margin-top:12px;">Источники данных</p>
-      <div>${chips(t.data_sources)}</div>
       <p class="panel-title" style="margin-top:12px;">Описание</p>
-      <pre class="json-block">${escapeHtml(t.description || "—")}</pre>
+      <pre class="json-block">${escapeHtml(mdClean(t.description)) || "—"}</pre>
       <p class="panel-title" style="margin-top:12px;">Обнаружение</p>
-      <pre class="json-block">${escapeHtml(t.detection || "—")}</pre>
+      ${detHtml}
       <p class="panel-title" style="margin-top:12px;">Митигации</p>
       ${mit}
+      <p class="panel-title" style="margin-top:12px;">Примеры применения (${procs.length})</p>
+      ${procHtml}
       <p class="panel-title" style="margin-top:12px;">Сабтехники</p>
       <div>${subs}</div>
     `;

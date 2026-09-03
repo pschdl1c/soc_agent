@@ -1,6 +1,6 @@
 """
 Тестовый форвардер для проверки потокового ingest (POST /ingest/stream + IngestWorker,
-см. app/ingest_queue.py и docs/forwarder.md). Генерирует синтетические события и шлёт их
+см. app/ingest_queue.py и docs/guide/forwarder.md). Генерирует синтетические события и шлёт их
 в очередь, печатая после каждой порции текущее состояние воркера (GET /health?detailed=true
 -> checks.ingest_queue) - видно queue_size/worker_alive без второго терминала.
 
@@ -14,7 +14,7 @@
             таймауту (SIEM_INGEST_FLUSH_INTERVAL, дефолт 5с), даже не набрав полный батч.
 
 Событие сгенерировано в духе того, что реально шлют форвардеры (Hostname/EventID/Channel/
-EventTime, см. docs/forwarder.md) - проходит весь пайплайн ingest -> Zircolite -> store,
+EventTime, см. docs/guide/forwarder.md) - проходит весь пайплайн ingest -> Zircolite -> store,
 не только саму очередь. source specifically помечен "fake-*", чтобы легко отличить
 от настоящих батчей в UI и почистить отдельно.
 

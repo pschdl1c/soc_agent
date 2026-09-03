@@ -1,5 +1,5 @@
 r"""
-Проверка стейтфул-корреляции (app/correlation.py) через ПОТОКОВЫЙ ingest (/ingest/stream +
+Проверка стейтфул-корреляции (app/detection/correlation.py) через ПОТОКОВЫЙ ingest (/ingest/stream +
 IngestWorker, app/ingest_queue.py) - конкретно то, что раньше не работало: временное окно
 correlation-правила (`timespan: 5m`) шире одного micro-batch flush'а (SIEM_INGEST_FLUSH_INTERVAL,
 дефолт 5с). Скрипт шлёт 10 событий EventID=4625 (провал аутентификации) с одним IpAddress/
@@ -10,7 +10,7 @@ in-memory Zircolite-БД одного батча) события, а не тол
 
 Только форвард событий - правило (`artifacts/content/windows_bruteforce.yml`) нужно ЗАГРУЗИТЬ И
 ДОБАВИТЬ В ОСНОВНОЙ РУЛСЕТ САМОСТОЯТЕЛЬНО (вкладка «Sigma-правила») ДО запуска - именно основной
-рулсет по умолчанию обрабатывает /ingest/stream (app/main_ruleset.py). Скрипт этим не занимается
+рулсет по умолчанию обрабатывает /ingest/stream (app/rules/main_ruleset.py). Скрипт этим не занимается
 и ничего не пишет в custom_rulesets.
 
 Как пользоваться:
@@ -131,7 +131,7 @@ def main() -> None:
     step = timedelta(seconds=40 if args.negative else 20)
 
     # IP/юзер/хост РАНДОМИЗИРУЮТСЯ на каждый прогон (не фиксированные константы) - иначе
-    # alerts.dedup_key = sha256(rule_id:host:main_entity) (см. app/normalize.py, НЕ включает
+    # alerts.dedup_key = sha256(rule_id:host:main_entity) (см. app/detection/normalize.py, НЕ включает
     # source_batch) коллизирует между прогонами скрипта и обычные (не-correlation) алерты просто
     # инкрементят event_count у алерта ПЕРВОГО прогона вместо создания под новым source_batch -
     # см. предупреждение в CLAUDE.md "При ручном тестировании alert-дедупликации". Сама

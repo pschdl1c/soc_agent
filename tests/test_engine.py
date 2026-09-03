@@ -1,11 +1,11 @@
 """
-Тесты ZircoliteEngine (app/engine.py): кэширование скомпилированного рулсета,
+Тесты ZircoliteEngine (app/detection/engine.py): кэширование скомпилированного рулсета,
 run_batch отдаёт и raw_results (сработавшие правила), и all_events (ВСЕ события батча),
 health()/invalidate() отражают состояние кэша.
 """
 from __future__ import annotations
 
-from app.engine import ZircoliteEngine
+from app.detection.engine import ZircoliteEngine
 
 
 def test_run_batch_matches_only_expected_events(zircolite_config_path, test_ruleset_path, test_events_path):

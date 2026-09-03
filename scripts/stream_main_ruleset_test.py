@@ -1,5 +1,5 @@
 r"""
-Проверка "Основного рулсета" (app/main_ruleset.py) через ПОТОКОВЫЙ ingest (POST /ingest/stream +
+Проверка "Основного рулсета" (app/rules/main_ruleset.py) через ПОТОКОВЫЙ ingest (POST /ingest/stream +
 IngestWorker, см. app/ingest_queue.py) - именно этот путь до недавнего времени не давал выбрать
 ruleset вообще и всегда бил в дефолтный движковый rules_windows_merged.json; теперь он ВСЕГДА
 использует main ruleset (см. _process_events в app/main.py). Скрипт шлёт NDJSON-события двумя
@@ -29,7 +29,7 @@ ruleset вообще и всегда бил в дефолтный движков
     6. Проверь вкладку "Алерты" с source_batch, который скрипт напечатает - должны быть алерты
        и на builtin-правило (Mimikatz), и на кастомное (Certutil). Если основной рулсет ещё
        пуст/не настроен по шагам 1-3 - алертов не будет вообще (стрим больше не использует
-       rules_windows_merged.json напрямую, см. app/main_ruleset.py).
+       rules_windows_merged.json напрямую, см. app/rules/main_ruleset.py).
 
 Кастомное правило (Sigma YAML, вставить в UI как есть):
 

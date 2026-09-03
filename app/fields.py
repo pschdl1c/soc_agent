@@ -14,7 +14,7 @@ PROCESS_FIELDS = ["Image", "NewProcessName", "CommandLine", "exe"]
 TIME_FIELDS = ["SystemTime", "EventTime", "@timestamp", "timestamp", "EventReceivedTime"]
 
 # Служебный маркер источника, временно вписываемый в JSON события перед прогоном через движок
-# (см. app/main.py:_process_events/_split_events_by_source, app/normalize.py) - нужен, чтобы
+# (см. app/main.py:_process_events/_split_events_by_source, app/detection/normalize.py) - нужен, чтобы
 # можно было слить события НЕСКОЛЬКИХ источников в один прогон Zircolite (амортизация
 # фиксированного оверхеда движка на батч, см. app/ingest_queue.py), но при этом не потерять,
 # из какого именно источника пришло каждое событие/алерт.

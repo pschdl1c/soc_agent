@@ -27,7 +27,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from app import main_ruleset, rules_catalog
+from app.rules import main_ruleset, rules_catalog
 from app.fields import (
     DST_IP_FIELDS,
     HOST_FIELDS,

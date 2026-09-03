@@ -1,5 +1,5 @@
 """
-Интеграция value lists <-> компиляция правил (app/rules_catalog.py): правило с
+Интеграция value lists <-> компиляция правил (app/rules/rules_catalog.py): правило с
 `%name%` / `|expand` реально компилируется в SQL, содержащий значения списка; неизвестный
 плейсхолдер даёт RuleValidationError (а не 500). Гоняет настоящий pySigma/RulesetHandler.
 """
@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from app import rules_catalog, value_lists
-from app.rules_catalog import RuleValidationError
+from app.rules import rules_catalog, value_lists
+from app.rules.rules_catalog import RuleValidationError
 
 
 @pytest.fixture(autouse=True)

@@ -11,15 +11,25 @@ from __future__ import annotations
 import json
 import tempfile
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from uuid import uuid4
+
+try:
+    # Единственный источник правды — [project].version в pyproject.toml (пакет ставится
+    # `pip install -e .` / `pip install .`). Фолбэк — на случай запуска из исходников без установки.
+    __version__ = _pkg_version("soc-agent")
+except PackageNotFoundError:  # pragma: no cover
+    __version__ = "0.4.0"
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from app import config
-from app import correlation
-from app.engine import ZircoliteEngine
+from app import config, kb
+from app.detection import correlation
+from app.detection.engine import ZircoliteEngine
+from app.detection.normalize import zircolite_results_to_alerts
 from app.fields import INGEST_SOURCE_FIELD
 from app.filter_lang import FilterSyntaxError, compile_filter_query
 from app.ingest_queue import IngestQueueFull, IngestWorker
@@ -37,13 +47,9 @@ from app.models import (
     ValueListCreate,
     ValueListUpdate,
 )
-from app.normalize import zircolite_results_to_alerts
-from app import kb
-from app import main_ruleset
-from app import rules_catalog
-from app.rules_catalog import CatalogError, RuleValidationError
-from app import value_lists
-from app.value_lists import ValueListError
+from app.rules import main_ruleset, rules_catalog, value_lists
+from app.rules.rules_catalog import CatalogError, RuleValidationError
+from app.rules.value_lists import ValueListError
 from app.store import Store
 
 BASE_DIR = config.BASE_DIR
@@ -108,7 +114,7 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
     elif ruleset_path and ruleset_path.startswith("custom_rulesets/"):
         # Кастомные рулсеты гоняем по УЖЕ скомпилированному .manifest.json
         # (rules_catalog.load_rules), а не пересборкой сырых .yml в RulesetHandler: только в
-        # манифесте плейсхолдеры value lists (%name% / |expand, см. app/value_lists.py) уже
+        # манифесте плейсхолдеры value lists (%name% / |expand, см. app/rules/value_lists.py) уже
         # развёрнуты - RulesetHandler, глядя на сырой .yml с %name%, молча уронил бы такое
         # правило (0 правил в рулсете). Freshness манифеста держит mtime-кэш rules_catalog.
         try:
@@ -127,7 +133,7 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
     # Названия правил, за которыми следит хотя бы одна активная correlation-запись этого
     # ruleset_path - считается один раз на весь батч (дёшево, читает уже скомпилированные
     # правила через кэш rules_catalog), передаётся в store_events, чтобы rule_hits (леджер для
-    # app/correlation.py) не разрастался на КАЖДОЕ сработавшее правило, только на нужные.
+    # app/detection/correlation.py) не разрастался на КАЖДОЕ сработавшее правило, только на нужные.
     hit_titles = correlation.active_base_rule_titles(ruleset_path)
     correlation_created = 0
     # Один прогон движка мог объединять НЕСКОЛЬКО реальных источников (см. _process_events) -
@@ -137,7 +143,7 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
             events_subset, source_batch=label, matched_row_to_rules=matched_map,
             hit_worthy_titles=hit_titles,
         )
-        # Стейтфул-корреляция (app/correlation.py) - переоценивается ПОСЛЕ каждого flush для
+        # Стейтфул-корреляция (app/detection/correlation.py) - переоценивается ПОСЛЕ каждого flush для
         # (правило, group-by-ключ) пар, реально затронутых ЭТИМ батчем (короткое замыкание
         # внутри evaluate_batch, если ни одно активное correlation-правило не ссылается на
         # сработавшее здесь правило - до БД дело не доходит вовсе). Окно считается по постоянной
@@ -205,7 +211,7 @@ async def lifespan(_app: FastAPI):
         ingest_worker.stop()
 
 
-app = FastAPI(title="Mini-SIEM Engine", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Mini-SIEM Engine", version=__version__, lifespan=lifespan)
 
 
 @app.get("/health")
@@ -743,7 +749,7 @@ def _recompile_for_value_lists(names: list[str]) -> dict:
 @app.get("/value-lists")
 def list_value_lists() -> list[dict]:
     """Именованные списки значений (плейсхолдеры %name% / |expand для Sigma-правил,
-    см. app/value_lists.py) - для вкладки «Списки». used_by_count считается одним проходом."""
+    см. app/rules/value_lists.py) - для вкладки «Списки». used_by_count считается одним проходом."""
     counts = rules_catalog.value_list_usage_counts()
     entries = value_lists.list_lists()
     for entry in entries:

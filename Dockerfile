@@ -41,7 +41,7 @@ pip install -r /tmp/requirements.txt
 SH
 
 # --- Zircolite — движок Sigma-детекта, подключается как БИБЛИОТЕКА из ./Zircolite
-# (не pip-пакет, см. app/engine.py и CLAUDE.md §2). Тег закреплён — воспроизводимая
+# (не pip-пакет, см. app/detection/engine.py и CLAUDE.md §2). Тег закреплён — воспроизводимая
 # сборка. Слой зависит только от ARG ZIRCOLITE_REF.
 ARG ZIRCOLITE_REF=v3.7.6
 RUN git clone --depth 1 --branch "${ZIRCOLITE_REF}" \

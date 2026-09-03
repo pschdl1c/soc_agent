@@ -4,8 +4,14 @@
 Запускается ОДИН РАЗ на этапе `docker build` (см. Dockerfile, builder-стадия) и вручную для
 локальной разработки:
 
+    python scripts/build_kb.py --out kb/kb.db                      # latest (master)
     python scripts/build_kb.py --out kb/kb.db --attack-version 15.1
     python scripts/build_kb.py --out kb/kb.db --from-file enterprise-attack.json   # офлайн
+
+Тянет: тактики, техники/сабтехники, митигации, а также (ATT&CK v18+) detection strategies +
+analytics (лог-сорс/канал/тюнинг) и procedure examples (`uses`: группа/софт -> техника + текст).
+NB: в v18 MITRE убрала из бандла свободный `x_mitre_detection`, плоский `x_mitre_data_sources`
+и `x_mitre_permissions_required` - на свежих версиях эти поля пустые, детект только структурный.
 
 Результат (`kb.db`) вшивается в образ read-only и НЕ монтируется как volume - обновление базы
 знаний = пересборка образа. Приложение открывает файл только на чтение через `app/kb.py`.
@@ -34,6 +40,8 @@ DEFAULT_URL_TEMPLATE = (
 _TECHNIQUE_ID_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$")
 _TACTIC_ID_RE = re.compile(r"^TA\d{4}$")
 _MITIGATION_ID_RE = re.compile(r"^M\d{4}$")
+_GROUP_ID_RE = re.compile(r"^G\d{4}$")
+_SOFTWARE_ID_RE = re.compile(r"^S\d{4}$")
 
 
 @dataclass
@@ -46,6 +54,12 @@ class ParsedKb:
     technique_tactic: list[tuple[str, str]] = field(default_factory=list)
     mitigations: list[dict] = field(default_factory=list)
     technique_mitigation: list[tuple[str, str]] = field(default_factory=list)
+    # Структурный детект (ATT&CK v18+): стратегия на технику + её аналитики (лог-сорс, канал,
+    # тюнинг-параметры). До v18 этих объектов нет - тогда списки просто пустые.
+    detection_strategies: list[dict] = field(default_factory=list)  # strategy_id, name, technique_id
+    analytics: list[dict] = field(default_factory=list)  # analytic_id, strategy_id, name, description, ...
+    # Procedure examples: кто (группа/софт) и как применял технику - текст из relationship `uses`.
+    procedures: list[dict] = field(default_factory=list)  # technique_id, source_id, source_name, source_type, description
 
 
 # --------------------------------------------------------------------------- fetch
@@ -91,6 +105,11 @@ def parse_bundle(objects: list[dict]) -> ParsedKb:
     # STIX-id -> ATT&CK external_id, чтобы разрешить target_ref/source_ref в relationship'ах.
     stixid_to_technique: dict[str, str] = {}
     stixid_to_mitigation: dict[str, str] = {}
+    # STIX-id софта/группы -> {id, name, type} для procedure examples (relationship `uses`).
+    stixid_to_source: dict[str, dict] = {}
+    # STIX-id стратегии детекта -> её сырой объект; STIX-id аналитики -> распарсенная запись.
+    strategy_raw: dict[str, dict] = {}
+    analytic_by_stixid: dict[str, dict] = {}
     # STIX-id тактики -> shortname (для порядка колонок матрицы из x-mitre-matrix).
     tacticstixid_to_shortname: dict[str, str] = {}
     matrix_order: list[str] = []
@@ -166,14 +185,99 @@ def parse_bundle(objects: list[dict]) -> ParsedKb:
                 }
             )
 
+        elif otype == "intrusion-set":
+            if _is_dead(obj):
+                continue
+            ext_id, _ = _mitre_ref(obj)
+            if _GROUP_ID_RE.match(ext_id):
+                stixid_to_source[obj.get("id", "")] = {
+                    "id": ext_id,
+                    "name": obj.get("name", ""),
+                    "type": "group",
+                }
+
+        elif otype in ("malware", "tool"):
+            if _is_dead(obj):
+                continue
+            ext_id, _ = _mitre_ref(obj)
+            if _SOFTWARE_ID_RE.match(ext_id):
+                stixid_to_source[obj.get("id", "")] = {
+                    "id": ext_id,
+                    "name": obj.get("name", ""),
+                    "type": otype,  # 'malware' | 'tool'
+                }
+
+        elif otype == "x-mitre-detection-strategy":
+            if _is_dead(obj):
+                continue
+            strategy_raw[obj.get("id", "")] = obj
+
+        elif otype == "x-mitre-analytic":
+            if _is_dead(obj):
+                continue
+            log_sources = [
+                {"name": ls.get("name", ""), "channel": ls.get("channel", "")}
+                for ls in obj.get("x_mitre_log_source_references", []) or []
+            ]
+            mutable = [
+                {"field": me.get("field", ""), "description": me.get("description", "") or ""}
+                for me in obj.get("x_mitre_mutable_elements", []) or []
+            ]
+            ext_id, _ = _mitre_ref(obj)
+            analytic_by_stixid[obj.get("id", "")] = {
+                "analytic_id": ext_id or obj.get("id", ""),
+                "name": obj.get("name", ""),
+                "description": obj.get("description", "") or "",
+                "platforms": list(obj.get("x_mitre_platforms", []) or []),
+                "log_sources": log_sources,
+                "mutable_elements": mutable,
+            }
+
     # relationship'и разрешаем вторым проходом - к этому моменту карты id заполнены целиком.
+    strategy_technique: dict[str, str] = {}  # STIX-id стратегии -> technique external_id
     for obj in objects:
-        if obj.get("type") != "relationship" or obj.get("relationship_type") != "mitigates":
+        if obj.get("type") != "relationship":
             continue
-        mit = stixid_to_mitigation.get(obj.get("source_ref", ""))
-        tech = stixid_to_technique.get(obj.get("target_ref", ""))
-        if mit and tech:
-            kb.technique_mitigation.append((tech, mit))
+        rtype = obj.get("relationship_type")
+        src, tgt = obj.get("source_ref", ""), obj.get("target_ref", "")
+
+        if rtype == "mitigates":
+            mit = stixid_to_mitigation.get(src)
+            tech = stixid_to_technique.get(tgt)
+            if mit and tech:
+                kb.technique_mitigation.append((tech, mit))
+
+        elif rtype == "detects" and src in strategy_raw:
+            tech = stixid_to_technique.get(tgt)
+            if tech:
+                strategy_technique[src] = tech
+
+        elif rtype == "uses":
+            source = stixid_to_source.get(src)
+            tech = stixid_to_technique.get(tgt)
+            if source and tech:
+                kb.procedures.append(
+                    {
+                        "technique_id": tech,
+                        "source_id": source["id"],
+                        "source_name": source["name"],
+                        "source_type": source["type"],
+                        "description": obj.get("description", "") or "",
+                    }
+                )
+
+    # Стратегии детекта + их аналитики - только те, что реально привязаны к технике через `detects`.
+    for sid, tech in strategy_technique.items():
+        strat = strategy_raw[sid]
+        ext_id, _ = _mitre_ref(strat)
+        strategy_id = ext_id or sid
+        kb.detection_strategies.append(
+            {"strategy_id": strategy_id, "name": strat.get("name", ""), "technique_id": tech}
+        )
+        for aref in strat.get("x_mitre_analytic_refs", []) or []:
+            a = analytic_by_stixid.get(aref)
+            if a:
+                kb.analytics.append({**a, "strategy_id": strategy_id})
 
     # Порядок колонок матрицы: индекс тактики в x-mitre-matrix.tactic_refs.
     order_by_shortname = {
@@ -195,6 +299,9 @@ def parse_bundle(objects: list[dict]) -> ParsedKb:
         "tactic_count": str(len(kb.tactics)),
         "technique_count": str(len(kb.techniques)),
         "mitigation_count": str(len(kb.mitigations)),
+        "detection_strategy_count": str(len(kb.detection_strategies)),
+        "analytic_count": str(len(kb.analytics)),
+        "procedure_count": str(len(kb.procedures)),
     }
     return kb
 
@@ -248,6 +355,36 @@ CREATE TABLE mitre_technique_mitigation (
     mitigation_id TEXT NOT NULL,
     PRIMARY KEY (technique_id, mitigation_id)
 );
+
+-- Структурный детект (ATT&CK v18+). До v18 пусто - тогда "Обнаружение" в карточке = прочерк.
+CREATE TABLE mitre_detection_strategy (
+    strategy_id  TEXT PRIMARY KEY,     -- DET#### (или STIX-id, если внешнего нет)
+    name         TEXT NOT NULL,
+    technique_id TEXT NOT NULL
+);
+CREATE INDEX idx_mitre_ds_tech ON mitre_detection_strategy(technique_id);
+
+CREATE TABLE mitre_analytic (
+    analytic_id      TEXT PRIMARY KEY, -- AN####
+    strategy_id      TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    description      TEXT NOT NULL DEFAULT '',
+    platforms        TEXT NOT NULL DEFAULT '[]',   -- JSON []
+    log_sources      TEXT NOT NULL DEFAULT '[]',   -- JSON [{"name","channel"}]
+    mutable_elements TEXT NOT NULL DEFAULT '[]'    -- JSON [{"field","description"}]
+);
+CREATE INDEX idx_mitre_analytic_strategy ON mitre_analytic(strategy_id);
+
+-- Procedure examples: <группа|софт> применял <технику> + текст.
+CREATE TABLE mitre_procedure (
+    technique_id TEXT NOT NULL,
+    source_id    TEXT NOT NULL,       -- G####/S####
+    source_name  TEXT NOT NULL,
+    source_type  TEXT NOT NULL,       -- 'group' | 'malware' | 'tool'
+    description  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (technique_id, source_id)
+);
+CREATE INDEX idx_mitre_proc_tech ON mitre_procedure(technique_id);
 """
 
 
@@ -302,6 +439,32 @@ def write_kb_db(path: str, kb: ParsedKb) -> None:
             "INSERT OR IGNORE INTO mitre_technique_mitigation(technique_id, mitigation_id) VALUES (?, ?)",
             kb.technique_mitigation,
         )
+        conn.executemany(
+            "INSERT OR IGNORE INTO mitre_detection_strategy(strategy_id, name, technique_id) "
+            "VALUES (:strategy_id, :name, :technique_id)",
+            kb.detection_strategies,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO mitre_analytic(analytic_id, strategy_id, name, description, "
+            "platforms, log_sources, mutable_elements) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    a["analytic_id"],
+                    a["strategy_id"],
+                    a["name"],
+                    a["description"],
+                    json.dumps(a["platforms"], ensure_ascii=False),
+                    json.dumps(a["log_sources"], ensure_ascii=False),
+                    json.dumps(a["mutable_elements"], ensure_ascii=False),
+                )
+                for a in kb.analytics
+            ],
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO mitre_procedure(technique_id, source_id, source_name, source_type, "
+            "description) VALUES (:technique_id, :source_id, :source_name, :source_type, :description)",
+            kb.procedures,
+        )
         conn.commit()
         conn.execute("VACUUM")
     finally:
@@ -355,7 +518,9 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"build_kb: готово -> {args.out} ({size_mb:.1f} МБ) | "
         f"версия {kb.meta['attack_version']}, тактик {kb.meta['tactic_count']}, "
-        f"техник {kb.meta['technique_count']}, митигаций {kb.meta['mitigation_count']}"
+        f"техник {kb.meta['technique_count']}, митигаций {kb.meta['mitigation_count']}, "
+        f"стратегий детекта {kb.meta['detection_strategy_count']}, "
+        f"аналитик {kb.meta['analytic_count']}, procedure-примеров {kb.meta['procedure_count']}"
     )
     return 0
 

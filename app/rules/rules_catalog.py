@@ -12,7 +12,7 @@
               участвует в детекте напрямую.
 
 Состав "основного рулсета" (main ruleset, ruleset_path == "main") - НЕ часть этого модуля,
-см. app/main_ruleset.py. Он лишь ссылается на рулсеты/правила, каталогизированные здесь
+см. app/rules/main_ruleset.py. Он лишь ссылается на рулсеты/правила, каталогизированные здесь
 (через load_rules()), поэтому зависимость однонаправленная: main_ruleset.py -> rules_catalog.py.
 Этот модуль ничего не знает о main_ruleset - "main" как ruleset_path сюда не пускаем.
 
@@ -35,7 +35,7 @@ Sigma correlation-правила (type: event_count/value_count/temporal/tempora
 ссылающейся на него), при компиляции этого правила ОТДЕЛЬНО backend возвращает сырую
 SQL-строку вместо dict, что валит компиляцию pySigma-стороны совсем (`'str' object has no
 attribute 'get'` в Zircolite при попытке отсортировать результат). Наш собственный
-correlation-движок (app/correlation.py) при этом вообще не использует SQL, который бы
+correlation-движок (app/detection/correlation.py) при этом вообще не использует SQL, который бы
 сгенерировал pySigma для корреляции - ему нужны только структурные поля (type/group-by/
 timespan/condition/rules) из raw YAML, которые он читает сам (load_correlation_rules ниже).
 Поэтому решение простое и радикальное: correlation-правила физически НИКОГДА не попадают в
@@ -63,9 +63,10 @@ from uuid import uuid4
 
 import yaml
 
-from app import value_lists
+from app.rules import value_lists
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+# файл лежит в app/rules/, до корня проекта — три уровня вверх
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 ZIRCOLITE_REPO_PATH = BASE_DIR / "Zircolite"
 if str(ZIRCOLITE_REPO_PATH) not in sys.path:
@@ -247,7 +248,7 @@ def paginate_rules(
     правило проходит, если его level/status (регистронезависимо) входит в список. None/пустой
     список - фильтр не применяется.
 
-    only_ids/in_main_fn - точки интеграции с "основным рулсетом" (app/main_ruleset.py),
+    only_ids/in_main_fn - точки интеграции с "основным рулсетом" (app/rules/main_ruleset.py),
     передаются СНАРУЖИ (main.py) предикатами/множеством id, а не импортом main_ruleset -
     этот модуль ничего не знает про main ruleset (см. докстринг модуля)."""
     if q:
@@ -314,7 +315,7 @@ def get_rule(ruleset_path: str, rule_id: str) -> dict[str, Any] | None:
 
 def load_correlation_rules(ruleset_path: str) -> list[dict[str, Any]]:
     """Структурированные описания correlation-правил (Sigma type: event_count/value_count/
-    temporal/temporal_ordered) одного custom-рулсета - для app/correlation.py (свой движок
+    temporal/temporal_ordered) одного custom-рулсета - для app/detection/correlation.py (свой движок
     поверх постоянной таблицы events/rule_hits, а не через pysigma-backend-sqlite - см.
     докстринг модуля про причину и CORRELATION_EXT). Builtin-рулсеты никогда не содержат
     correlation-правил (проверено на всех Zircolite/rules/*.json) - для них всегда [].
@@ -669,7 +670,7 @@ def compile_custom_rule(
         _validate_correlation_doc(first_doc)
         return _compile_correlation_doc(first_doc)
 
-    # Разворот именованных списков значений (%name% / |expand, см. app/value_lists.py) ДО
+    # Разворот именованных списков значений (%name% / |expand, см. app/rules/value_lists.py) ДО
     # компиляции - дальше pySigma/Zircolite плейсхолдер не видят. На диск пишется исходный
     # yaml_text с %name% (source of truth), это - только для компиляции.
     try:

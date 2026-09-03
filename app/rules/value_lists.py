@@ -11,13 +11,13 @@ Sigma-плейсхолдера `%name%` + модификатора `|expand`.
 через вкладку "Списки" в UI. Перед компиляцией правила плейсхолдер разворачивается в обычный
 Sigma-список значений (OR-семантика), модификатор `expand` убирается - дальше правило
 компилируется штатным путём, pySigma/Zircolite плейсхолдер вообще не видят (см.
-app/rules_catalog.py:compile_custom_rule/compile_ruleset_yaml).
+app/rules/rules_catalog.py:compile_custom_rule/compile_ruleset_yaml).
 
 Почему разворачиваем САМИ, а не через pysigma ValuePlaceholderTransformation: Zircolite
 (RulesetHandler.sigma_rules_to_ruleset) жёстко собирает ProcessingPipeline из имён
 установленных pipeline-плагинов, воткнуть свой ProcessingPipeline с динамическим mapping в
 его публичный API нельзя без форка. Разворот текста ДО компиляции - тот же принцип "свой
-маленький парсер без внешней зависимости", что и у app/filter_lang.py / app/correlation.py.
+маленький парсер без внешней зависимости", что и у app/filter_lang.py / app/detection/correlation.py.
 
 На диске правило хранится с `%name%` (source of truth) - списки "живые": правка списка
 влечёт пересборку зависимых правил (см. rules_catalog.recompile_rules_for_value_list,
@@ -37,9 +37,10 @@ from typing import Any, NamedTuple
 
 import yaml
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+# файл лежит в app/rules/, до корня проекта — три уровня вверх
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 # data/ - тот же общий корень runtime-данных, что и custom_rulesets/uploads (см.
-# app/rules_catalog.py:CUSTOM_ROOT, docker-compose.yml). Под Docker монтируется volume-ом.
+# app/rules/rules_catalog.py:CUSTOM_ROOT, docker-compose.yml). Под Docker монтируется volume-ом.
 VALUE_LISTS_ROOT = BASE_DIR / "data" / "value_lists"
 VALUE_LISTS_ROOT.mkdir(parents=True, exist_ok=True)
 

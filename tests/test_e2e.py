@@ -6,8 +6,8 @@ production-путей из app/config.py - siem.db и полный дефолт�
 """
 from __future__ import annotations
 
-from app.engine import ZircoliteEngine
-from app.normalize import zircolite_results_to_alerts
+from app.detection.engine import ZircoliteEngine
+from app.detection.normalize import zircolite_results_to_alerts
 
 
 def _build_matched_row_map(raw_results: list[dict]) -> dict[int, list[str]]:

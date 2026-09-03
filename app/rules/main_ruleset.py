@@ -1,6 +1,6 @@
 """
 Состав "основного рулсета" (main ruleset) - виртуальная композиция правил из ЛЮБЫХ других
-рулсетов (built-in и custom, см. app/rules_catalog.py), используемая по умолчанию потоковым
+рулсетов (built-in и custom, см. app/rules/rules_catalog.py), используемая по умолчанию потоковым
 ingest (/ingest/stream) и /ingest/events, где сейчас вообще нет способа выбрать ruleset.
 
 Хранит НЕ копии правил, а только ссылки: какие рулсеты добавлены целиком (included_rulesets) +
@@ -16,7 +16,7 @@ import json
 import threading
 from typing import Any
 
-from app import rules_catalog
+from app.rules import rules_catalog
 
 STATE_PATH = rules_catalog.CUSTOM_ROOT / "main_ruleset.json"
 MAIN_RULESET_ID = "main"
@@ -105,7 +105,7 @@ def resolve_with_sources() -> list[tuple[str, dict[str, Any]]]:
 
 
 def resolve() -> list[dict[str, Any]]:
-    """Плоский список скомпилированных правил для движка (app/engine.py:run_batch_with_rules).
+    """Плоский список скомпилированных правил для движка (app/detection/engine.py:run_batch_with_rules).
     Дёшево: load_rules() для builtin/custom читает уже СКОМПИЛИРОВАННЫЕ правила через
     mtime-кэш rules_catalog._load_json_rules - pySigma тут не участвует вообще, поэтому
     пересчитывать resolve() на каждый батч (без доп. кэша) нормально."""

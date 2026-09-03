@@ -68,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time);
 -- строит resolve_json_path, иначе планировщик SQLite индекс не подхватит.
 CREATE INDEX IF NOT EXISTS idx_events_json_eventid ON events(json_extract(raw_json, '$."EventID"'));
 
--- Леджер срабатываний, "интересных" для корреляционных правил (app/correlation.py) - НЕ для
+-- Леджер срабатываний, "интересных" для корреляционных правил (app/detection/correlation.py) - НЕ для
 -- всех сработавших правил, только для тех, что являются base_rule_titles хотя бы одной
 -- активной correlation-записи (см. hit_worthy_titles у store_events) - иначе таблица росла бы
 -- на каждое срабатывание любого из тысяч built-in-правил. event_id логически ссылается на
@@ -363,7 +363,7 @@ class Store:
         raw_events            - все события батча, как вернул ZircoliteCore (включают row_id)
         matched_row_to_rules  - {row_id: [названия сработавших правил]} для этого же батча
         hit_worthy_titles     - названия правил, которые являются base_rule_titles хотя бы
-                                 одной АКТИВНОЙ correlation-записи (см. app/correlation.py) -
+                                 одной АКТИВНОЙ correlation-записи (см. app/detection/correlation.py) -
                                  для событий, сматченных ЭТИМИ правилами, дополнительно пишется
                                  строка в rule_hits (леджер для correlation-движка, см. схему
                                  выше). None/пусто (обычный ingest без активных корреляций) -
@@ -606,7 +606,7 @@ class Store:
         base_rule_titles - OR по всем title'ам, которые эта correlation ссылается (обычно один,
         но Sigma допускает несколько base-правил на одну корреляцию). group_by/key_values -
         параллельные списки: поле группировки -> конкретное значение этого ключа (уже известное
-        вызывающей стороне, app/correlation.py, из свежесматченных событий батча).
+        вызывающей стороне, app/detection/correlation.py, из свежесматченных событий батча).
 
         JOIN rule_hits (проиндексирован по (rule_title, source_batch, event_time), см. схему) ->
         events (по event_id, без дублирования raw_json) - строк на входе уже мало благодаря

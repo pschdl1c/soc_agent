@@ -5,8 +5,9 @@
 # Что здесь собрано:
 #   [project]                    — метаданные + прод-зависимости (фиксированные версии).
 #   [project.optional-dependencies].dev — pytest + httpx (TestClient для HTTP-тестов) + ruff (линт).
-#   [tool.setuptools]            — пакет один: app/. Zircolite подключается НЕ как зависимость,
-#                                  а импортом из локального клона ./Zircolite (см. app/engine.py).
+#   [tool.setuptools]            — пакет app/ + подпакеты app/detection, app/rules. Zircolite
+#                                  подключается НЕ как зависимость, а импортом из локального
+#                                  клона ./Zircolite (см. app/detection/engine.py).
 #   [tool.pytest.ini_options]    — переехало из pytest.ini (его можно удалить).
 #   [tool.ruff]                  — базовый линт; в коде уже есть `# noqa` (E402/E731/BLE001),
 #                                  значит линтер подразумевался, но конфига не было.
@@ -23,7 +24,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soc-agent"
-version = "0.3.0"                       # источник правды для версии; app.main:FastAPI(version=...) стоит читать отсюда
+version = "0.4.0"                       # ЕДИНСТВЕННЫЙ источник правды; app/main.py читает через importlib.metadata. См. CHANGELOG.md
 description = "Мини-SIEM на Sigma-правилах (Zircolite) с AI-агентом расследования алертов"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
@@ -73,7 +74,7 @@ Homepage = "https://github.com/pschdl1c/soc_agent"
 # soc-agent = "app.main:main"
 
 [tool.setuptools]
-packages = ["app"]
+packages = ["app", "app.detection", "app.rules"]
 # app/static/index.html — не .py, но нужен рантайму; включаем в пакет.
 [tool.setuptools.package-data]
 app = ["static/*.html"]
@@ -111,8 +112,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # sys.path.insert(...) до импортов zircolite.* — вынужденно, клон подключается по пути
-"app/engine.py" = ["E402"]
-"app/rules_catalog.py" = ["E402"]
+"app/detection/engine.py" = ["E402"]
+"app/rules/rules_catalog.py" = ["E402"]
 "tests/*" = ["B011", "S101"]
 
 [tool.ruff.lint.isort]

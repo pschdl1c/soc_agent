@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 # Путь к клонированному репозиторию Zircolite - поправь под свою структуру проекта
-ZIRCOLITE_REPO_PATH = Path(__file__).resolve().parent.parent / "Zircolite"
+# (файл лежит в app/detection/, поэтому до корня проекта — три уровня вверх)
+ZIRCOLITE_REPO_PATH = Path(__file__).resolve().parent.parent.parent / "Zircolite"
 sys.path.insert(0, str(ZIRCOLITE_REPO_PATH))
 
 from zircolite.config import ProcessingConfig, RulesetConfig  # noqa: E402
@@ -71,10 +72,10 @@ class ZircoliteEngine:
         # app/rules_catalog.CORRELATION_EXT (не .yml/.yaml), поэтому RulesetHandler их не
         # компилирует и они физически не появляются ни в main_ruleset.resolve(), ни в
         # handler.rulesets прямого custom-ruleset прогона - их эвалуацией целиком занимается
-        # app/correlation.py поверх постоянной таблицы events/rule_hits (см.
+        # app/detection/correlation.py поверх постоянной таблицы events/rule_hits (см.
         # app/main.py:_process_batch), а не Zircolite (pinned pysigma-backend-sqlite компилирует
         # SQL для этих типов без учёта timespan и без state между batch'ами - см. докстринг
-        # app/rules_catalog.py). Фильтр ниже - только defense-in-depth на случай, если
+        # app/rules/rules_catalog.py). Фильтр ниже - только defense-in-depth на случай, если
         # какой-то будущий путь всё же протащит сюда correlation-запись (напр. built-in
         # рулсет, скомпилированный вне этого приложения) - дешёвый, безопасно оставить всегда.
         rules = [r for r in rules if not r.get("correlation")]
@@ -119,7 +120,7 @@ class ZircoliteEngine:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, float]:
         """Как run_batch, но принимает уже готовый (отфильтрованный/объединённый) список
         скомпилированных правил напрямую - используется для "основного рулсета"
-        (app/main_ruleset.py), который собирается заново на каждый батч из разных источников
+        (app/rules/main_ruleset.py), который собирается заново на каждый батч из разных источников
         и поэтому не подходит для обычного кэша _rulesets_cache (там кэш по одному пути к
         файлу). Компилировать тут нечего - правила уже скомпилированы на уровне rules_catalog."""
         return self._run_core(events_path, input_type, rules)

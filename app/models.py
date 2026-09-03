@@ -98,7 +98,7 @@ class AlertStatusUpdate(BaseModel):
 
 class CustomRuleSubmit(BaseModel):
     """Тело POST /rules/custom - сырой Sigma YAML одного правила (валидация/компиляция
-    в app/rules_catalog.py). ruleset - существующий именованный custom-рулсет, куда добавить
+    в app/rules/rules_catalog.py). ruleset - существующий именованный custom-рулсет, куда добавить
     правило; new_ruleset_name - создать новый custom-рулсет с этим именем. Ровно один из двух."""
     yaml_text: str
     ruleset: Optional[str] = None
@@ -142,7 +142,7 @@ class SourceUpdate(BaseModel):
 
 
 class ValueListCreate(BaseModel):
-    """Тело POST /value-lists - новый именованный список значений (см. app/value_lists.py).
+    """Тело POST /value-lists - новый именованный список значений (см. app/rules/value_lists.py).
     name - оно же имя плейсхолдера %name% в правилах, после создания неизменяемо."""
     name: str
     description: str = ""

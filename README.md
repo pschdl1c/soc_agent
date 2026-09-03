@@ -67,8 +67,12 @@ AI-агент расследования — следующий этап (см. 
 | SQLite | хранилище (`siem.db`, WAL-режим) + in-memory SQLite внутри Zircolite на каждый батч |
 | Frontend | один статический файл `app/static/index.html`, ванильный JS без сборки |
 
-Версии зафиксированы в [`pyproject.toml`](./pyproject.toml) (секция `[project].dependencies`;
+Версии зависимостей зафиксированы в [`pyproject.toml`](./pyproject.toml) (секция `[project].dependencies`;
 dev-инструменты — `[project.optional-dependencies].dev`).
+
+**Версия проекта** — `[project].version` в `pyproject.toml` (единственный источник; `app/main.py`
+отдаёт её в `/openapi.json` и `/docs`). SemVer, пока `0.y.z`. Изменения по версиям и порядок
+релиза — [`CHANGELOG.md`](./CHANGELOG.md); релизы помечаются git-тегами `vX.Y.Z`.
 
 ## Установка
 
@@ -90,7 +94,7 @@ pip install -e ".[dev]"
 git clone https://github.com/wagga40/Zircolite.git
 ```
 
-Репозиторий должен лежать по пути `./Zircolite` относительно корня проекта — `app/engine.py`
+Репозиторий должен лежать по пути `./Zircolite` относительно корня проекта — `app/detection/engine.py`
 подключает его через `sys.path`, а `app/main.py` использует `Zircolite/config/config.yaml` и
 готовые скомпилированные рулсеты из `Zircolite/rules/*.json` (пути настраиваются через `.env`,
 см. [Конфигурация](#конфигурация-env) ниже).
@@ -236,7 +240,7 @@ python scripts/fake_forwarder.py drip    # медленно и долго - пр
                    │
                    ▼
         ┌──────────────────────┐
-        │  ZircoliteEngine      │  app/engine.py
+        │  ZircoliteEngine      │  app/detection/engine.py
         │  • ruleset кэшируется  │  Sigma-правила компилируются в SQL ОДИН раз при старте
         │    один раз (дорого)   │  (RulesetHandler), переиспользуются на каждый батч
         │  • на батч — новый     │  ZircoliteCore с in-memory SQLite
@@ -270,23 +274,28 @@ Zircolite **одним вызовом** (у движка фиксированн�
 soc_agent/
 ├── app/                    приложение FastAPI
 │   ├── main.py             HTTP-ручки, оркестрация батча, lifespan
-│   ├── engine.py           обёртка над Zircolite (кэш скомпилированных рулсетов)
 │   ├── ingest_queue.py     потоковый ingest: очередь + фоновый воркер, микро-батчинг
-│   ├── normalize.py        raw_results Zircolite → список Alert
-│   ├── correlation.py      стейтфул-корреляция Sigma-правил поверх events/rule_hits
 │   ├── store.py            SQLite-хранилище (WAL, раздельные read/write-соединения)
 │   ├── filter_lang.py      мини-язык фильтра Событий (токенайзер + парсер + компилятор в SQL)
-│   ├── rules_catalog.py    каталог Sigma-рулсетов (built-in + именованные custom)
-│   ├── main_ruleset.py     «основной рулсет» — виртуальная композиция правил
+│   ├── kb.py               база знаний MITRE ATT&CK (read-only kb.db), вкладка «База знаний»
 │   ├── fields.py           кандидаты имён полей (host/user/ip/process) + служебные константы
 │   ├── models.py           Pydantic-модели (Alert, Entities, SigmaRuleRef, ...)
+│   ├── config.py           конфигурация из окружения/.env (пути, хост, порт)
+│   ├── detection/          путь событие → Sigma-детект → нормализованный Alert
+│   │   ├── engine.py       обёртка над Zircolite (кэш скомпилированных рулсетов)
+│   │   ├── normalize.py    raw_results Zircolite → список Alert
+│   │   └── correlation.py  стейтфул-корреляция Sigma-правил поверх events/rule_hits
+│   ├── rules/              Sigma-контент: каталог рулсетов, состав main, value lists
+│   │   ├── rules_catalog.py  каталог Sigma-рулсетов (built-in + именованные custom)
+│   │   ├── main_ruleset.py   «основной рулсет» — виртуальная композиция правил
+│   │   └── value_lists.py    именованные списки значений (плейсхолдеры %name% / |expand)
 │   └── static/index.html   вся веб-консоль (один файл, без сборки)
 ├── Zircolite/              внешний клон движка детекта (не редактируется)
 ├── artifacts/              внешний клон тестовых датасетов (Security-Datasets)
 ├── data/                   runtime-данные, общие для локального запуска И Docker (создаётся автоматически)
-│   ├── custom_rulesets/    пользовательские Sigma-правила/рулсеты (app/rules_catalog.py:CUSTOM_ROOT)
+│   ├── custom_rulesets/    пользовательские Sigma-правила/рулсеты (app/rules/rules_catalog.py:CUSTOM_ROOT)
 │   └── uploads/            загруженные через UI/API файлы логов (app/config.py:UPLOADS_DIR)
-├── docs/forwarder.md        протокол потокового ingest для форвардеров
+├── docs/                    документация: spec/ (тех. спеки) + guide/ (гайды/туториалы), см. docs/README.md
 ├── scripts/                вспомогательные скрипты для ручного тестирования
 ├── siem.db                 SQLite-база локального (без Docker) запуска (алерты + события) - в Docker своя, см. Docker
 ├── Dockerfile              multi-stage сборка (клон Zircolite + venv + код), см. Docker
@@ -346,7 +355,7 @@ Swagger UI со всеми схемами запросов/ответов — ht
 отвечает `202 Accepted` — фоновый воркер (`app/ingest_queue.py`) флашит буфер по правилу
 «N событий ИЛИ T секунд» (`SIEM_INGEST_BATCH_SIZE`=500, `SIEM_INGEST_FLUSH_INTERVAL`=5.0,
 настраиваются переменными окружения). Рулсет для этого пути не выбирается per-request — всегда
-«основной рулсет» (`app/main_ruleset.py`).
+«основной рулсет» (`app/rules/main_ruleset.py`).
 
 Каждый источник аутентифицируется bearer-токеном: вкладка **«Источник данных» → «Создать
 источник»** (имя обязательно и уникально — оно же метка `source_batch`), токен показывается
@@ -354,7 +363,7 @@ Swagger UI со всеми схемами запросов/ответов — ht
 (или `X-Ingest-Token`); запрос без валидного токена активного источника отклоняется `401`.
 То же требование у `POST /ingest/events`. Локальные `/ingest/file` и `/ingest/upload` — без токена.
 
-Протокол и примеры конфигурации форвардеров — в [`docs/forwarder.md`](./docs/forwarder.md).
+Протокол и примеры конфигурации форвардеров — в [`docs/guide/forwarder.md`](./docs/guide/forwarder.md).
 
 ## Sigma-правила и рулсеты
 
@@ -368,7 +377,7 @@ Swagger UI со всеми схемами запросов/ответов — ht
   точечные исключения/добавления отдельных правил. Это то, что реально гоняет потоковый ingest
   (`/ingest/stream`, `/ingest/events`) — по умолчанию у них нет выбора рулсета per-request.
 - **Correlation-правила** (`event_count`/`value_count` — `temporal`/`temporal_ordered` пока не
-  эвалуируются) считаются собственным движком (`app/correlation.py`) поверх постоянной таблицы
+  эвалуируются) считаются собственным движком (`app/detection/correlation.py`) поверх постоянной таблицы
   `events`, а не движком Zircolite — окно (`timespan`) реальное, не ограничено размером
   ingest-батча. Пишутся отдельным расширением файла (`.sigmacorr`), не `.yml`.
 
@@ -380,7 +389,7 @@ SQLite (`siem.db`), WAL-режим:
   — повторное срабатывание инкрементит `event_count`, а не создаёт новый алерт.
 - **`events`** — снимок всех событий батча (включая не вызвавшие ни одного правила), с флагом
   `is_matched` и списком `matched_rules` — нужны для ручного пивота и будущего RAG-агента.
-- **`rule_hits`** — леджер для стейтфул-корреляции (`app/correlation.py`, см. ниже) — какие
+- **`rule_hits`** — леджер для стейтфул-корреляции (`app/detection/correlation.py`, см. ниже) — какие
   события матчили какое правило когда, индексирован для быстрой выборки по временному окну.
 - **`sources`** — реестр потоковых источников: имя (уникально, оно же метка `source_batch`),
   sha256 токена, флаг активности. Аутентифицирует `/ingest/stream` и `/ingest/events`.

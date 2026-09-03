@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from app.fields import INGEST_SOURCE_FIELD
-from app.normalize import _dedup_key, _pick_sample_events, zircolite_results_to_alerts
+from app.detection.normalize import _dedup_key, _pick_sample_events, zircolite_results_to_alerts
 
 
 def test_alert_created_at_is_naive_utc():

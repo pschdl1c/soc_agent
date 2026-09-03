@@ -238,6 +238,46 @@ def get_technique(technique_id: str) -> dict | None:
                 (technique_id,),
             )
         ]
+        # Структурный детект (ATT&CK v18+): стратегии с вложенными аналитиками. На старых
+        # версиях таблицы пустые -> вернётся [], карточка покажет прочерк / legacy-текст `detection`.
+        analytics_by_strategy: dict[str, list[dict]] = {}
+        for r in conn.execute(
+            "SELECT a.strategy_id, a.analytic_id, a.name, a.description, a.platforms, "
+            "a.log_sources, a.mutable_elements FROM mitre_analytic a "
+            "JOIN mitre_detection_strategy s ON s.strategy_id = a.strategy_id "
+            "WHERE s.technique_id = ? ORDER BY a.analytic_id",
+            (technique_id,),
+        ):
+            analytics_by_strategy.setdefault(r["strategy_id"], []).append(
+                {
+                    "analytic_id": r["analytic_id"],
+                    "name": r["name"],
+                    "description": r["description"],
+                    "platforms": json.loads(r["platforms"] or "[]"),
+                    "log_sources": json.loads(r["log_sources"] or "[]"),
+                    "mutable_elements": json.loads(r["mutable_elements"] or "[]"),
+                }
+            )
+        d["detection_strategies"] = [
+            {
+                "strategy_id": r["strategy_id"],
+                "name": r["name"],
+                "analytics": analytics_by_strategy.get(r["strategy_id"], []),
+            }
+            for r in conn.execute(
+                "SELECT strategy_id, name FROM mitre_detection_strategy "
+                "WHERE technique_id = ? ORDER BY strategy_id",
+                (technique_id,),
+            )
+        ]
+        d["procedures"] = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT source_id, source_name, source_type, description FROM mitre_procedure "
+                "WHERE technique_id = ? ORDER BY source_type, source_id",
+                (technique_id,),
+            )
+        ]
     return d
 
 

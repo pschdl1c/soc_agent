@@ -222,7 +222,7 @@ detection:
   скомпилированными в SQL — плейсхолдеры в них не работают.
 - v1: поддержана только запись целиком `%name%` (встроенные `foo%name%bar` — нет).
 
-Реализация — свой разворот текста до компиляции (`app/value_lists.py`), не через
+Реализация — свой разворот текста до компиляции (`app/rules/value_lists.py`), не через
 `pysigma ValuePlaceholderTransformation` (Zircolite не даёт воткнуть свой pipeline).
 
 ---

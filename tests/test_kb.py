@@ -111,6 +111,61 @@ MINI_BUNDLE = {
             "source_ref": "course-of-action--m1038",
             "target_ref": "attack-pattern--t1059",
         },
+        # --- структурный детект (ATT&CK v18+) ---
+        {
+            "type": "x-mitre-detection-strategy",
+            "id": "x-mitre-detection-strategy--ds1",
+            "name": "Behavioral Detection of Interpreter Abuse",
+            "x_mitre_analytic_refs": ["x-mitre-analytic--an1"],
+            "external_references": [_ref("DET0001", "detections/DET0001")],
+        },
+        {
+            "type": "x-mitre-analytic",
+            "id": "x-mitre-analytic--an1",
+            "name": "Analytic 0001",
+            "description": "Detects powershell.exe with encoded arguments outside admin hours.",
+            "x_mitre_platforms": ["Windows"],
+            "x_mitre_log_source_references": [
+                {"x_mitre_data_component_ref": "x-mitre-data-component--x", "name": "WinEventLog:Sysmon", "channel": "EventCode=1"}
+            ],
+            "x_mitre_mutable_elements": [
+                {"field": "TimeWindow", "description": "Restrict to work hours."}
+            ],
+            "external_references": [_ref("AN0001", "analytics/AN0001")],
+        },
+        {
+            "type": "relationship",
+            "relationship_type": "detects",
+            "source_ref": "x-mitre-detection-strategy--ds1",
+            "target_ref": "attack-pattern--t1059",
+        },
+        # --- procedure examples (кто применял технику) ---
+        {
+            "type": "intrusion-set",
+            "id": "intrusion-set--g1",
+            "name": "TestGroup",
+            "external_references": [_ref("G0001", "groups/G0001")],
+        },
+        {
+            "type": "malware",
+            "id": "malware--s1",
+            "name": "TestMal",
+            "external_references": [_ref("S0001", "software/S0001")],
+        },
+        {
+            "type": "relationship",
+            "relationship_type": "uses",
+            "source_ref": "intrusion-set--g1",
+            "target_ref": "attack-pattern--t1059",
+            "description": "TestGroup ran powershell -enc to stage a payload.",
+        },
+        {
+            "type": "relationship",
+            "relationship_type": "uses",
+            "source_ref": "malware--s1",
+            "target_ref": "attack-pattern--t1059-001",
+            "description": "TestMal spawns PowerShell for execution.",
+        },
     ],
 }
 
@@ -137,6 +192,16 @@ def test_parse_bundle_shapes():
     assert ("T1547", "persistence") in parsed.technique_tactic
     assert parsed.technique_mitigation == [("T1059", "M1038")]
     assert parsed.meta["technique_count"] == "3"
+
+    # структурный детект: стратегия привязана к T1059 через `detects`, её аналитика подтянута
+    assert [(s["strategy_id"], s["technique_id"]) for s in parsed.detection_strategies] == [("DET0001", "T1059")]
+    assert parsed.analytics[0]["strategy_id"] == "DET0001"
+    assert parsed.analytics[0]["log_sources"] == [{"name": "WinEventLog:Sysmon", "channel": "EventCode=1"}]
+    assert parsed.analytics[0]["mutable_elements"][0]["field"] == "TimeWindow"
+
+    # procedure examples: группа -> T1059, софт -> T1059.001
+    procs = {(p["source_id"], p["technique_id"], p["source_type"]) for p in parsed.procedures}
+    assert procs == {("G0001", "T1059", "group"), ("S0001", "T1059.001", "malware")}
 
 
 # --------------------------------------------------------------------------- kb.py (есть база)
@@ -175,6 +240,21 @@ def test_get_technique_full_card(kb_db):
     assert [x["shortname"] for x in t["tactics"]] == ["execution"]
     assert [x["mitigation_id"] for x in t["mitigations"]] == ["M1038"]
     assert [x["technique_id"] for x in t["subtechniques"]] == ["T1059.001"]
+
+    # структурный детект в карточке: стратегия -> вложенные аналитики
+    assert [s["strategy_id"] for s in t["detection_strategies"]] == ["DET0001"]
+    an = t["detection_strategies"][0]["analytics"][0]
+    assert an["analytic_id"] == "AN0001"
+    assert an["log_sources"] == [{"name": "WinEventLog:Sysmon", "channel": "EventCode=1"}]
+    assert an["mutable_elements"][0]["field"] == "TimeWindow"
+
+    # procedure examples в карточке
+    assert [(p["source_id"], p["source_type"]) for p in t["procedures"]] == [("G0001", "group")]
+    assert "powershell" in t["procedures"][0]["description"]
+
+    # сабтехника несёт свой procedure (софт)
+    sub = kb.get_technique("T1059.001")
+    assert [p["source_id"] for p in sub["procedures"]] == ["S0001"]
 
     assert kb.get_technique("T9999") is None
 
