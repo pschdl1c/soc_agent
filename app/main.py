@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -130,18 +131,18 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
         )
 
     matched_map = _build_matched_row_map(raw_results)
-    # Названия правил, за которыми следит хотя бы одна активная correlation-запись этого
-    # ruleset_path - считается один раз на весь батч (дёшево, читает уже скомпилированные
-    # правила через кэш rules_catalog), передаётся в store_events, чтобы rule_hits (леджер для
-    # app/detection/correlation.py) не разрастался на КАЖДОЕ сработавшее правило, только на нужные.
-    hit_titles = correlation.active_base_rule_titles(ruleset_path)
+    # Названия БАЗОВЫХ правил + поля, которые нужно денормализовать в rule_hits.group_json,
+    # хотя бы для одной активной correlation-записи этого ruleset_path - считается один раз на
+    # весь батч (дёшево, читает уже скомпилированные правила через кэш rules_catalog),
+    # передаётся в store_events (см. app/detection/correlation.py:active_hit_spec).
+    hit_spec = correlation.active_hit_spec(ruleset_path)
     correlation_created = 0
     # Один прогон движка мог объединять НЕСКОЛЬКО реальных источников (см. _process_events) -
     # события возвращаются в БД под их СОБСТВЕННОЙ меткой, не под source_label всего прогона.
     for label, events_subset in _split_events_by_source(all_events, source_label).items():
         store.store_events(
             events_subset, source_batch=label, matched_row_to_rules=matched_map,
-            hit_worthy_titles=hit_titles,
+            hit_spec=hit_spec,
         )
         # Стейтфул-корреляция (app/detection/correlation.py) - переоценивается ПОСЛЕ каждого flush для
         # (правило, group-by-ключ) пар, реально затронутых ЭТИМ батчем (короткое замыкание
@@ -197,9 +198,28 @@ def _process_events(tagged_events: list[tuple[dict, str]], ruleset_path: str | N
         Path(tmp_path).unlink(missing_ok=True)
 
 
+def _run_retention() -> None:
+    """Ретеншн events (см. app/store.py:delete_events_older_than, docs/spec/storage.md) -
+    периодически зовётся тем же фоновым потоком, что и flush ingest-воркера (см.
+    IngestWorker.retention_fn ниже), не отдельным потоком. cutoff в ТОМ ЖЕ формате, что и
+    events.ingested_at (`datetime.now(timezone.utc).isoformat()`, см. store.store_events) -
+    обязательно, иначе строковое сравнение в SQL сравнивало бы разные форматы."""
+    if config.EVENTS_RETENTION_DAYS <= 0:
+        return
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=config.EVENTS_RETENTION_DAYS)).isoformat()
+    deleted = store.delete_events_older_than(cutoff)
+    if deleted:
+        print(f"[retention] удалено {deleted} событий старше {config.EVENTS_RETENTION_DAYS}д")
+
+
 # Потоковый ingest: воркер зовёт _process_events ОДИН РАЗ на весь флаш (может мешать несколько
-# источников сразу, см. докстринг _process_events).
-ingest_worker = IngestWorker(process_fn=_process_events)
+# источников сразу, см. докстринг _process_events). retention_fn - None при
+# EVENTS_RETENTION_DAYS<=0 (ретеншн выключен) - не заводим лишний таймаут ожидания в воркере,
+# если он всё равно ничего бы не делал (см. IngestWorker._run).
+ingest_worker = IngestWorker(
+    process_fn=_process_events,
+    retention_fn=_run_retention if config.EVENTS_RETENTION_DAYS > 0 else None,
+)
 
 
 @asynccontextmanager

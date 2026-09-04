@@ -32,9 +32,13 @@
 
 `CORRELATION_EXT = ".sigmacorr"`. `RulesetHandler` глобит только `*.yml`/`*.yaml`, поэтому
 correlation-файлы не попадают в компиляцию вместе с правилом, на которое они ссылаются. Это
-обходит баг `pysigma-backend-sqlite` (проверено до версии 1.2.4): правило, referenced из
-`correlation.rules` в том же `SigmaCollection`, компилируется в сырую SQL-строку вместо dict
-и роняет компиляцию файла.
+обходит баг стокового (не пропатченного — сверено по sha256 файла) `pysigma-backend-sqlite==
+1.2.0` (воспроизведено и на 1.2.4): `finalize_correlation_subqueries = False`
+(`pysigma/conversion/base.py`, не переопределён sqlite-бэкендом) отключает `finalize_query`
+для правила с backreference из `correlation.rules` в том же `SigmaCollection`. Без
+`correlation.generate:` referenced-правило молча выпадает из скомпилированного рулсета
+(перестаёт детектить само по себе); с `generate: true` наружу уходит НЕ финализированная сырая
+SQL-строка вместо dict, что валит компиляцию Zircolite-стороны совсем.
 
 `_CORR_TYPES = {"event_count", "value_count", "temporal", "temporal_ordered"}`.
 
@@ -94,18 +98,35 @@ correlation-файлы не попадают в компиляцию вмест�
 ### `load_correlation_rules(ruleset_path) -> list[dict]`
 
 Только для custom. Читает `*.sigmacorr` напрямую (`yaml.safe_load_all`, без pySigma).
-Строит индекс `name`/`id` → `title` по всем `*.yml`/`*.yaml` рулсета. Для каждого
-correlation-документа с `title` и словарём `correlation`:
+Строит общий индекс `name`/`id` → `{"title": <str>, "kind": "base"|"correlation"}` — **и по
+`*.yml`/`*.yaml` (`kind="base"`), И по `*.sigmacorr` (`kind="correlation"`)**. Вторая категория
+нужна для ЦЕПОЧЕК (`correlation.rules` ссылается на другую correlation, форма
+`artifacts/content/auth_after_brutforce.yml`) — без неё ссылка correlation → correlation
+никогда не резолвится, и вся зависимая correlation-запись (включая её собственные корректные
+base-ссылки) молча пропадает целиком (Этап A дорожной карты — прежде это «глушило» все
+`temporal_ordered`-правила в контенте). Для каждого correlation-документа с `title` и словарём
+`correlation`:
 
 ```
 {
   "id": <str|None>, "title": <str>, "level": <str>, "description": <str>, "tags": <list>,
   "type": <str>, "group_by": <list>, "timespan": <str>, "condition": <dict>,
-  "base_rule_titles": [<title соседнего правила>, ...]
+  "base_rule_titles": [<title соседнего правила>, ...],
+  "base_rule_refs": [{"title": <str>, "kind": "base"|"correlation"}, ...]
 }
 ```
 
-Правило с неразрешённой ссылкой `correlation.rules` пропускается.
+`base_rule_titles` — плоский список (обратная совместимость, используется как OR-список в
+SQL); `base_rule_refs` — параллельный список с `kind`, нужен `app/detection/correlation.py`
+(`active_hit_spec` различает, кому писать `rule_hits`-попадание: `store_events` — для "base",
+сама сработавшая корреляция — для "correlation", см. `docs/spec/correlation.md`). Правило с
+хотя бы одной неразрешённой ссылкой `correlation.rules` пропускается целиком.
+
+**Кэш** — по сигнатуре директории (`_correlation_dir_signature`: число файлов + максимальный
+`mtime` среди `*.yml`/`*.yaml`/`*.sigmacorr`), не по одному файлу как `_load_json_rules` —
+результат зависит от содержимого ВСЕЙ директории сразу (ссылки резолвятся друг на друга).
+Без кэша YAML перепарсивался бы на каждый вызов, а вызывается это минимум дважды за flush
+(`active_hit_spec` до `store_events` + `evaluate_batch` после, на каждый `source_batch`).
 
 ## Рулсеты: список / создание / удаление
 

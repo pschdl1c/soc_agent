@@ -13,6 +13,13 @@ DST_IP_FIELDS = ["DestAddress", "DestinationIp", "dst_ip"]
 PROCESS_FIELDS = ["Image", "NewProcessName", "CommandLine", "exe"]
 TIME_FIELDS = ["SystemTime", "EventTime", "@timestamp", "timestamp", "EventReceivedTime"]
 
+# Идентификатор типа события (Windows EventID / EventCode) - кандидат для ECS-lite колонки
+# events.event_code (см. store.py) - фундамент группировки по сущности для Инцидентов (Этап B
+# дорожной карты). Не дублирует уже существующий индекс на выражении idx_events_json_eventid
+# (тот - для фильтра/группировки Событий в UI, filter_lang.py; этот - обычная колонка events
+# для быстрого JOIN/WHERE без json_extract).
+EVENT_CODE_FIELDS = ["EventID", "EventCode"]
+
 # Служебный маркер источника, временно вписываемый в JSON события перед прогоном через движок
 # (см. app/main.py:_process_events/_split_events_by_source, app/detection/normalize.py) - нужен, чтобы
 # можно было слить события НЕСКОЛЬКИХ источников в один прогон Zircolite (амортизация

@@ -18,5 +18,6 @@
 | Файл | О чём |
 |---|---|
 | [`guide/sigma-rules-guide.md`](guide/sigma-rules-guide.md) | Полный разбор формата Sigma-правил (структура, `detection`, модификаторы, корреляции, фильтры) |
+| [`guide/correlation-rules-guide.md`](guide/correlation-rules-guide.md) | Практический гайд по сценарным (correlation) правилам ЭТОГО проекта — как писать, сохранять, включать, четыре типа на примерах, ограничения |
 | [`guide/mitre-attack-guide.md`](guide/mitre-attack-guide.md) | MITRE ATT&CK: модель, объекты, версии, STIX, как это используется во вкладке «База знаний» |
 | [`guide/forwarder.md`](guide/forwarder.md) | Протокол потокового ingest для форвардеров (`POST /ingest/stream`) |

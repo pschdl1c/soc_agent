@@ -33,9 +33,14 @@
 
 ## Класс `IngestWorker`
 
-### `__init__(process_fn, batch_size=DEFAULT_BATCH_SIZE, flush_interval=DEFAULT_FLUSH_INTERVAL, max_queue=100_000)`
+### `__init__(process_fn, batch_size=DEFAULT_BATCH_SIZE, flush_interval=DEFAULT_FLUSH_INTERVAL, max_queue=100_000, retention_fn=None, retention_interval=3600.0)`
 
-Создаёт `queue.Queue(maxsize=max_queue)`; поток не запускается.
+Создаёт `queue.Queue(maxsize=max_queue)`; поток не запускается. `retention_fn` (Этап A
+дорожной карты) — опциональный колбэк ретеншна `events` (`app/store.py:
+delete_events_older_than`, см. `app/main.py:_run_retention`), зовётся ЭТИМ ЖЕ фоновым потоком
+раз в `retention_interval` секунд — второго потока не заводится. `None` (дефолт, либо когда
+`SIEM_EVENTS_RETENTION_DAYS<=0`) полностью выключает ветку — ни одного лишнего пробуждения
+потока сверх обычного цикла флаша.
 
 ### `start() -> None`
 
@@ -68,19 +73,28 @@
 
 ## Цикл потребителя (`_run`)
 
-- Пустой буфер — блокирующее ожидание `queue.get()` без таймаута.
-- Непустой буфер — ожидание до дедлайна `buffer_started + flush_interval`.
+- Пустой буфер, `retention_fn` не задан — блокирующее ожидание `queue.get()` без таймаута.
+- Пустой буфер, `retention_fn` задан — ожидание до дедлайна следующей проверки ретеншна
+  (`last_retention + retention_interval`) — без этой ветки ретеншн не сработал бы вовсе в
+  периоды простоя ingest'а (вечная блокировка на очереди без таймаута, до `retention_fn` дело
+  никогда бы не дошло).
+- Непустой буфер — ожидание до дедлайна `buffer_started + flush_interval` (приоритет над
+  веткой ретеншна — таймаут очереди берётся по буферу, если он не пуст).
 - Триггеры flush: `len(buffer) >= batch_size` (size), прошло `>= flush_interval` от первого
   события буфера (time), получен сигнал остановки.
 - Flush — один вызов `process_fn(buffer)` на весь буфер, независимо от числа разных
   `source_label` в нём; затем `buffer = []`.
+- После обработки flush-триггеров, на каждой итерации: если `retention_fn` задан и прошло
+  `>= retention_interval` с прошлой проверки — `_run_retention()`, обновление `last_retention`.
 - Сигнал остановки: после финального flush очередь дренируется до конца, остаток флашится,
   поток завершается.
 
-## Обработка ошибок flush (`_flush`)
+## Обработка ошибок flush (`_flush`) и ретеншна (`_run_retention`)
 
 `process_fn(buffer)` в `try/except Exception` — исключение логируется (`print`), поток
-не падает. Форвардер получает `202` независимо от исхода обработки батча.
+не падает. Форвардер получает `202` независимо от исхода обработки батча. Аналогично
+`retention_fn()` обёрнут в `_run_retention` (`try/except Exception`, логирование) — ошибка
+ретеншна не должна ронять ingest.
 
 ## Инварианты
 

@@ -23,8 +23,18 @@
 | `_read_conn` | `_read_lock` | только чтение; открыто с `PRAGMA query_only=ON` |
 
 При инициализации на `_conn` выставляются `PRAGMA journal_mode=WAL` и `PRAGMA synchronous=NORMAL`,
-затем исполняется схема (`executescript`). WAL позволяет читателям не блокировать писателя и
-наоборот; раздельные Python-локи дополняют это, снимая сериализацию на уровне процесса.
+затем исполняется схема (`executescript(_SCHEMA)`), затем `_migrate(conn)`. WAL позволяет
+читателям не блокировать писателя и наоборот; раздельные Python-локи дополняют это, снимая
+сериализацию на уровне процесса.
+
+`_migrate(conn)` (Этап A) — аддитивная миграция для БД, созданных до появления ECS-lite
+колонок `events`/`group_json` `rule_hits`: `CREATE TABLE IF NOT EXISTS` в `_SCHEMA` не
+добавляет новые колонки в уже существующую таблицу (no-op), поэтому недостающие добавляются
+через `ALTER TABLE ... ADD COLUMN` (безопасно на живых данных — новые строки `NULL`, без
+даунтайма), а зависящие от них индексы создаются ПОСЛЕ добавления колонок (иначе на старой БД
+`CREATE INDEX` упал бы на ещё не существующую колонку раньше, чем сработает `ALTER TABLE`).
+Выполняется на каждом старте `Store`, механизма версионирования схемы нет — только
+идемпотентный `ALTER TABLE ADD COLUMN`/`CREATE INDEX IF NOT EXISTS`/`DROP INDEX IF EXISTS`.
 
 `Store(db_path: str = "siem.db")` — конструктор. `close()` закрывает оба соединения.
 
@@ -65,30 +75,50 @@
 | `is_matched` | INTEGER | NOT NULL DEFAULT 0 |
 | `matched_rules` | TEXT | NOT NULL DEFAULT `'[]'`, JSON-массив названий правил |
 | `raw_json` | TEXT | NOT NULL, полный JSON события после flatten |
+| `user_name` | TEXT | NULL, ECS-lite (Этап A) — `first_present(event, USER_FIELDS)` |
+| `src_ip` | TEXT | NULL, ECS-lite — `first_present(event, SRC_IP_FIELDS)` |
+| `dst_ip` | TEXT | NULL, ECS-lite — `first_present(event, DST_IP_FIELDS)` |
+| `process` | TEXT | NULL, ECS-lite — `first_present(event, PROCESS_FIELDS)` |
+| `event_code` | TEXT | NULL, ECS-lite — `first_present(event, EVENT_CODE_FIELDS)` (`EventID`/`EventCode`) |
 
-Индексы: `idx_events_batch(source_batch)`, `idx_events_host(host)`, `idx_events_matched(is_matched)`,
-`idx_events_time(event_time)`, `idx_events_json_eventid` — индекс на выражении
-`json_extract(raw_json, '$."EventID"')`.
+ECS-lite колонки (Этап A дорожной карты) — денормализованный индекс поверх `raw_json` под
+группировку Инцидентов по сущности (Этап B) и ручной пивот аналитика; `raw_json` остаётся
+источником правды, `filter_lang.py` их не подменяет.
+
+Индексы: `idx_events_batch(source_batch)`, `idx_events_host(host)`, `idx_events_time(event_time)`,
+`idx_events_json_eventid` — индекс на выражении `json_extract(raw_json, '$."EventID"')`,
+`idx_events_user(user_name)`, `idx_events_src_ip(src_ip)`, `idx_events_ingested(ingested_at)`
+(под ретеншн, см. ниже). `idx_events_matched(is_matched)` **убран** (Этап A) — два различимых
+значения, планировщик такой индекс практически не выбирал, а стоимость на каждую вставку
+платилась.
 
 Выражение индекса на `EventID` должно текстуально совпадать с выражением, которое строит
 `resolve_json_path` (`app/filter_lang.py`), иначе планировщик SQLite его не применит.
 
 ### Таблица `rule_hits`
 
-Леджер срабатываний, релевантных активным correlation-правилам.
+Леджер срабатываний, релевантных активным correlation-правилам — включая срабатывания САМИХ
+correlation-правил (для цепочек, см. `insert_correlation_hits` ниже и
+`app/detection/correlation.py`).
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
-| `event_id` | TEXT | NOT NULL; логическая ссылка на `events.event_id` (без FOREIGN KEY) |
+| `event_id` | TEXT | NOT NULL; логическая ссылка на `events.event_id` (без FOREIGN KEY) для обычных попаданий, либо синтетический `corr:<title>:<dedup_key>:<anchor_time>` для попаданий correlation-правила |
 | `rule_title` | TEXT | NOT NULL |
 | `source_batch` | TEXT | NOT NULL |
 | `event_time` | TEXT | NULL; **нормализованный** вид (`" "` → `"T"`, удалён `"Z"`) |
+| `group_json` | TEXT | NULL, JSON-объект `{поле: str(значение)}` — денормализованные значения group-by (∪ `condition.field` у value_count) ЭТОГО попадания |
 
 PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_title, source_batch, event_time)`.
 
-Строка добавляется только если название правила входит в `hit_worthy_titles`, переданный в
-`store_events`. `event_time` нормализуется на запись, чтобы запрос окна использовал простой
-`BETWEEN` как range-scan по индексу.
+Строка добавляется только если название правила входит в `hit_spec`, переданный в
+`store_events` (см. ниже). `event_time` нормализуется на запись, чтобы запрос окна использовал
+простой `BETWEEN` как range-scan по индексу. **Счёт корреляции (Этап A) читает ИСКЛЮЧИТЕЛЬНО
+`group_json`, без JOIN к `events`** — стоимость определяется плотностью попаданий в окне, а не
+размером `events`/БД в целом (обязательное требование, см. `docs/spec/correlation.md`). `NULL`
+у `group_json` — у строк, записанных до появления этого поля (миграция аддитивна, старые
+строки не бэкфиллятся); такие строки просто не совпадают ни по одному group-by, что безопасно
+(окно корреляции и так смотрит только в недавнее прошлое).
 
 ### Таблица `sources`
 
@@ -136,15 +166,20 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 
 ## API `Store` — события
 
-### `store_events(raw_events, source_batch, matched_row_to_rules, hit_worthy_titles=None) -> int`
+### `store_events(raw_events, source_batch, matched_row_to_rules, hit_spec=None) -> int`
 
 - `raw_events` — события батча из `ZircoliteCore` (содержат `row_id`).
 - `matched_row_to_rules` — `{row_id: [названия правил]}`.
 - Для каждого события: `host` = `first_present(event, HOST_FIELDS)` или `"unknown-host"`;
   `event_time` = `first_present(event, TIME_FIELDS)`; `is_matched` = `1`, если список правил
-  непуст; `matched_rules` = JSON списка; `raw_json` = JSON события.
-- Если `hit_worthy_titles` непуст: для каждого сматченного правила, входящего в это множество,
-  добавляется строка в `rule_hits` (`event_time` нормализуется).
+  непуст; `matched_rules` = JSON списка; `raw_json` = JSON события; ECS-lite колонки —
+  `first_present` по соответствующим спискам `app/fields.py` (см. схему `events` выше).
+- `hit_spec` (Этап A, было `hit_worthy_titles: set[str]`) — `{rule_title: {поля}}` для
+  БАЗОВЫХ Sigma-правил, являющихся `base_rule_titles` хотя бы одной активной correlation-записи
+  (см. `app/detection/correlation.py:active_hit_spec`). Для события, сматченного таким
+  правилом, добавляется строка в `rule_hits` — `group_json` собирается как
+  `{поле: str(event[поле])}` по набору полей ИЗ `hit_spec[rule_title]` (пропуская отсутствующие
+  в событии), `event_time` нормализуется.
 - Вставка через `executemany`, один `commit`. Возвращает число событий.
 
 ### `list_events(source_batch=None, only_matched=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, fields=None, query_filter=None, extra_filters=None, limit=100, offset=0) -> list[dict]`
@@ -181,18 +216,64 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 
 ## API `Store` — корреляция
 
-### `evaluate_correlation_window(base_rule_titles, group_by, key_values, source_batch, time_from, time_to, distinct_field=None, sample_limit=10) -> dict`
+Двухфазный счёт (Этап A, см. `docs/spec/correlation.md` за подробным разбором и обоснованием
+производительности): `evaluate_correlation_windows` (фаза 1, грубая оценка по объединённому
+окну нескольких ключей сразу) → `evaluate_correlation_window` (фаза 2, точная перепроверка
+кандидатов в их собственном узком окне). Обе читают счёт ИСКЛЮЧИТЕЛЬНО из `rule_hits.group_json`
+(`json_extract`), БЕЗ `JOIN` к `events` — стоимость определяется плотностью попаданий в окне,
+не размером `events`/БД в целом. `JOIN` к `events` есть только в `evaluate_correlation_window`
+и только ради `sample_events` (реальный контент события для карточки алерта), не влияет на
+стоимость счёта.
 
-Возвращает `{"count": int, "sample_events": list[dict]}`.
+### `evaluate_correlation_windows(rule_titles, source_batch, time_from, time_to, group_by, mode, distinct_field=None) -> dict[tuple, int]`
 
-- `JOIN rule_hits h ON events e` по `event_id`.
-- Условия: `h.rule_title IN (base_rule_titles)`, `h.source_batch = ?`,
-  `h.event_time BETWEEN time_from AND time_to` (нормализованные строки), и по одному условию
-  `json_extract(raw_json, <group_by[i]>) = str(key_values[i])`.
-- Без `distinct_field` — `COUNT(*)`; с `distinct_field` — `COUNT(DISTINCT json_extract(...))`.
-- `sample_events` — до `sample_limit` `raw_json`, отсортированных по `h.event_time ASC`.
+Фаза 1 — один `GROUP BY`-запрос по `rule_hits` сразу по ВСЕМ ключам group-by, попавшим в
+`[time_from, time_to]` (обычно объединённое окно нескольких кандидатных ключей одного flush'а —
+грубая оценка, может завысить счёт отдельных ключей с более ранним anchor, см.
+`docs/spec/correlation.md`). `mode`: `"events"` — `COUNT(*)`; `"distinct_values"` —
+`COUNT(DISTINCT json_extract(group_json, distinct_field))` (`value_count`); `"distinct_rules"` —
+`COUNT(DISTINCT rule_title)` (`temporal`/`temporal_ordered`). Возвращает
+`{tuple(значения group_by): count}` — ключи с хотя бы одним `None`-полем в `group_json`
+(поле отсутствовало) пропускаются.
+
+### `evaluate_correlation_window(base_rule_titles, group_by, key_values, source_batch, time_from, time_to, mode=None, distinct_field=None, sample_limit=10) -> dict`
+
+Фаза 2 — точная оценка ОДНОГО (correlation-правило, group-by-ключ) сочетания. Возвращает
+`{"count": int, "sample_events": list[dict]}`.
+
+- Условия: `rule_title IN (base_rule_titles)`, `source_batch = ?`,
+  `event_time BETWEEN time_from AND time_to` (нормализованные строки), и по одному условию
+  `json_extract(group_json, <group_by[i]>) = str(key_values[i])`.
+- `mode` (как у `evaluate_correlation_windows`, дефолт `"events"`, автоматически
+  `"distinct_values"` при заданном `distinct_field` без явного `mode`).
+- `sample_events` — до `sample_limit` `e.raw_json` (`JOIN rule_hits h ON events e`), отсортированных
+  по `h.event_time ASC`.
 - Возвращает нули, если `base_rule_titles` пуст, `group_by` пуст или длины `group_by` и
   `key_values` не совпадают.
+
+### `fetch_correlation_hit_sequence(rule_titles, source_batch, time_from, time_to, group_by, key_values, limit=500) -> list[tuple[str, str]]`
+
+`(rule_title, event_time)` для ОДНОГО group-by-ключа, по возрастанию времени — только для
+`temporal_ordered`: реальный порядок появления событий проверяется в Python (жадное
+сопоставление подпоследовательности), см. `app/detection/correlation.py:_sequence_matches_order`.
+
+### `insert_correlation_hits(rows: list[tuple[event_id, rule_title, source_batch, event_time, group_json]]) -> None`
+
+Записывает сработавшую корреляцию как обычное попадание в `rule_hits` (`INSERT OR IGNORE`,
+идемпотентно) — так родительская корреляция при цепочке (correlation ссылается на другую
+correlation) видит потомка тем же запросом, что и обычное базовое правило. `event_id` —
+синтетический `corr:<title>:<dedup_key>:<anchor_time>`.
+
+### `delete_events_older_than(cutoff: str, chunk: int = 5000) -> int`
+
+Ретеншн `events` (Этап A) — удаляет строки с `ingested_at < cutoff` (НЕ `event_time`: тот
+сырой формат источника, может отсутствовать/быть в прошлом-будущем при replay исторических
+датасетов; `ingested_at` — собственное время приёма, монотонно растёт, надёжный ключ
+независимо от качества данных источника). Порциями по `chunk` строк, `self._lock` берётся и
+отпускается на каждую порцию отдельно (не на весь проход) — не блокирует ingest-воркер надолго
+на многомиллионной таблице. Осиротевшие `rule_hits` (`event_id`, которого больше нет в
+`events`) чистятся одним проходом в конце. `alerts` не трогает. Вызывается периодически из
+`IngestWorker` (см. `app/main.py:_run_retention`, `SIEM_EVENTS_RETENTION_DAYS` в `app/config.py`).
 
 ### `upsert_correlation_alerts(alerts: list[Alert]) -> int`
 
@@ -244,7 +325,8 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 ## Зависимости
 
 - Импортирует: `sqlite3`, `threading`, `hashlib`, `secrets`, `json`, `re`;
-  `app/fields.py` (`HOST_FIELDS`, `TIME_FIELDS`, `first_present`);
-  `app/filter_lang.py` (`FILTER_OPS`, `IS_MATCHED_FIELD`, `RULE_FIELD`, `compile_condition`,
-  `resolve_json_path`); `app/models.py` (`Alert`, `SOURCE_DESCRIPTION_MAX`).
+  `app/fields.py` (`HOST_FIELDS`, `TIME_FIELDS`, `USER_FIELDS`, `SRC_IP_FIELDS`, `DST_IP_FIELDS`,
+  `PROCESS_FIELDS`, `EVENT_CODE_FIELDS`, `first_present`); `app/filter_lang.py` (`FILTER_OPS`,
+  `IS_MATCHED_FIELD`, `RULE_FIELD`, `compile_condition`, `resolve_json_path`); `app/models.py`
+  (`Alert`, `SOURCE_DESCRIPTION_MAX`).
 - Импортируется: `app/detection/correlation.py` (`Store`), `app/main.py`, `tests/`.

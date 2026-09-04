@@ -64,13 +64,21 @@ class IngestWorker:
         batch_size: int = DEFAULT_BATCH_SIZE,
         flush_interval: float = DEFAULT_FLUSH_INTERVAL,
         max_queue: int = 100_000,
+        retention_fn: Callable[[], None] | None = None,
+        retention_interval: float = 3600.0,
     ) -> None:
+        """retention_fn - опциональный колбэк ретеншна (см. app/store.py:delete_events_older_than,
+        app/main.py:_run_retention), зовётся ЭТИМ ЖЕ фоновым потоком раз в retention_interval
+        секунд (не отдельный поток - см. _run) - None полностью выключает ветку (ни одного
+        лишнего пробуждения потока, если ретеншн не настроен)."""
         self._process_fn = process_fn
         self._batch_size = batch_size
         self._flush_interval = flush_interval
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max_queue)
         self._thread: threading.Thread | None = None
         self._running = False
+        self._retention_fn = retention_fn
+        self._retention_interval = retention_interval
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -138,12 +146,19 @@ class IngestWorker:
         # Буфер копится между флашами; группируем по источнику уже на флаше.
         buffer: list[tuple[dict[str, Any], str]] = []
         buffer_started = 0.0  # monotonic-время, когда в пустой буфер попало первое событие
+        last_retention = time.monotonic()
 
         while True:
-            # Пустой буфер - блокируемся на очереди без таймаута (никакого busy-spin, GIL свободен).
-            # Есть накопленное - ждём только до дедлайна флаша, чтобы уложиться в flush_interval.
+            # Пустой буфер И ретеншн не настроен - блокируемся на очереди без таймаута
+            # (никакого busy-spin, GIL свободен). Есть накопленное - ждём только до дедлайна
+            # флаша. Пустой буфер, НО ретеншн настроен - ждём до дедлайна СЛЕДУЮЩЕЙ проверки
+            # ретеншна: без этой ветки ретеншн не сработал бы вовсе в периоды простоя ingest'а
+            # (буфер пуст -> вечная блокировка на очереди без таймаута, до retention_fn дело
+            # никогда бы не дошло - см. app/store.py:delete_events_older_than).
             if buffer:
                 timeout: float | None = max(0.0, self._flush_interval - (time.monotonic() - buffer_started))
+            elif self._retention_fn is not None:
+                timeout = max(0.0, self._retention_interval - (time.monotonic() - last_retention))
             else:
                 timeout = None
             try:
@@ -166,6 +181,10 @@ class IngestWorker:
                 self._flush(buffer)
                 buffer = []
 
+            if self._retention_fn is not None and (time.monotonic() - last_retention) >= self._retention_interval:
+                self._run_retention()
+                last_retention = time.monotonic()
+
             if stop_now:
                 # Дренируем всё, что осталось в очереди после сигнала остановки.
                 remaining: list[tuple[dict[str, Any], str]] = []
@@ -179,6 +198,12 @@ class IngestWorker:
                 if remaining:
                     self._flush(remaining)
                 return
+
+    def _run_retention(self) -> None:
+        try:
+            self._retention_fn()
+        except Exception as exc:  # noqa: BLE001 - фоновый воркер не должен падать из-за ретеншна
+            print(f"[ingest] ошибка ретеншна: {exc}")
 
     def _flush(self, buffer: list[tuple[dict[str, Any], str]]) -> None:
         # ОДИН прогон движка на весь буфер, независимо от того, сколько разных source_label

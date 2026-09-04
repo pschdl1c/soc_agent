@@ -32,3 +32,8 @@ PORT = int(os.getenv("SIEM_PORT", "8000"))
 
 INGEST_BATCH_SIZE = int(os.getenv("SIEM_INGEST_BATCH_SIZE", "500"))
 INGEST_FLUSH_INTERVAL = float(os.getenv("SIEM_INGEST_FLUSH_INTERVAL", "5.0"))
+
+# Ретеншн events (app/store.py:delete_events_older_than, вызывается фоново из IngestWorker,
+# см. app/main.py:_run_retention) - сколько дней хранить сырые события. 0 - выключено (события
+# не удаляются автоматически). alerts ретеншн не подпадает - другой жизненный цикл, см. CLAUDE.md.
+EVENTS_RETENTION_DAYS = int(os.getenv("SIEM_EVENTS_RETENTION_DAYS", "14"))

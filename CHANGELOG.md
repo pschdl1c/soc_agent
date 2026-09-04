@@ -12,6 +12,48 @@
 
 ## [Unreleased]
 
+### Added
+- Стейтфул-корреляция (`app/detection/correlation.py`) теперь эвалуирует все четыре
+  Sigma-типа: `event_count`/`value_count` (было раньше) плюс `temporal`/`temporal_ordered`,
+  включая ЦЕПОЧКИ (correlation-правило ссылается на другую correlation, форма
+  `artifacts/content/auth_after_brutforce.yml` — теперь реально срабатывает).
+  `temporal_ordered` проверяет РЕАЛЬНЫЙ порядок появления событий (жадное сопоставление
+  подпоследовательности) — ни один апстрим Sigma-бэкенд (pysigma-backend-sqlite/-clickhouse)
+  этого не делает.
+- Двухфазный счёт корреляции (`rule_hits.group_json` + `store.evaluate_correlation_windows`/
+  `evaluate_correlation_window`) — скорость коррелятора больше не зависит от размера БД
+  (замерено `scripts/bench_correlation.py`: рост `rule_hits` в 100 раз даёт единицы процентов
+  роста времени запроса). Счёт больше не делает `JOIN` к `events` вовсе.
+- ECS-lite колонки `events.user_name`/`src_ip`/`dst_ip`/`process`/`event_code` — денормализованный
+  индекс поверх `raw_json`, фундамент будущей группировки Инцидентов по сущности (Этап B).
+- Ретеншн `events` (`SIEM_EVENTS_RETENTION_DAYS`, дефолт 14 дней, `0` — выключено) —
+  `store.delete_events_older_than`, вызывается фоново тем же потоком `IngestWorker`.
+- `app/timespan.py` — разбор Sigma-таймспана (`"5m"` → `300`), общий для рантайма корреляции и
+  валидации при сохранении правила.
+- `scripts/bench_correlation.py` — бенчмарк масштабируемости коррелятора.
+- Валидация correlation-правил при сохранении (`rules_catalog._validate_correlation_doc`)
+  теперь требует непустой `group-by`, проверяет формат `timespan` и явно отклоняет
+  "расширенные" condition-выражения — раньше такие правила молча сохранялись и никогда
+  не срабатывали.
+
+### Fixed
+- Резолв ссылок `correlation.rules` теперь видит и другие correlation-правила (не только
+  обычные), что чинит цепочки — раньше ссылка correlation → correlation никогда не
+  резолвилась, и вся зависимая запись пропадала целиком.
+- Group-by по ЧИСЛОВОМУ полю (напр. `EventID`) в correlation-правиле раньше всегда считал 0
+  (несовпадение типов INTEGER/TEXT в SQLite) — теперь все значения в `rule_hits.group_json`
+  хранятся и сравниваются строками.
+
+### Changed
+- `store.store_events(..., hit_worthy_titles=...)` → `store.store_events(..., hit_spec=...)`
+  (теперь несёт не только названия правил, но и набор нужных полей на каждое).
+  `correlation.active_base_rule_titles` → `correlation.active_hit_spec`.
+- `docs/spec/correlation.md`, `docs/spec/storage.md`, `docs/spec/rules-catalog.md`,
+  `docs/spec/ingest-queue.md`, `docs/spec/config.md`, `CLAUDE.md` — обновлены под все
+  изменения выше; поправлена неточность "пропатченный `pysigma-backend-sqlite`" (сток, не
+  пропатчен — сверено по sha256 файла) и разобраны причины отказа от переезда на
+  DuckDB/ClickHouse.
+
 ## [0.4.0] — 2026-09-03
 
 ### Changed

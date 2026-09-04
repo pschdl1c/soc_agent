@@ -32,6 +32,7 @@
 | `PORT` | `SIEM_PORT` | `int` | `8000` |
 | `INGEST_BATCH_SIZE` | `SIEM_INGEST_BATCH_SIZE` | `int` | `500` |
 | `INGEST_FLUSH_INTERVAL` | `SIEM_INGEST_FLUSH_INTERVAL` | `float` | `5.0` |
+| `EVENTS_RETENTION_DAYS` | `SIEM_EVENTS_RETENTION_DAYS` | `int` | `14` |
 
 ## Приведение типов
 
@@ -50,6 +51,10 @@
   (`app/main.py`), не этим модулем.
 - `data/` — общий корень runtime-данных для локального запуска и Docker (в Docker — bind-mount
   или named volume на тот же путь).
+- `EVENTS_RETENTION_DAYS` — сколько дней хранить сырые `events` (Этап A дорожной карты,
+  `app/store.py:delete_events_older_than`, вызывается фоново `IngestWorker`, см.
+  `app/main.py:_run_retention`). `0` — ретеншн выключен, события не удаляются автоматически.
+  `alerts` под ретеншн не подпадает — другой жизненный цикл.
 
 ## Зависимости
 

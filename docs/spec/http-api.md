@@ -42,9 +42,10 @@ lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` п
      (`CatalogError` → HTTP 400).
    - иначе (builtin или `None`) → `engine.run_batch(..., ruleset_path=ruleset_path)`.
 2. `_build_matched_row_map(raw_results)` → `{row_id: [названия правил]}`.
-3. `hit_titles = correlation.active_base_rule_titles(ruleset_path)` (один раз на батч).
+3. `hit_spec = correlation.active_hit_spec(ruleset_path)` (один раз на батч; `{rule_title:
+   {поля}}` — какие поля денормализовать в `rule_hits.group_json`, см. `docs/spec/correlation.md`).
 4. `_split_events_by_source(all_events, source_label)` → группы `{label: [events]}`.
-5. Для каждой группы: `store.store_events(events, source_batch=label, matched_row_to_rules=..., hit_worthy_titles=hit_titles)`,
+5. Для каждой группы: `store.store_events(events, source_batch=label, matched_row_to_rules=..., hit_spec=hit_spec)`,
    затем `correlation.evaluate_batch(store, ruleset_path, source_batch=label, matched_events_by_title=...)`.
 6. `alerts = zircolite_results_to_alerts(raw_results, default_source_batch=source_label)`;
    `created = store.upsert_alerts(alerts)`.

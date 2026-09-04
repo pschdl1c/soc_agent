@@ -29,20 +29,27 @@ json.load), custom читается из готового .manifest.json. Ком
 
 Sigma correlation-правила (type: event_count/value_count/temporal/temporal_ordered) хранятся
 ИНАЧЕ, чем обычные - файлом `<rule_id>{CORRELATION_EXT}` (не `.yml`/`.yaml`!) в той же
-директории рулсета. Причина - реальный баг в пинченном pysigma-backend-sqlite (проверено
-эмпирически вплоть до последней опубликованной версии 1.2.4): правило, на которое ссылается
-`correlation.rules:` (то есть присутствует В ОДНОМ SigmaCollection вместе с корреляцией,
-ссылающейся на него), при компиляции этого правила ОТДЕЛЬНО backend возвращает сырую
-SQL-строку вместо dict, что валит компиляцию pySigma-стороны совсем (`'str' object has no
-attribute 'get'` в Zircolite при попытке отсортировать результат). Наш собственный
-correlation-движок (app/detection/correlation.py) при этом вообще не использует SQL, который бы
-сгенерировал pySigma для корреляции - ему нужны только структурные поля (type/group-by/
-timespan/condition/rules) из raw YAML, которые он читает сам (load_correlation_rules ниже).
-Поэтому решение простое и радикальное: correlation-правила физически НИКОГДА не попадают в
-тот же RulesetHandler-вызов, что и правило, на которое они ссылаются - расширение файла не
-`.yml`/`.yaml`, значит RulesetHandler (rglob("*.yml") + rglob("*.yaml")) их вообще не видит,
-`resolve_rule_references()` внутри pySigma никогда не запускается на referenced-правиле, и
-оно компилируется как совершенно обычное правило, под своим настоящим именем - никаких
+директории рулсета. Причина - реальный баг в ПИНЧЕННОМ (сток, не пропатченный - проверено по
+sha256 файла против RECORD в dist-info) pysigma-backend-sqlite==1.2.0 (воспроизведено и на
+1.2.4, актуальной опубликованной): правило, на которое ссылается `correlation.rules:` (то есть
+присутствует В ОДНОМ SigmaCollection вместе с корреляцией, ссылающейся на него), при
+компиляции этого правила ОТДЕЛЬНО ломается ОДНИМ ИЗ ДВУХ способов в зависимости от
+`correlation.generate:`. Механизм - `finalize_correlation_subqueries = False`
+(`pysigma/conversion/base.py`, не переопределён sqlite-бэкендом) отключает `finalize_query`
+для любого правила с backreference. Без `generate:` referenced-правило получает `_output =
+False` и просто МОЛЧА ВЫПАДАЕТ из скомпилированного рулсета (перестаёт детектить само по
+себе) - тише первого варианта, но не лучше. С `generate: true` `_output` остаётся `True`, и
+наружу уходит НЕ финализированная сырая SQL-строка вместо dict, что валит компиляцию
+pySigma-стороны совсем (`'str' object has no attribute 'get'` в Zircolite при попытке
+отсортировать результат). Наш собственный correlation-движок (app/detection/correlation.py) при
+этом вообще не использует SQL, который бы сгенерировал pySigma для корреляции - ему нужны
+только структурные поля (type/group-by/timespan/condition/rules) из raw YAML, которые он
+читает сам (load_correlation_rules ниже). Поэтому решение простое и радикальное:
+correlation-правила физически НИКОГДА не попадают в тот же RulesetHandler-вызов, что и
+правило, на которое они ссылаются - расширение файла не `.yml`/`.yaml`, значит RulesetHandler
+(rglob("*.yml") + rglob("*.yaml")) их вообще не видит, `resolve_rule_references()` внутри
+pySigma никогда не запускается на referenced-правиле, и оно компилируется как совершенно
+обычное правило, под своим настоящим именем - никаких
 "правил-двойников" в контенте заводить не нужно. compile_custom_rule/compile_ruleset_yaml
 ниже сами решают (по наличию ключа `correlation:` в документе), в какую компиляцию отдать
 документ - в RulesetHandler (обычные правила) или в собственную лёгкую валидацию без pySigma
@@ -64,6 +71,7 @@ from uuid import uuid4
 import yaml
 
 from app.rules import value_lists
+from app.timespan import parse_timespan as timespan_parse
 
 # файл лежит в app/rules/, до корня проекта — три уровня вверх
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -313,6 +321,29 @@ def get_rule(ruleset_path: str, rule_id: str) -> dict[str, Any] | None:
     return None
 
 
+# mtime-подобный кэш load_correlation_rules - результат зависит от СОДЕРЖИМОГО ЦЕЛОЙ
+# директории сразу (ссылки резолвятся друг на друга, в т.ч. correlation -> correlation), не от
+# одного файла - в отличие от _cache (файл -> (mtime, data)) здесь ключ - директория рулсета, а
+# "версия" - дешёвая сигнатура (число файлов + макс. mtime среди *.yml/*.yaml/*{CORRELATION_EXT}).
+_correlation_cache_lock = threading.Lock()
+_correlation_cache: dict[str, tuple[tuple[int, float], list[dict[str, Any]]]] = {}
+
+
+def _correlation_dir_signature(target_dir: Path) -> tuple[int, float]:
+    files = (
+        list(target_dir.glob("*.yml"))
+        + list(target_dir.glob("*.yaml"))
+        + list(target_dir.glob(f"*{CORRELATION_EXT}"))
+    )
+    mtimes = []
+    for f in files:
+        try:
+            mtimes.append(f.stat().st_mtime)
+        except OSError:
+            continue
+    return (len(files), max(mtimes) if mtimes else 0.0)
+
+
 def load_correlation_rules(ruleset_path: str) -> list[dict[str, Any]]:
     """Структурированные описания correlation-правил (Sigma type: event_count/value_count/
     temporal/temporal_ordered) одного custom-рулсета - для app/detection/correlation.py (свой движок
@@ -320,23 +351,47 @@ def load_correlation_rules(ruleset_path: str) -> list[dict[str, Any]]:
     докстринг модуля про причину и CORRELATION_EXT). Builtin-рулсеты никогда не содержат
     correlation-правил (проверено на всех Zircolite/rules/*.json) - для них всегда [].
 
-    Читает *{CORRELATION_EXT} рулсета напрямую (yaml.safe_load, без pySigma/RulesetHandler -
-    тот же "дешёвый browsing"-принцип, что и у остального модуля) - нужны структурные поля
-    Sigma YAML (type/group-by/timespan/condition/rules) как есть, не готовый SQL.
-
-    correlation.rules ссылается на соседние правила по их Sigma 'name' (короткий идентификатор)
-    ИЛИ 'id' (uuid) - оба формата валидны по спеке; индекс name/id -> title строится по ВСЕМ
-    обычным *.yml/*.yaml рулсета (они теперь компилируются независимо от корреляции, см.
-    CORRELATION_EXT - никаких "правил-двойников" не требуется, base_rule_titles указывает
-    прямо на настоящий title референсируемого правила, ровно то, что реально попадёт в
-    events.matched_rules/rule_hits.rule_title, см. app/main.py:_build_matched_row_map).
-    Правило с хотя бы одной неразрешённой ссылкой пропускается защитно - каталог не должен
-    падать на кривом/неполном YAML (например пока сохраняется только часть файла)."""
+    Кэш по сигнатуре директории (см. _correlation_dir_signature) - без него YAML
+    перепарсивался бы на каждый вызов, а вызывается это минимум дважды за батч (active_hit_spec
+    ДО store_events + evaluate_batch ПОСЛЕ, для каждого source_batch отдельно)."""
     if not _is_custom_ruleset(ruleset_path):
         return []
     target_dir = _custom_ruleset_dir(ruleset_path)
+    cache_key = str(target_dir.resolve())
+    signature = _correlation_dir_signature(target_dir)
+    with _correlation_cache_lock:
+        cached = _correlation_cache.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+    result = _load_correlation_rules_uncached(target_dir)
+    with _correlation_cache_lock:
+        _correlation_cache[cache_key] = (signature, result)
+    return result
 
-    name_to_title: dict[str, str] = {}
+
+def _load_correlation_rules_uncached(target_dir: Path) -> list[dict[str, Any]]:
+    """Тело load_correlation_rules без кэша - см. его докстринг.
+
+    Читает *.yml/*.yaml (обычные правила) И *{CORRELATION_EXT} (correlation-правила, в т.ч.
+    друг на друга - цепочки вроде auth_after_brutforce_by_account -> ...failures_by_account,
+    см. artifacts/content/auth_after_brutforce.yml) напрямую (yaml.safe_load, без pySigma/
+    RulesetHandler - тот же "дешёвый browsing"-принцип, что и у остального модуля) - нужны
+    структурные поля Sigma YAML (type/group-by/timespan/condition/rules) как есть, не готовый SQL.
+
+    correlation.rules ссылается на соседние правила ЛИБО обычные, ЛИБО correlation - по их
+    Sigma 'name' (короткий идентификатор) ИЛИ 'id' (uuid), оба формата валидны по спеке. Индекс
+    name/id -> {"title", "kind"} строится по ВСЕМ *.yml/*.yaml ("kind"="base") И ВСЕМ
+    *{CORRELATION_EXT} ("kind"="correlation") рулсета - без второй категории ссылки на другую
+    корреляцию (цепочки) никогда бы не резолвились, а именно это раньше молча ронялo ВСЕ
+    temporal_ordered-правила auth_after_brutforce.yml (см. CLAUDE.md/план Этапа A).
+    base_rule_titles - плоский список title'ов (обратная совместимость, используется как OR-
+    список в SQL); base_rule_refs - {"title","kind"} на каждую ссылку, нужен app/detection/
+    correlation.py (active_hit_spec различает, куда писать hit: store_events - для "base",
+    сама корреляция при срабатывании - для "correlation", см. insert_correlation_hits).
+    Правило с хотя бы одной неразрешённой ссылкой пропускается защитно - каталог не должен
+    падать на кривом/неполном YAML (например пока сохраняется только часть файла)."""
+    ref_index: dict[str, dict[str, str]] = {}
+
     for yml_path in list(target_dir.glob("*.yml")) + list(target_dir.glob("*.yaml")):
         try:
             text = yml_path.read_text(encoding="utf-8")
@@ -350,12 +405,11 @@ def load_correlation_rules(ruleset_path: str) -> list[dict[str, Any]]:
             title = doc.get("title")
             if not title:
                 continue
-            if doc.get("name"):
-                name_to_title[str(doc["name"])] = title
-            if doc.get("id"):
-                name_to_title[str(doc["id"])] = title
+            for key in ("name", "id"):
+                if doc.get(key):
+                    ref_index[str(doc[key])] = {"title": title, "kind": "base"}
 
-    results: list[dict[str, Any]] = []
+    corr_docs: list[dict[str, Any]] = []
     for corr_path in target_dir.glob(f"*{CORRELATION_EXT}"):
         try:
             text = corr_path.read_text(encoding="utf-8")
@@ -367,29 +421,39 @@ def load_correlation_rules(ruleset_path: str) -> list[dict[str, Any]]:
             title = doc.get("title")
             if not title or not isinstance(corr, dict):
                 continue
-            refs = corr.get("rules") or []
-            base_titles: list[str] = []
-            unresolved = False
-            for ref in refs:
-                title_for_ref = name_to_title.get(str(ref))
-                if title_for_ref is None:
-                    unresolved = True
-                    break
-                base_titles.append(title_for_ref)
-            if unresolved:
-                continue
-            results.append({
-                "id": doc.get("id"),
-                "title": title,
-                "level": doc.get("level", "informational"),
-                "description": doc.get("description", ""),
-                "tags": doc.get("tags", []),
-                "type": corr.get("type"),
-                "group_by": corr.get("group-by") or [],
-                "timespan": corr.get("timespan"),
-                "condition": corr.get("condition") or {},
-                "base_rule_titles": base_titles,
-            })
+            for key in ("name", "id"):
+                if doc.get(key):
+                    ref_index[str(doc[key])] = {"title": title, "kind": "correlation"}
+            corr_docs.append(doc)
+
+    results: list[dict[str, Any]] = []
+    for doc in corr_docs:
+        corr = doc["correlation"]
+        title = doc["title"]
+        refs = corr.get("rules") or []
+        base_refs: list[dict[str, str]] = []
+        unresolved = False
+        for ref in refs:
+            resolved = ref_index.get(str(ref))
+            if resolved is None:
+                unresolved = True
+                break
+            base_refs.append(resolved)
+        if unresolved:
+            continue
+        results.append({
+            "id": doc.get("id"),
+            "title": title,
+            "level": doc.get("level", "informational"),
+            "description": doc.get("description", ""),
+            "tags": doc.get("tags", []),
+            "type": corr.get("type"),
+            "group_by": corr.get("group-by") or [],
+            "timespan": corr.get("timespan"),
+            "condition": corr.get("condition") or {},
+            "base_rule_titles": [r["title"] for r in base_refs],
+            "base_rule_refs": base_refs,
+        })
     return results
 
 
@@ -488,13 +552,41 @@ def _looks_like_correlation_doc(doc: dict[str, Any]) -> bool:
     return "title" in doc and "correlation" in doc
 
 
+# Операторы простого (не extended) correlation.condition - см. _validate_correlation_doc и
+# app/detection/correlation.py:_COND_OPS (та же семантика, сознательно продублирован список
+# ключей, а не импортирован оттуда - rules_catalog не должен зависеть от detection-модуля,
+# см. докстринг про однонаправленную зависимость main_ruleset.py -> rules_catalog.py выше).
+_CORR_CONDITION_OPS = {"gt", "gte", "lt", "lte", "eq", "neq"}
+
+
+def _is_simple_correlation_condition(condition: Any) -> bool:
+    """True, если condition - словарь ТОЛЬКО из простых операторов (+ 'field' у value_count) -
+    та единственная форма, которую умеет считать app/detection/correlation.py. False - для
+    "расширенных" condition-выражений Sigma-спеки (temporal_extended/temporal_ordered_extended,
+    напр. condition: {expression: "rule_a and rule_b"}) - они НЕ поддержаны (см. CLAUDE.md/
+    план Этапа A: ни один SQL-бэкенд Sigma их толком не считает, а нашему движку это отдельная,
+    более сложная задача, не входящая в этот этап)."""
+    if not isinstance(condition, dict):
+        return False
+    keys = set(condition.keys()) - {"field"}
+    return bool(keys) and keys.issubset(_CORR_CONDITION_OPS)
+
+
 def _validate_correlation_doc(doc: dict[str, Any]) -> None:
     """Лёгкая структурная валидация correlation-документа БЕЗ pySigma (см. докстринг модуля
     про CORRELATION_EXT/почему pySigma тут не участвует вообще). Не полный валидатор Sigma-
     спеки - ловит только очевидные ошибки, чтобы автор правила увидел понятную причину отказа
     при сохранении, а не тихо получил корреляцию, которая никогда не сработает (app/
     correlation.py и так защитно пропускает неподдерживаемые/некорректные записи молча -
-    здесь, наоборот, хотим громко предупредить на этапе сохранения)."""
+    здесь, наоборот, хотим громко предупредить на этапе сохранения).
+
+    Дополнено относительно первой версии (см. CLAUDE.md/план Этапа A - раньше эти три
+    ошибки проходили валидацию и потом молча были неактивны): обязательный непустой
+    group-by (без него app/detection/correlation.py:evaluate_batch пропускает правило -
+    "по всей выборке" корреляция не поддерживается), формат timespan через тот же парсер,
+    что и в рантайме (app/timespan.parse_timespan - раньше валидация принимала любую
+    непустую строку, включая 'M'/'y', которые рантайм не понимает), и явный отказ
+    "расширенных" condition-выражений вместо тихой инертности."""
     if not doc.get("title"):
         raise RuleValidationError("Correlation-правило должно содержать 'title'")
     corr = doc.get("correlation")
@@ -508,13 +600,33 @@ def _validate_correlation_doc(doc: dict[str, Any]) -> None:
     refs = corr.get("rules")
     if not refs or not isinstance(refs, list):
         raise RuleValidationError("correlation.rules должен быть непустым списком ссылок на правила")
+    group_by = corr.get("group-by")
+    if not group_by or not isinstance(group_by, list):
+        raise RuleValidationError(
+            "correlation.group-by обязателен и должен быть непустым списком полей - "
+            "корреляция 'по всей выборке' (без group-by) не поддержана"
+        )
+    timespan = corr.get("timespan")
+    if not timespan or timespan_parse(timespan) is None:
+        raise RuleValidationError(
+            f"correlation.timespan должен быть числом с единицей s/m/h/d/w (например '5m'), "
+            f"получено: {timespan!r}"
+        )
+    condition = corr.get("condition")
     if corr_type in ("event_count", "value_count"):
-        if not corr.get("timespan"):
-            raise RuleValidationError(f"correlation.timespan обязателен для типа '{corr_type}'")
-        if not corr.get("condition"):
-            raise RuleValidationError(f"correlation.condition обязателен для типа '{corr_type}'")
-        if corr_type == "value_count" and not (corr.get("condition") or {}).get("field"):
+        if not condition or not _is_simple_correlation_condition(condition):
+            raise RuleValidationError(
+                f"correlation.condition обязателен для типа '{corr_type}' и должен содержать "
+                f"один из операторов: {sorted(_CORR_CONDITION_OPS)}"
+            )
+        if corr_type == "value_count" and not condition.get("field"):
             raise RuleValidationError("correlation.condition.field обязателен для value_count")
+    elif condition is not None and not _is_simple_correlation_condition(condition):
+        raise RuleValidationError(
+            "Расширенные correlation.condition-выражения (temporal_extended/"
+            "temporal_ordered_extended) не поддержаны - condition должен быть словарём из "
+            f"операторов {sorted(_CORR_CONDITION_OPS)} или отсутствовать"
+        )
 
 
 def _compile_correlation_doc(doc: dict[str, Any]) -> dict[str, Any]:
