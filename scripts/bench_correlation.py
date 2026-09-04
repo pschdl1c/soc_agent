@@ -10,14 +10,14 @@ docs/spec/correlation.md/план Этапа A). Только stdlib + app.store
      - "backlog" (старая история, размазанная ЗА ПРЕДЕЛАМИ окна корреляции, о котором пойдёт
      запрос), и ФИКСИРОВАННОЕ число строк (--window-hits, по умолчанию 50) - ВНУТРИ окна
      конкретного (rule_title, group-by-ключ), которое бенчмарк потом запрашивает. `events` НЕ
-     наполняется - счётный путь коррелятора (store.evaluate_correlation_windows/
-     evaluate_correlation_window) читает ИСКЛЮЧИТЕЛЬНО rule_hits.group_json, без JOIN к events
-     (это и есть предмет проверки - см. docs/spec/correlation.md); наполнение events ничего бы
-     не добавило к результату, но радикально замедлило бы сам бенчмарк.
-  2. Замеряет store.evaluate_correlation_windows (фаза 1 двухфазного счёта, тот самый путь,
-     что app/detection/correlation.py:_evaluate_correlation_rule зовёт на каждый flush) на
-     ОДИНАКОВОЙ нагрузке (одно и то же окно, одна и та же плотность внутри него) для каждого
-     размера БД.
+     наполняется - счётный путь коррелятора (store.fetch_correlation_hits, A3) читает
+     ИСКЛЮЧИТЕЛЬНО rule_hits.group_json, без JOIN к events (это и есть предмет проверки - см.
+     docs/spec/correlation.md); наполнение events ничего бы не добавило к результату, но
+     радикально замедлило бы сам бенчмарк.
+  2. Замеряет store.fetch_correlation_hits (A3: суженный по ключу и диапазону range-scan по
+     rule_hits, тот самый путь, что app/detection/correlation.py:_evaluate_correlation_rule
+     зовёт на каждый flush) на ОДИНАКОВОЙ нагрузке (одно и то же окно, одна и та же плотность
+     внутри него) для каждого размера БД.
   3. Печатает время на каждом размере и во сколько раз оно выросло между шагами - критерий
      приёмки: рост НЕ пропорционален росту размера БД (десятикратный рост БД -> единицы
      процентов роста времени, не десятикратный). Резкий линейный рост значит где-то остался
@@ -105,19 +105,24 @@ def populate(store: Store, total_rows: int, window_hits: int, source_batch: str,
 
 
 def bench_query(store: Store, time_from: str, time_to: str, repeat: int) -> float:
-    """Среднее время одного вызова evaluate_correlation_windows (фаза 1) по repeat повторам."""
+    """Среднее время одного вызова счётного пути коррелятора по repeat повторам.
+
+    Мерим store.fetch_correlation_hits (A3: индексный range-scan по rule_hits, суженный до
+    кандидатного ключа и диапазона окна - именно эта операция росла бы с размером БД, если бы
+    не индекс idx_rule_hits_lookup). Скользящий проход _best_anchor поверх её результата -
+    чистый Python O(H), от размера БД не зависит по определению, отдельно не мерим."""
     durations = []
-    result = {}
+    rows = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        result = store.evaluate_correlation_windows(
+        rows = store.fetch_correlation_hits(
             rule_titles=[RULE_TITLE], source_batch="bench",
             time_from=time_from, time_to=time_to,
-            group_by=[GROUP_FIELD], mode="events",
+            group_by=[GROUP_FIELD], keys=[(WINDOW_KEY_VALUE,)],
         )
         durations.append(time.perf_counter() - t0)
-    assert result.get((WINDOW_KEY_VALUE,)) is not None, "бенчмарк сломан - окно не нашло свои же данные"
-    assert (BACKLOG_KEY_VALUE,) not in result, "бенчмарк сломан - backlog просочился в окно"
+    assert rows, "бенчмарк сломан - окно не нашло свои же данные"
+    assert all(r[0] == (WINDOW_KEY_VALUE,) for r in rows), "бенчмарк сломан - backlog просочился в окно"
     return sum(durations) / len(durations)
 
 

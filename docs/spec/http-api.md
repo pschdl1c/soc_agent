@@ -26,9 +26,13 @@ app = FastAPI(title="Mini-SIEM Engine", version=__version__, lifespan=lifespan)
 
 - `engine = ZircoliteEngine(config_path=config.ZIRCOLITE_CONFIG_PATH, default_ruleset_path=config.DEFAULT_RULESET_PATH)`;
 - `store = Store(db_path=config.DB_PATH)`;
-- `ingest_worker = IngestWorker(process_fn=_process_events)`.
+- `ingest_worker = IngestWorker(process_fn=_process_events, retention_fn=_run_retention?, periodic_tasks=[(_run_incident_verdicts, INCIDENT_VERDICT_INTERVAL)]?)`.
 
 lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` при остановке.
+
+`_run_incident_verdicts` (Этап 4) — периодическая задача того же потока `IngestWorker`: зовёт
+`incidents.run_pending(store)` (заглушка обработки расследований, см. `docs/spec/incidents.md`),
+если `config.INCIDENT_VERDICT_ENABLED`.
 
 `UPLOADS_DIR` (`config.UPLOADS_DIR`) создаётся при импорте (`mkdir(exist_ok=True)`).
 
@@ -119,6 +123,17 @@ lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` п
 | `GET` | `/alerts` | `source_batch`, `status`, `rule_level`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `store.list_alerts(...)`. Без ключа `mitre` |
 | `GET` | `/alerts/{alert_id}` | — | `store.get_alert(...)`; 404, если нет. Добавляет `alert["mitre"] = kb.enrich_techniques(alert["mitre_techniques"])` |
 | `PATCH` | `/alerts/{alert_id}/status` | `AlertStatusUpdate` | `store.update_alert_status(...)`; 404, если не найден |
+
+### Инциденты (Этап 4)
+
+Полная семантика — `docs/spec/incidents.md`.
+
+| Метод | Путь | Параметры | Поведение |
+|---|---|---|---|
+| `GET` | `/incidents` | `status`, `incident_type`, `source_batch`, `severity`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100` (1..500), `offset=0` | `{incidents, total, limit, offset}`; каждая строка несёт `investigation_status` |
+| `GET` | `/incidents/{incident_id}` | — | `store.get_incident(...)`; 404, если нет. Добавляет `member_alerts`, `investigation`, `mitre` (обогащение тегов правила + member-алертов) |
+| `GET` | `/incidents/{incident_id}/context` | — | `correlation_rule` + `member_rules` (SQL/YAML) + `sample_events` + `related_events` (события по сущности через `compile_filter_query(_incident_entity_filter(group_key))`) + `entity_history`. Удалённое правило / вычищенные `events` → пустые секции + `note` |
+| `PATCH` | `/incidents/{incident_id}/status` | `IncidentStatusUpdate` | `store.update_incident_status(...)`; 404, если не найден |
 
 ### События
 

@@ -16,6 +16,7 @@
 | [`detection-engine.md`](detection-engine.md) | `app/detection/engine.py` | Обёртка Zircolite, прогон батча |
 | [`normalization.md`](normalization.md) | `app/detection/normalize.py` | Результат Zircolite → список `Alert` |
 | [`correlation.md`](correlation.md) | `app/detection/correlation.py` | Стейтфул-корреляция `event_count` / `value_count` |
+| [`incidents.md`](incidents.md) | `app/incidents.py`, таблицы `incidents`/`investigations` | Инциденты (Этап 4), заглушка расследований |
 | [`rules-catalog.md`](rules-catalog.md) | `app/rules/rules_catalog.py` | Каталог Sigma-рулсетов и правил, компиляция |
 | [`main-ruleset.md`](main-ruleset.md) | `app/rules/main_ruleset.py` | Состав «основного рулсета» |
 | [`value-lists.md`](value-lists.md) | `app/rules/value_lists.py` | Именованные списки значений, `%name%` / `\|expand` |

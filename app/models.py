@@ -23,6 +23,18 @@ def utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# Числовой ранг серьёзности - для roll-up инцидента (max среди member-алертов) и сортировки.
+# Держим ОТДЕЛЬНО от порядка объявления enum: rule_level из разных источников иногда приходит
+# как 'unknown'/None, а не как валидный литерал - .rank() должен это пережить без исключения.
+_SEVERITY_RANK: dict[str, int] = {
+    "informational": 1,
+    "low": 2,
+    "medium": 3,
+    "high": 4,
+    "critical": 5,
+}
+
+
 class Severity(str, Enum):
     informational = "informational"
     low = "low"
@@ -37,6 +49,23 @@ class Severity(str, Enum):
             return cls(rule_level)
         except ValueError:
             return cls.informational
+
+    @classmethod
+    def rank(cls, value: "Severity | str | None") -> int:
+        """Числовой ранг (critical=5 ... informational=1). Неизвестное/пустое значение -> 1."""
+        key = value.value if isinstance(value, cls) else str(value or "")
+        return _SEVERITY_RANK.get(key, 1)
+
+    @classmethod
+    def roll_up(cls, values: "list[Severity | str | None]") -> "Severity":
+        """Максимальная серьёзность из набора - severity инцидента как roll-up member-алертов
+        (см. app/store.py:link_alerts_to_incident). Пустой набор -> informational."""
+        best = cls.informational
+        for v in values:
+            cand = v if isinstance(v, cls) else cls.from_zircolite(str(v) if v else None)
+            if cls.rank(cand) > cls.rank(best):
+                best = cand
+        return best
 
 
 class Entities(BaseModel):
@@ -70,6 +99,57 @@ class Alert(BaseModel):
     status: str = "new"  # new -> investigating -> closed
 
 
+class Incident(BaseModel):
+    """Инцидент - агрегат алертов, ЕДИНИЦА РАБОТЫ АГЕНТА (Этап 5). Заводится ТОЛЬКО при
+    срабатывании correlation-правила, помеченного блоком `correlation.incident` (см.
+    app/detection/correlation.py:evaluate_batch, app/rules/rules_catalog.py). Обычные алерты в
+    инциденты сами не собираются (catch-all прохода нет - осознанное ограничение Этапа 4).
+
+    Идентичность - фиксированный бакет по timespan правила: dedup_key =
+    sha256(f"{incident_type}:{':'.join(group_values)}:{window_bucket}")[:16], где window_bucket -
+    anchor окна, округлённый вниз до кратности timespan в секундах. Повтор в том же бакете ->
+    UPDATE строки (см. store.upsert_incidents), разрыв > timespan -> новый бакет -> новый инцидент.
+    """
+    incident_id: str = Field(default_factory=lambda: str(uuid4()))
+    dedup_key: str
+    incident_type: str  # slug из correlation.incident.type
+    title: str
+    severity: Severity
+    status: str = "new"  # new -> investigating -> closed (зеркалит Alert.status)
+    source_batch: str
+    ruleset_path: str = ""
+    correlation_rule_id: str = ""
+    correlation_rule_title: str
+    group_key: dict[str, str] = Field(default_factory=dict)  # {group_by_field: value}
+    member_rule_titles: list[str] = Field(default_factory=list)  # base_rule_titles правила
+    window_start: str  # нормализованный ISO (anchor - timespan)
+    window_end: str  # нормализованный ISO (anchor)
+    window_bucket: str  # ISO начала бакета - часть dedup_key
+    alert_count: int = 0  # привязанных строк alerts (досчитывается в link_alerts_to_incident)
+    mitre_techniques: list[str] = Field(default_factory=list)
+    entities: Entities = Field(default_factory=Entities)
+    sample_events: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow_naive)
+    updated_at: datetime = Field(default_factory=utcnow_naive)
+
+
+class Investigation(BaseModel):
+    """Расследование инцидента: очередь + результат работы агента (Этап 5). На Этапе 4 -
+    только каркас: строка заводится `queued` при создании инцидента, фоновая заглушка
+    (app/incidents.py:run_pending) переводит queued -> running -> done с placeholder-вердиктом."""
+    investigation_id: str = Field(default_factory=lambda: str(uuid4()))
+    incident_id: str
+    status: str = "queued"  # queued -> running -> done -> error
+    verdict: Optional[str] = None  # TP | FP | needs-review
+    rationale: str = ""
+    confidence: Optional[float] = None
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+    created_at: datetime = Field(default_factory=utcnow_naive)
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+
 class IngestFileRequest(BaseModel):
     """Запуск на уже лежащем на диске файле датасета (batch-режим, для тестов/OTRF)."""
     events_path: str
@@ -93,6 +173,11 @@ class IngestResponse(BaseModel):
 
 
 class AlertStatusUpdate(BaseModel):
+    status: str
+
+
+class IncidentStatusUpdate(BaseModel):
+    """Тело PATCH /incidents/{id}/status - new -> investigating -> closed."""
     status: str
 
 

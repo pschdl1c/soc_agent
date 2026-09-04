@@ -67,6 +67,47 @@ def test_retention_fn_called_periodically_even_when_buffer_is_idle():
         assert len(calls) >= 2
 
 
+def test_periodic_tasks_called_periodically(and_alongside_retention=True):
+    """periodic_tasks (Этап 4) - произвольные (fn, interval) колбэки того же потока, что и
+    ретеншн; и работают ОДНОВРЕМЕННО с retention_fn."""
+    import threading
+    import time
+
+    lock = threading.Lock()
+    ret, verdicts = [], []
+
+    worker = IngestWorker(
+        process_fn=_noop, flush_interval=10.0,
+        retention_fn=lambda: (lock.acquire(), ret.append(1), lock.release()),
+        retention_interval=0.05,
+        periodic_tasks=[(lambda: (lock.acquire(), verdicts.append(1), lock.release()), 0.05)],
+    )
+    worker.start()
+    try:
+        time.sleep(0.3)
+    finally:
+        worker.stop()
+
+    with lock:
+        assert len(ret) >= 2
+        assert len(verdicts) >= 2
+
+
+def test_periodic_task_error_does_not_crash_worker():
+    import time
+
+    worker = IngestWorker(
+        process_fn=_noop, flush_interval=10.0,
+        periodic_tasks=[(lambda: (_ for _ in ()).throw(RuntimeError("boom")), 0.05)],
+    )
+    worker.start()
+    try:
+        time.sleep(0.15)
+        assert worker._thread.is_alive()
+    finally:
+        worker.stop()
+
+
 def test_retention_error_does_not_crash_worker():
     import time
 

@@ -66,11 +66,16 @@ class IngestWorker:
         max_queue: int = 100_000,
         retention_fn: Callable[[], None] | None = None,
         retention_interval: float = 3600.0,
+        periodic_tasks: list[tuple[Callable[[], None], float]] | None = None,
     ) -> None:
         """retention_fn - опциональный колбэк ретеншна (см. app/store.py:delete_events_older_than,
         app/main.py:_run_retention), зовётся ЭТИМ ЖЕ фоновым потоком раз в retention_interval
-        секунд (не отдельный поток - см. _run) - None полностью выключает ветку (ни одного
-        лишнего пробуждения потока, если ретеншн не настроен)."""
+        секунд (не отдельный поток - см. _run) - None полностью выключает ветку.
+
+        periodic_tasks - произвольные (fn, interval_seconds) колбэки, зовущиеся тем же потоком
+        по своему интервалу (Этап 4: заглушка расследований инцидентов, см.
+        app/main.py:_run_incident_verdicts). retention_fn - частный случай, внутри складывается
+        в тот же список. Пустой список periodic-задач - ни одного лишнего пробуждения потока."""
         self._process_fn = process_fn
         self._batch_size = batch_size
         self._flush_interval = flush_interval
@@ -79,6 +84,12 @@ class IngestWorker:
         self._running = False
         self._retention_fn = retention_fn
         self._retention_interval = retention_interval
+        # [(fn, interval, [last_run_monotonic]), ...] - last_run в списке ради мутабельности из _run.
+        self._periodic: list[tuple[Callable[[], None], float, list[float]]] = []
+        if retention_fn is not None:
+            self._periodic.append((retention_fn, retention_interval, [0.0]))
+        for fn, interval in (periodic_tasks or []):
+            self._periodic.append((fn, interval, [0.0]))
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -146,19 +157,22 @@ class IngestWorker:
         # Буфер копится между флашами; группируем по источнику уже на флаше.
         buffer: list[tuple[dict[str, Any], str]] = []
         buffer_started = 0.0  # monotonic-время, когда в пустой буфер попало первое событие
-        last_retention = time.monotonic()
+        now0 = time.monotonic()
+        for _fn, _interval, last in self._periodic:
+            last[0] = now0
 
         while True:
-            # Пустой буфер И ретеншн не настроен - блокируемся на очереди без таймаута
-            # (никакого busy-spin, GIL свободен). Есть накопленное - ждём только до дедлайна
-            # флаша. Пустой буфер, НО ретеншн настроен - ждём до дедлайна СЛЕДУЮЩЕЙ проверки
-            # ретеншна: без этой ветки ретеншн не сработал бы вовсе в периоды простоя ingest'а
-            # (буфер пуст -> вечная блокировка на очереди без таймаута, до retention_fn дело
-            # никогда бы не дошло - см. app/store.py:delete_events_older_than).
+            # Пустой буфер И нет ни одной периодической задачи - блокируемся на очереди без
+            # таймаута (никакого busy-spin, GIL свободен). Есть накопленное - ждём только до
+            # дедлайна флаша. Пустой буфер, НО есть периодические задачи (ретеншн events,
+            # заглушка вердиктов инцидентов) - ждём до ближайшего их дедлайна: без этой ветки
+            # они не срабатывали бы вовсе в периоды простоя ingest'а (буфер пуст -> вечная
+            # блокировка на очереди без таймаута).
             if buffer:
                 timeout: float | None = max(0.0, self._flush_interval - (time.monotonic() - buffer_started))
-            elif self._retention_fn is not None:
-                timeout = max(0.0, self._retention_interval - (time.monotonic() - last_retention))
+            elif self._periodic:
+                now = time.monotonic()
+                timeout = max(0.0, min(interval - (now - last[0]) for _fn, interval, last in self._periodic))
             else:
                 timeout = None
             try:
@@ -181,9 +195,11 @@ class IngestWorker:
                 self._flush(buffer)
                 buffer = []
 
-            if self._retention_fn is not None and (time.monotonic() - last_retention) >= self._retention_interval:
-                self._run_retention()
-                last_retention = time.monotonic()
+            now = time.monotonic()
+            for fn, interval, last in self._periodic:
+                if now - last[0] >= interval:
+                    self._run_periodic(fn)
+                    last[0] = time.monotonic()
 
             if stop_now:
                 # Дренируем всё, что осталось в очереди после сигнала остановки.
@@ -199,11 +215,11 @@ class IngestWorker:
                     self._flush(remaining)
                 return
 
-    def _run_retention(self) -> None:
+    def _run_periodic(self, fn: Callable[[], None]) -> None:
         try:
-            self._retention_fn()
-        except Exception as exc:  # noqa: BLE001 - фоновый воркер не должен падать из-за ретеншна
-            print(f"[ingest] ошибка ретеншна: {exc}")
+            fn()
+        except Exception as exc:  # noqa: BLE001 - фоновый воркер не должен падать из-за периодической задачи
+            print(f"[ingest] ошибка периодической задачи {getattr(fn, '__name__', fn)}: {exc}")
 
     def _flush(self, buffer: list[tuple[dict[str, Any], str]]) -> None:
         # ОДИН прогон движка на весь буфер, независимо от того, сколько разных source_label

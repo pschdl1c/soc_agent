@@ -51,35 +51,49 @@ micro-batch И независимо от размера БД.
 сохранении правила (`app/rules/rules_catalog.py:_validate_correlation_doc`), не тихой
 инертностью.
 
-## Производительность: двухфазный счёт
+## Производительность и корректность окна: A3-оценка
 
 **Обязательное требование:** скорость коррелятора не должна зависеть от размера БД. Проверяется
 `scripts/bench_correlation.py` (десятикратный рост `rule_hits` даёт единицы процентов роста
 времени счёта, не десятикратный).
 
-Достигается двумя изменениями относительно наивной реализации «запрос на каждый ключ с `JOIN`
-к `events`»:
+Держится на двух вещах:
 
 1. **`rule_hits.group_json`** — значения нужных полей (group-by ∪ `condition.field` у
    `value_count`) денормализуются ПРЯМО в леджер на запись (`store.store_events(...,
    hit_spec=...)` для обычных Sigma-попаданий, `store.insert_correlation_hits(...)` для
-   попаданий самих correlation-правил — см. «Цепочки» ниже). Счёт больше НЕ обращается к
-   `events`/`raw_json` вообще — только к `rule_hits`, который проиндексирован именно под этот
-   доступ (`idx_rule_hits_lookup(rule_title, source_batch, event_time)`).
-2. **Двухфазный запрос** (`_evaluate_correlation_rule`):
-   - **Фаза 1** — `store.evaluate_correlation_windows(...)` — ОДИН `GROUP BY`-запрос по ВСЕМ
-     кандидатным ключам объединённого окна `[min(anchor) − timespan, max(anchor)]` сразу.
-     `O(H)`, где `H` — число попаданий базового правила внутри окна, НЕ размер БД. Грубая
-     оценка (окно шире индивидуального может завысить счёт отдельных ключей) — служит
-     коротким замыканием: ключи, не прошедшие порог здесь, дальше не проверяются.
-   - **Фаза 2** — `store.evaluate_correlation_window(...)` — точная перепроверка ТОЛЬКО
-     кандидатов, прошедших фазу 1 (обычно 0–2 ключа за flush), в их СОБСТВЕННОМ узком окне.
-     Здесь же достаются `sample_events` (единственное место, где есть `JOIN` к `events` — не
-     влияет на стоимость счёта, `LIMIT 10`).
+   попаданий самих correlation-правил — см. «Цепочки» ниже). Счёт НЕ обращается к
+   `events`/`raw_json` — только к `rule_hits`, проиндексированному под этот доступ
+   (`idx_rule_hits_lookup(rule_title, source_batch, event_time)`).
+2. **A3-оценка** (`_evaluate_correlation_rule` + `_best_anchor`) — на каждое активное правило за
+   flush:
+   - `store.fetch_correlation_hits(...)` — ОДИН range-scan по `rule_hits`, СУЖЕННЫЙ до тех
+     group-by-ключей, у которых в этом flush'е были новые попадания (`new_spans`), в диапазоне
+     `[min(new) − timespan, max(new) + timespan]`. `O(H)`, `H` — число попаданий этих ключей в
+     диапазоне, НЕ размер БД. Дешёвый Python-гейт (грубая оценка по всем вытащенным хитам ключа
+     ≥ любого под-окна) отсекает ключи, которые не пройдут нигде.
+   - `_best_anchor(...)` — проход СКОЛЬЗЯЩИМ окном в памяти (`O(H)`) по ВСЕМ точкам-якорям конца
+     окна в диапазоне `[min(new), max(new) + timespan]`; возвращает самую позднюю точку `e`, для
+     которой окно `[e − timespan, e]` удовлетворяет условию.
+   - На найденное окно — один `store.evaluate_correlation_window(...)` за авторитетным `count` и
+     `sample_events` (единственное место с `JOIN` к `events` — ради контента события для
+     карточки, не для счёта, `LIMIT 10`).
 
-`JOIN` к `events` больше не участвует в подсчёте `count` вообще — заменён на `json_extract` по
-`rule_hits.group_json`. `EXPLAIN QUERY PLAN` на обоих запросах даёт `SEARCH rule_hits USING
-INDEX idx_rule_hits_lookup (...)`, без `SCAN`.
+**Зачем все точки-якоря, а не одна на `max(event_time)`.** Раньше окно анкерилось на
+`max(event_time)` НОВЫХ событий флаша. При перемешанном порядке прихода (форвардер выгрузил
+буфер, разъехались часы, replay архива) «позднее» событие со СТАРОЙ меткой сдвигало якорь назад,
+и окно `[anchor − timespan, anchor]` переставало накрывать уже сохранённые более свежие хиты —
+правило молча не взводилось, пока по тому же ключу не приходило событие с меткой ≥ самого
+позднего сохранённого (краевой эффект, полное описание — история обсуждения). A3 проверяет весь
+интересный диапазон точек-якорей, поэтому находит подходящее окно сразу.
+
+`JOIN` к `events` в подсчёте `count` не участвует — только `json_extract` по
+`rule_hits.group_json`; `EXPLAIN QUERY PLAN` на `fetch_correlation_hits`/
+`evaluate_correlation_window` даёт `SEARCH rule_hits USING INDEX idx_rule_hits_lookup (...)`.
+
+`store.evaluate_correlation_windows` (старая «фаза 1», один `GROUP BY` по объединённому окну)
+движком больше не вызывается — метод оставлен в `Store` (свои тесты), но A3 делает гейт
+Python-стороной по тем же вытащенным строкам, без второго прохода по `rule_hits`.
 
 ## Цепочки (correlation → correlation) без отдельной таблицы
 
@@ -124,9 +138,14 @@ best-effort в исходном порядке.
 
 ## Публичный интерфейс
 
-### `evaluate_batch(store, ruleset_path, source_batch, matched_events_by_title) -> int`
+### `evaluate_batch(store, ruleset_path, source_batch, matched_events_by_title, link_specs_out=None) -> int`
 
 Точка входа, вызывается из `app/main.py:_process_batch` после каждого `store.store_events(...)`.
+
+- `link_specs_out` (Этап 4, необязателен) — если передан список, `evaluate_batch` дописывает в
+  него по записи на каждый созданный/обновлённый инцидент: `{dedup_key, incident_id,
+  source_batch, rule_titles, entity_values, window_start, window_end}`. `_process_batch` по этим
+  записям ПОСЛЕ `store.upsert_alerts` вызывает `store.link_alerts_to_incident`.
 
 - `matched_events_by_title` — `{rule_title: [сырые события, сматченные в этом батче под этим
   source_batch]}` — и для БАЗОВЫХ правил, и (после первого срабатывания в том же проходе) для
@@ -138,27 +157,33 @@ best-effort в исходном порядке.
 
 Для каждого активного correlation-правила (в топологическом порядке):
 
-1. Пропуск, если уровень `informational`.
+1. Пропуск, если уровень `informational` — **кроме** правил с блоком `correlation.incident`
+   (Этап 4): они пробивают отсечку, severity инцидента берётся из `incident.severity`.
 2. Пропуск, если `group_by` пуст (корреляция «по всей выборке» не поддерживается).
 3. `new_matches` — объединение попаданий по всем `base_rule_titles` (включая синтетические от
    уже сработавших в этом проходе потомков); пропуск, если пусто (короткое замыкание).
 4. `timespan_seconds` = `app.timespan.parse_timespan(timespan)`; пропуск, если `None`.
 5. Для `value_count`: `distinct_field` = `condition["field"]`; пропуск, если не задан.
-6. Якорь конца окна на КАЖДЫЙ кандидатный ключ = максимальный нормализованный `event_time`
-   среди новых попаданий этого батча с этим ключом. Значения ключа приводятся к строкам
-   (`str(v)`) — `group_json` на записи хранит их строками, несогласованность типов (напр.
-   Python `int` из числового поля вроде `EventID` против строки из `group_json`) раньше давала
-   ложноотрицательный результат фазы 1 (ключ просто не находился в ответе).
-7. `_evaluate_correlation_rule(...)` — двухфазный счёт (см. выше), с типоспецифичной логикой:
-   - `event_count`/`value_count` — обычное сравнение `condition` со счётом;
-   - `temporal` — `mode="distinct_rules"`, порог по умолчанию — все ссылки должны
-     присутствовать (`count >= len(base_titles)`); явный простой `condition` (если указан)
-     уважается вместо дефолта (`_temporal_required_met`);
+6. `new_spans` на КАЖДЫЙ кандидатный ключ = `(min, max)` нормализованного `event_time` среди
+   новых попаданий этого батча с этим ключом — диапазон, в котором A3 ищет точку-якорь.
+   Значения ключа приводятся к строкам (`str(v)`) — `group_json` на записи хранит их строками,
+   несогласованность типов (напр. Python `int` из числового поля вроде `EventID` против строки
+   из `group_json`) раньше давала ложноотрицательный результат.
+7. `_evaluate_correlation_rule(...)` — A3-оценка (см. выше), с типоспецифичной логикой:
+   - `event_count`/`value_count` — сравнение `condition` со счётом окна (`_condition_met`);
+   - `temporal` — метрика = число разных `rule_title` в окне, порог по умолчанию — все ссылки
+     присутствуют (`count >= len(base_titles)`); явный простой `condition` уважается вместо
+     дефолта (`_temporal_required_met`);
    - `temporal_ordered` — тот же порог, ПЛЮС `store.fetch_correlation_hit_sequence(...)` +
      `_sequence_matches_order(...)` (жадное сопоставление подпоследовательности) — РЕАЛЬНАЯ
      проверка порядка появления, которой нет ни у одного апстрим Sigma-бэкенда.
-8. Сработавшие ключи → `Alert` (`_build_alert`) + `store.insert_correlation_hits(...)` СРАЗУ.
-9. `store.upsert_correlation_alerts(alerts)` — один раз в конце по всем правилам батча.
+8. Сработавшие ключи → `Alert` (`_build_alert`), либо — если у правила есть блок
+   `correlation.incident` (Этап 4) — `Incident` (`_build_incident`) ВМЕСТО `Alert` (обычного
+   `engine="correlation"` алерта по такому правилу не будет). Идентичность инцидента —
+   фиксированный бакет по `timespan` (`dedup_key = sha256(incident_type:group_values:window_bucket)`).
+   `store.insert_correlation_hits(...)` пишется СРАЗУ в обоих случаях (единообразие/цепочки).
+9. `store.upsert_correlation_alerts(alerts)` + `store.upsert_incidents(incidents)` (с
+   `store.enqueue_investigation` на каждый) — один раз в конце по всем правилам батча.
 
 ### `active_hit_spec(ruleset_path: str | None) -> dict[str, set[str]]`
 
@@ -191,7 +216,9 @@ best-effort в исходном порядке.
 
 Возвращает записи ЛЮБОГО типа (в т.ч. непригодные к эвалуации) — фильтрация по
 поддерживаемым типам (`event_count`/`value_count`/`temporal`/`temporal_ordered`) выполняется
-вызывающей стороной (`evaluate_batch`, `active_hit_spec`).
+вызывающей стороной (`evaluate_batch`, `active_hit_spec`). Каждая запись копируется с
+добавленным ключом `ruleset_path` (реальный custom-рулсет-источник, не `"main"`) — нужен
+инцидентам для `GET /incidents/{id}/context` (dict'ы из кэша `rules_catalog` не мутируются).
 
 ## Формирование алерта (`_build_alert`)
 
@@ -204,10 +231,25 @@ best-effort в исходном порядке.
   набор значений group-by, не (host, main_entity).
 - `engine="correlation"`, `event_count = count`.
 
+## Формирование инцидента (`_build_incident`, Этап 4)
+
+Вызывается вместо `_build_alert`, если у правила есть блок `correlation.incident`.
+
+- `window_bucket` = `anchor_time`, округлённый ВНИЗ до кратности `timespan` в секундах (ISO-строка).
+- `dedup_key` = `sha256(f"{incident_type}:" + ":".join(key_values) + f":{window_bucket}")[:16]` —
+  фиксированный бакет: повтор ключа в том же бакете → UPDATE строки инцидента
+  (`store.upsert_incidents`), разрыв больше `timespan` → новый бакет → новый инцидент.
+- `severity` = `incident.severity` → иначе `level` правила → иначе `medium`; далее
+  `store.link_alerts_to_incident` досчитывает roll-up по привязанным member-алертам.
+- `ruleset_path` = поле, добавленное `_active_correlation_rules`; `mitre_techniques` = теги
+  правила с префиксом `attack.t`; `entities` = `_extract_entities(sample_events)`.
+- `None`, если `anchor_time` не парсится (ключ пропускается).
+
 ## Инварианты
 
-- Якорь окна — `event_time` самого позднего нового события с ключом, не `datetime.now()`
-  (корректная работа при replay исторических датасетов).
+- Якорь окна — `event_time` одного из сохранённых попаданий (A3 перебирает точки-якоря в
+  диапазоне `[min(new), max(new) + timespan]`), не `datetime.now()` — корректная работа при
+  replay исторических датасетов и при перемешанном порядке прихода.
 - Нормализация времени (`_normalize_event_time`) дублирует `app/store._normalize_event_time`:
   `" "` → `"T"`, удаление `"Z"`. Форма должна совпадать с `rule_hits.event_time`.
 - Корреляция считается в пределах одного `source_batch`.
@@ -247,23 +289,36 @@ best-effort в исходном порядке.
   именами не найдут поле в событии, пока маппинг не добавлен явно.
 - **Edge-triggered, не level-triggered.** Переоценка идёт только при НОВОМ попадании базового
   правила в текущем flush'е (`evaluate_batch` вызывается из `_process_batch` после каждого
-  `store_events`). Порог, формально достигнутый исключительно течением времени без новых
-  событий, сам по себе не «дозревает».
+  `store_events`). A3 закрыл прежний краевой эффект (перемешанный порядок прихода — «позднее»
+  событие со старой меткой больше не «прячет» окно): при любом порядке прихода правило взводится
+  в момент, когда прибывшее событие делает какое-то окно `[e − timespan, e]` в диапазоне
+  `[min(new), max(new) + timespan]` удовлетворяющим условию. Остаётся один случай: правило
+  добавили в основной рулсет уже ПОСЛЕ того, как все нужные события пришли, и по ключу наступила
+  полная тишина — тогда переоценке нечего запустить (см. следующий пункт про ретроактивность и
+  возможный периодический доскан).
 - **Нет ретроактивного пересчёта.** `hit_spec` (какие поля писать в `group_json`) вычисляется
   из АКТИВНЫХ на момент батча correlation-правил (`active_hit_spec`) — события, принятые ДО
   того, как правило попало в основной рулсет, в `rule_hits` не переписываются задним числом.
 - **Ретеншн `events` подрезает и `rule_hits`.** `store.delete_events_older_than` чистит
   осиротевшие `rule_hits` вместе со старыми `events` — если `timespan` корреляции длиннее
-  `SIEM_EVENTS_RETENTION_DAYS`, окно будет систематически недосчитывать (старая часть окна
-  физически удалена раньше, чем корреляция успеет её увидеть).
-- **Дедуп по значениям `group-by`, не по времени.** Повторное срабатывание того же ключа
-  перезаписывает `event_count`/`sample_events` уже существующей строки алерта (см.
-  `upsert_correlation_alerts`), не создаёт отдельную запись — разделение «новый инцидент» /
-  «продолжение старого» появится только с сущностью Инцидента (Этап B).
+  `SIEM_EVENTS_RETENTION_DAYS`, окно систематически недосчитывало бы. Поэтому такое правило
+  ОТКЛОНЯЕТСЯ на сохранении: `rules_catalog._validate_correlation_doc` бросает
+  `RuleValidationError`, если `parse_timespan(timespan) > SIEM_EVENTS_RETENTION_DAYS·86400` (при
+  включённом ретеншне; `0` — ретеншн выключен, проверки нет).
+- **Дедуп correlation-АЛЕРТА по значениям `group-by`, не по времени.** Повторное срабатывание
+  того же ключа перезаписывает `event_count`/`sample_events` уже существующей строки алерта
+  (см. `upsert_correlation_alerts`), не создаёт отдельную запись. Разделение «новый» /
+  «продолжение» добавляет сущность ИНЦИДЕНТА (Этап 4): у инцидента `dedup_key` включает
+  временнóй бакет по `timespan`, поэтому активность после разрыва больше `timespan` заводит
+  новый инцидент. См. `docs/spec/incidents.md`.
+- **Только сценарные инциденты (Этап 4).** Инцидент заводится ТОЛЬКО помеченным
+  `correlation.incident` correlation-правилом. Catch-all прохода по таблице `alerts` нет —
+  одиночный critical-алерт без покрывающего сценария инцидентом не станет (осознанное
+  ограничение, `docs/spec/incidents.md`).
 
 ## Зависимости
 
 - Импортирует: `hashlib`, `json`, `datetime`; `app/rules/{main_ruleset, rules_catalog}`;
-  `app/fields.py`; `app/models.py`; `app/store.py` (`Store`); `app/timespan.py`
-  (`parse_timespan`).
+  `app/fields.py`; `app/models.py` (`Alert`, `Entities`, `Incident`, `Severity`, `SigmaRuleRef`);
+  `app/store.py` (`Store`); `app/timespan.py` (`parse_timespan`).
 - Импортируется: `app/main.py` (`evaluate_batch`, `active_hit_spec`).

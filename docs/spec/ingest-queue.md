@@ -33,7 +33,7 @@
 
 ## Класс `IngestWorker`
 
-### `__init__(process_fn, batch_size=DEFAULT_BATCH_SIZE, flush_interval=DEFAULT_FLUSH_INTERVAL, max_queue=100_000, retention_fn=None, retention_interval=3600.0)`
+### `__init__(process_fn, batch_size=DEFAULT_BATCH_SIZE, flush_interval=DEFAULT_FLUSH_INTERVAL, max_queue=100_000, retention_fn=None, retention_interval=3600.0, periodic_tasks=None)`
 
 Создаёт `queue.Queue(maxsize=max_queue)`; поток не запускается. `retention_fn` (Этап A
 дорожной карты) — опциональный колбэк ретеншна `events` (`app/store.py:
@@ -41,6 +41,14 @@ delete_events_older_than`, см. `app/main.py:_run_retention`), зовётся �
 раз в `retention_interval` секунд — второго потока не заводится. `None` (дефолт, либо когда
 `SIEM_EVENTS_RETENTION_DAYS<=0`) полностью выключает ветку — ни одного лишнего пробуждения
 потока сверх обычного цикла флаша.
+
+`periodic_tasks` (Этап 4) — `list[tuple[Callable[[], None], float]] | None`: произвольные
+`(fn, interval_seconds)` колбэки того же потока (Этап 4: заглушка вердиктов инцидентов
+`app/main.py:_run_incident_verdicts` → `app/incidents.py:run_pending`). `retention_fn` внутри
+складывается в тот же список задач, поэтому логика пробуждения потока в простое (ниже) общая
+для ретеншна и periodic-задач. Каждая задача обёрнута в `try/except` (`_run_periodic`) — ошибка
+одной не роняет поток. Пустой список (нет ни `retention_fn`, ни `periodic_tasks`) — ни одного
+лишнего пробуждения.
 
 ### `start() -> None`
 
@@ -73,28 +81,28 @@ delete_events_older_than`, см. `app/main.py:_run_retention`), зовётся �
 
 ## Цикл потребителя (`_run`)
 
-- Пустой буфер, `retention_fn` не задан — блокирующее ожидание `queue.get()` без таймаута.
-- Пустой буфер, `retention_fn` задан — ожидание до дедлайна следующей проверки ретеншна
-  (`last_retention + retention_interval`) — без этой ветки ретеншн не сработал бы вовсе в
-  периоды простоя ingest'а (вечная блокировка на очереди без таймаута, до `retention_fn` дело
-  никогда бы не дошло).
+- Пустой буфер, `self._periodic` пуст (нет ни `retention_fn`, ни `periodic_tasks`) —
+  блокирующее ожидание `queue.get()` без таймаута.
+- Пустой буфер, есть periodic-задачи — ожидание до ближайшего их дедлайна
+  (`min(interval - (now - last_run))` по всем задачам) — без этой ветки задачи не сработали бы
+  вовсе в периоды простоя ingest'а (вечная блокировка на очереди без таймаута).
 - Непустой буфер — ожидание до дедлайна `buffer_started + flush_interval` (приоритет над
-  веткой ретеншна — таймаут очереди берётся по буферу, если он не пуст).
+  веткой periodic-задач — таймаут очереди берётся по буферу, если он не пуст).
 - Триггеры flush: `len(buffer) >= batch_size` (size), прошло `>= flush_interval` от первого
   события буфера (time), получен сигнал остановки.
 - Flush — один вызов `process_fn(buffer)` на весь буфер, независимо от числа разных
   `source_label` в нём; затем `buffer = []`.
-- После обработки flush-триггеров, на каждой итерации: если `retention_fn` задан и прошло
-  `>= retention_interval` с прошлой проверки — `_run_retention()`, обновление `last_retention`.
+- После обработки flush-триггеров, на каждой итерации: каждая созревшая periodic-задача
+  (`now - last_run >= interval`) вызывается через `_run_periodic(fn)`, её `last_run` обновляется.
 - Сигнал остановки: после финального flush очередь дренируется до конца, остаток флашится,
   поток завершается.
 
-## Обработка ошибок flush (`_flush`) и ретеншна (`_run_retention`)
+## Обработка ошибок flush (`_flush`) и periodic-задач (`_run_periodic`)
 
 `process_fn(buffer)` в `try/except Exception` — исключение логируется (`print`), поток
-не падает. Форвардер получает `202` независимо от исхода обработки батча. Аналогично
-`retention_fn()` обёрнут в `_run_retention` (`try/except Exception`, логирование) — ошибка
-ретеншна не должна ронять ingest.
+не падает. Форвардер получает `202` независимо от исхода обработки батча. Аналогично каждая
+periodic-задача (`retention_fn`, заглушка вердиктов инцидентов) вызывается через `_run_periodic`
+(`try/except Exception`, логирование) — ошибка одной задачи не должна ронять ingest.
 
 ## Инварианты
 

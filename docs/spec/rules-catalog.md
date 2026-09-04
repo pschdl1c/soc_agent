@@ -112,9 +112,23 @@ base-ссылки) молча пропадает целиком (Этап A до
   "id": <str|None>, "title": <str>, "level": <str>, "description": <str>, "tags": <list>,
   "type": <str>, "group_by": <list>, "timespan": <str>, "condition": <dict>,
   "base_rule_titles": [<title соседнего правила>, ...],
-  "base_rule_refs": [{"title": <str>, "kind": "base"|"correlation"}, ...]
+  "base_rule_refs": [{"title": <str>, "kind": "base"|"correlation"}, ...],
+  "incident": <{"type": <slug>, "severity": <str|None>, "title": <str|None>} | None>
 }
 ```
+
+`incident` (Этап 4) — нормализованный блок `correlation.incident` (`_parse_incident_spec`);
+`None`, если блока нет. Помечает правило как инцидентное (см. `docs/spec/incidents.md`).
+`_compile_correlation_doc` кладёт в `.manifest.json` булев бейдж `incident: true` (без slug —
+его читает `load_correlation_rules` из raw YAML).
+
+`_validate_correlation_doc` на сохранении дополнительно проверяет:
+- блок `correlation.incident`, если задан: `type` обязателен и slug `^[a-z0-9][a-z0-9_]{0,63}$`,
+  `severity` из набора `Severity`, `title` непуст;
+- `timespan` не длиннее срока хранения событий: `parse_timespan(timespan) >
+  SIEM_EVENTS_RETENTION_DAYS·86400` (при включённом ретеншне) → `RuleValidationError` — иначе
+  окно корреляции систематически недосчитывало бы, часть его старше ретеншна физически
+  удаляется вместе с `events` и осиротевшими `rule_hits` (см. `docs/spec/correlation.md`).
 
 `base_rule_titles` — плоский список (обратная совместимость, используется как OR-список в
 SQL); `base_rule_refs` — параллельный список с `kind`, нужен `app/detection/correlation.py`

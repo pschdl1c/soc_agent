@@ -70,6 +70,8 @@ from uuid import uuid4
 
 import yaml
 
+from app import config
+from app.models import Severity
 from app.rules import value_lists
 from app.timespan import parse_timespan as timespan_parse
 
@@ -104,6 +106,12 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CORRELATION_EXT = ".sigmacorr"
 
 _CORR_TYPES = {"event_count", "value_count", "temporal", "temporal_ordered"}
+
+# slug типа инцидента (correlation.incident.type) - lowercase, для incidents.incident_type и
+# параметризации типа инцидента (см. CLAUDE.md §7 Этап 4). В духе value_lists._NAME_RE, но
+# только нижний регистр.
+_INCIDENT_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
+_SEVERITY_VALUES = {s.value for s in Severity}
 
 
 class CatalogError(Exception):
@@ -453,6 +461,7 @@ def _load_correlation_rules_uncached(target_dir: Path) -> list[dict[str, Any]]:
             "condition": corr.get("condition") or {},
             "base_rule_titles": [r["title"] for r in base_refs],
             "base_rule_refs": base_refs,
+            "incident": _parse_incident_spec(corr.get("incident")),
         })
     return results
 
@@ -572,6 +581,23 @@ def _is_simple_correlation_condition(condition: Any) -> bool:
     return bool(keys) and keys.issubset(_CORR_CONDITION_OPS)
 
 
+def _parse_incident_spec(raw: Any) -> dict[str, Any] | None:
+    """Нормализует блок correlation.incident в {type, severity?, title?} для
+    load_correlation_rules. None, если блока нет или type кривой - молча (валидацию с громкими
+    ошибками делает _validate_correlation_doc на СОХРАНЕНИИ; здесь - защитное чтение уже
+    лежащего на диске правила, как и всё в _load_correlation_rules_uncached)."""
+    if not isinstance(raw, dict):
+        return None
+    itype = raw.get("type")
+    if not itype or not _INCIDENT_TYPE_RE.match(str(itype)):
+        return None
+    return {
+        "type": str(itype),
+        "severity": str(raw["severity"]) if raw.get("severity") else None,
+        "title": str(raw["title"]).strip() if raw.get("title") else None,
+    }
+
+
 def _validate_correlation_doc(doc: dict[str, Any]) -> None:
     """Лёгкая структурная валидация correlation-документа БЕЗ pySigma (см. докстринг модуля
     про CORRELATION_EXT/почему pySigma тут не участвует вообще). Не полный валидатор Sigma-
@@ -607,10 +633,24 @@ def _validate_correlation_doc(doc: dict[str, Any]) -> None:
             "корреляция 'по всей выборке' (без group-by) не поддержана"
         )
     timespan = corr.get("timespan")
-    if not timespan or timespan_parse(timespan) is None:
+    timespan_seconds = timespan_parse(timespan) if timespan else None
+    if timespan_seconds is None:
         raise RuleValidationError(
             f"correlation.timespan должен быть числом с единицей s/m/h/d/w (например '5m'), "
             f"получено: {timespan!r}"
+        )
+    # timespan не должен превышать срок хранения events: ретеншн (app/store.py:
+    # delete_events_older_than) удаляет старые events И осиротевшие rule_hits, поэтому окно
+    # длиннее ретеншна систематически недосчитывало бы - старая часть окна физически удалена
+    # раньше, чем правило успеет её увидеть (см. docs/spec/correlation.md). 0 - ретеншн
+    # выключен (храним вечно), проверка не нужна.
+    retention_days = getattr(config, "EVENTS_RETENTION_DAYS", 0) or 0
+    if retention_days > 0 and timespan_seconds > retention_days * 86400:
+        raise RuleValidationError(
+            f"correlation.timespan ({timespan}) больше срока хранения событий "
+            f"(SIEM_EVENTS_RETENTION_DAYS={retention_days}д) - окно корреляции недосчитывало бы: "
+            f"часть окна старше ретеншна физически удаляется вместе с events и rule_hits. "
+            f"Уменьши timespan или увеличь SIEM_EVENTS_RETENTION_DAYS."
         )
     condition = corr.get("condition")
     if corr_type in ("event_count", "value_count"):
@@ -627,6 +667,29 @@ def _validate_correlation_doc(doc: dict[str, Any]) -> None:
             "temporal_ordered_extended) не поддержаны - condition должен быть словарём из "
             f"операторов {sorted(_CORR_CONDITION_OPS)} или отсутствовать"
         )
+
+    # correlation.incident - помечает правило как ИНЦИДЕНТНОЕ (см. app/detection/correlation.py:
+    # evaluate_batch, CLAUDE.md §7 Этап 4). Срабатывание такого правила поднимает инцидент, а
+    # НЕ обычный correlation-алерт. Блок необязателен; если задан - валидируем громко.
+    incident = corr.get("incident")
+    if incident is not None:
+        if not isinstance(incident, dict):
+            raise RuleValidationError("correlation.incident должен быть словарём {type, severity?, title?}")
+        itype = incident.get("type")
+        if not itype or not _INCIDENT_TYPE_RE.match(str(itype)):
+            raise RuleValidationError(
+                "correlation.incident.type обязателен и должен быть slug'ом "
+                "[a-z0-9][a-z0-9_]{0,63} (например 'brute_force_success')"
+            )
+        sev = incident.get("severity")
+        if sev is not None and str(sev) not in _SEVERITY_VALUES:
+            raise RuleValidationError(
+                f"correlation.incident.severity должен быть одним из {sorted(_SEVERITY_VALUES)}, "
+                f"получено: {sev!r}"
+            )
+        title = incident.get("title")
+        if title is not None and not str(title).strip():
+            raise RuleValidationError("correlation.incident.title, если задан, не может быть пустым")
 
 
 def _compile_correlation_doc(doc: dict[str, Any]) -> dict[str, Any]:
@@ -646,6 +709,11 @@ def _compile_correlation_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "falsepositives": doc.get("falsepositives", []),
         "level": doc.get("level", "informational"),
         "correlation": True,
+        # Булев бейдж "это правило поднимает инцидент" для UI/браузинга - сам slug/severity/title
+        # в манифест не дублируем, их читает load_correlation_rules из raw YAML (как type/group-by).
+        "incident": bool(
+            isinstance(doc.get("correlation"), dict) and doc["correlation"].get("incident")
+        ),
         "rule": [],
         "filename": "",
         "channel": [],

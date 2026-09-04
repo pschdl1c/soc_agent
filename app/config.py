@@ -37,3 +37,10 @@ INGEST_FLUSH_INTERVAL = float(os.getenv("SIEM_INGEST_FLUSH_INTERVAL", "5.0"))
 # см. app/main.py:_run_retention) - сколько дней хранить сырые события. 0 - выключено (события
 # не удаляются автоматически). alerts ретеншн не подпадает - другой жизненный цикл, см. CLAUDE.md.
 EVENTS_RETENTION_DAYS = int(os.getenv("SIEM_EVENTS_RETENTION_DAYS", "14"))
+
+# Фоновая обработка расследований инцидентов (app/incidents.py:run_pending, вызывается тем же
+# потоком IngestWorker, что и ретеншн). На Этапе 4 - заглушка (queued -> done с placeholder-
+# вердиктом); настоящий агент - Этап 5 (префикс SOC_AGENT_* зарезервирован под его LLM-провайдера).
+# ENABLED=0 полностью выключает джобу. INTERVAL - как часто опрашивать очередь, секунды.
+INCIDENT_VERDICT_ENABLED = os.getenv("SIEM_INCIDENT_VERDICT_ENABLED", "1") not in ("0", "false", "False", "")
+INCIDENT_VERDICT_INTERVAL = float(os.getenv("SIEM_INCIDENT_VERDICT_INTERVAL", "30"))

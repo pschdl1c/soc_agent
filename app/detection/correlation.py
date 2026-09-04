@@ -28,15 +28,20 @@ correlation-правило (и ни одна корреляция, реальн�
 flush'е) не даёт новых попаданий - до БД дело не доходит вовсе.
 
 Требование к производительности (обязательное, см. CLAUDE.md/docs/spec/correlation.md):
-скорость не должна зависеть от размера БД. Достигается ДВУХФАЗНЫМ счётом (см.
-_evaluate_correlation_rule): фаза 1 - ОДИН GROUP BY-запрос по rule_hits сразу по ВСЕМ
-кандидатным ключам объединённого окна (store.evaluate_correlation_windows, без JOIN к events -
-O(H), H = число попаданий в окне, не размер БД); фаза 2 - точная перепроверка ТОЛЬКО
-кандидатов, прошедших грубый порог фазы 1 (обычно 0-2 ключа за flush), в их СОБСТВЕННОМ узком
-окне (store.evaluate_correlation_window). Ключ к этому - rule_hits.group_json: денормализованные
-значения нужных полей пишутся ПРЯМО В rule_hits на store_events (см. active_hit_spec ниже), а
-не достаются через JOIN/json_extract(raw_json,...) на events - что и убирает зависимость от
-размера events/БД в целом.
+скорость не должна зависеть от размера БД. Достигается A3-оценкой (_evaluate_correlation_rule):
+на каждое активное правило за flush - ОДИН range-scan по rule_hits
+(store.fetch_correlation_hits), СУЖЕННЫЙ до тех group-by-ключей, у которых в этом flush'е были
+новые попадания, в диапазоне [min(new) - timespan, max(new) + timespan]; дальше - проход
+СКОЛЬЗЯЩИМ окном в памяти (_best_anchor, O(H), H = число попаданий в окне для этих ключей, не
+размер БД) по ВСЕМ точкам-якорям конца окна. Проверять все точки-якоря, а не одну на
+max(event_time), нужно из-за перемешанного порядка прихода (форвардер выгрузил буфер,
+разъехались часы, replay): «позднее» событие со старой меткой раньше сдвигало якорь назад, и
+окно переставало накрывать уже сохранённые свежие хиты - правило молча не взводилось (краевой
+эффект, см. docs/spec/correlation.md). На найденное окно - один store.evaluate_correlation_window
+за авторитетным счётом и sample_events (единственное место с JOIN к events - ради контента
+события, не для счёта). Ключ к независимости от размера БД - rule_hits.group_json:
+денормализованные значения нужных полей пишутся ПРЯМО В rule_hits на store_events (см.
+active_hit_spec ниже), а не достаются через JOIN/json_extract(raw_json,...) на events.
 
 ЦЕПОЧКИ без отдельной таблицы: сработавшая корреляция пишется в rule_hits КАК ОБЫЧНОЕ
 попадание (store.insert_correlation_hits) - синтетический event_id якоря, rule_title = title
@@ -65,7 +70,7 @@ from app.fields import (
     USER_FIELDS,
     first_present,
 )
-from app.models import Alert, Entities, Severity, SigmaRuleRef
+from app.models import Alert, Entities, Incident, Severity, SigmaRuleRef
 from app.store import Store
 from app.timespan import parse_timespan
 
@@ -177,9 +182,17 @@ def _active_correlation_rules(ruleset_path: str | None) -> list[dict[str, Any]]:
                 active_ids_by_ruleset.setdefault(src, set()).add(rule.get("id"))
         result: list[dict[str, Any]] = []
         for src, ids in active_ids_by_ruleset.items():
-            result += [c for c in rules_catalog.load_correlation_rules(src) if c["id"] in ids]
+            # {**c, ...} - НЕ мутируем dict'ы из кэша rules_catalog. ruleset_path (реальный
+            # custom-рулсет-источник, не "main") нужен инцидентам для GET /incidents/{id}/context.
+            result += [
+                {**c, "ruleset_path": src}
+                for c in rules_catalog.load_correlation_rules(src) if c["id"] in ids
+            ]
         return result
-    return rules_catalog.load_correlation_rules(ruleset_path)
+    return [
+        {**c, "ruleset_path": ruleset_path}
+        for c in rules_catalog.load_correlation_rules(ruleset_path)
+    ]
 
 
 def active_hit_spec(ruleset_path: str | None) -> dict[str, set[str]]:
@@ -298,6 +311,124 @@ def _build_alert(
     )
 
 
+def _build_incident(
+    corr: dict[str, Any],
+    incident_spec: dict[str, Any],
+    key: tuple[Any, ...],
+    group_values: dict[str, str],
+    sample_events: list[dict[str, Any]],
+    anchor_time: str,
+    timespan_seconds: int,
+    base_titles: list[str],
+    source_batch: str,
+) -> Incident | None:
+    """Строит Incident для сработавшего инцидентного correlation-правила (см. evaluate_batch).
+    Идентичность - фиксированный бакет по timespan: window_bucket = anchor, округлённый вниз до
+    кратности timespan в секундах; dedup_key = sha256(type:group_values:window_bucket)[:16].
+    Повтор в том же бакете -> UPDATE строки (store.upsert_incidents). None, если anchor_time не
+    парсится (бакет не посчитать) - ключ пропускается."""
+    try:
+        epoch = int(datetime.fromisoformat(anchor_time).timestamp())
+    except ValueError:
+        return None
+    bucket_start = datetime.fromtimestamp((epoch // timespan_seconds) * timespan_seconds)
+    window_bucket = bucket_start.isoformat()
+
+    raw = f'{incident_spec["type"]}:' + ":".join(str(v) for v in key) + f":{window_bucket}"
+    dedup_key = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    window_start = _shift_iso(anchor_time, -timespan_seconds) or anchor_time
+    sev = incident_spec.get("severity") or corr.get("level") or "medium"
+    techniques = [t for t in (corr.get("tags") or []) if str(t).startswith("attack.t")]
+
+    return Incident(
+        dedup_key=dedup_key,
+        incident_type=incident_spec["type"],
+        title=incident_spec.get("title") or corr["title"],
+        severity=Severity.from_zircolite(sev),
+        source_batch=source_batch,
+        ruleset_path=corr.get("ruleset_path", ""),
+        correlation_rule_id=corr.get("id") or "",
+        correlation_rule_title=corr["title"],
+        group_key=dict(group_values),
+        member_rule_titles=list(base_titles),
+        window_start=window_start,
+        window_end=anchor_time,
+        window_bucket=window_bucket,
+        mitre_techniques=techniques,
+        entities=_extract_entities(sample_events),
+        sample_events=sample_events,
+    )
+
+
+def _best_anchor(
+    hits: list[tuple[str, str, str | None]],
+    corr_type: str,
+    timespan_seconds: int,
+    condition: dict[str, Any],
+    n_refs: int,
+    anchor_lo: str,
+    anchor_hi: str,
+) -> str | None:
+    """A3: ищет САМУЮ ПОЗДНЮЮ точку-якорь e (= event_time какого-то попадания), для которой окно
+    [e - timespan, e] удовлетворяет условию правила. None, если такой нет.
+
+    Зачем не один якорь на max(event_time), как раньше: при перемешанном порядке прихода
+    (форвардер выгрузил буфер, разъехались часы, replay) «позднее» событие со старой меткой
+    времени сдвигало бы якорь назад, и окно [anchor - timespan, anchor] переставало бы
+    накрывать уже сохранённые более свежие хиты - правило молча не взводилось (краевой эффект,
+    см. docs/spec/correlation.md). Здесь проверяются ВСЕ точки-якоря в интересном диапазоне.
+
+    hits: [(event_time, rule_title, distinct_value)] по возрастанию времени, ВСЕ для одного
+    group-by-ключа. anchor_lo/anchor_hi ограничивают якоря диапазоном [min(new), max(new) +
+    timespan]: окно может ВПЕРВЫЕ сработать в этом flush'е только если содержит хотя бы одно
+    из новых событий - окна без новых событий уже оценивались на прошлых проходах.
+
+    Скользящее окно двумя указателями: O(H) для event_count; O(H) для temporal[_ordered]
+    (мультимножество rule_title); O(H) для value_count (мультимножество distinct-значений).
+    Порядок для temporal_ordered здесь НЕ проверяется (только достижимость порога по числу
+    разных правил) - его точно перепроверяет вызывающая сторона через
+    store.fetch_correlation_hit_sequence в найденном окне."""
+    n = len(hits)
+    if n == 0:
+        return None
+    lo = 0
+    rule_counts: dict[str, int] = {}
+    val_counts: dict[str, int] = {}
+    best: str | None = None
+    for hi in range(n):
+        et_hi, rt_hi, dv_hi = hits[hi]
+        rule_counts[rt_hi] = rule_counts.get(rt_hi, 0) + 1
+        if dv_hi is not None:
+            val_counts[dv_hi] = val_counts.get(dv_hi, 0) + 1
+
+        lo_bound = _shift_iso(et_hi, -timespan_seconds)
+        if lo_bound is None:
+            continue  # не смогли посчитать окно - эту точку-якорь пропускаем
+        while lo < hi and hits[lo][0] < lo_bound:
+            et_lo, rt_lo, dv_lo = hits[lo]
+            rule_counts[rt_lo] -= 1
+            if rule_counts[rt_lo] == 0:
+                del rule_counts[rt_lo]
+            if dv_lo is not None:
+                val_counts[dv_lo] -= 1
+                if val_counts[dv_lo] == 0:
+                    del val_counts[dv_lo]
+            lo += 1
+
+        if not (anchor_lo <= et_hi <= anchor_hi):
+            continue  # окно [et_hi - timespan, et_hi] не содержит ни одного НОВОГО события
+
+        if corr_type == "value_count":
+            ok = _condition_met(condition, len(val_counts))
+        elif corr_type in ("temporal", "temporal_ordered"):
+            ok = _temporal_required_met(condition, len(rule_counts), n_refs)
+        else:
+            ok = _condition_met(condition, hi - lo + 1)
+        if ok:
+            best = et_hi  # берём самую позднюю подходящую (цикл идёт по возрастанию времени)
+    return best
+
+
 def _evaluate_correlation_rule(
     store: Store,
     corr: dict[str, Any],
@@ -305,51 +436,76 @@ def _evaluate_correlation_rule(
     group_by: list[str],
     base_titles: list[str],
     source_batch: str,
-    anchors: dict[tuple[Any, ...], str],
+    new_spans: dict[tuple[Any, ...], tuple[str, str]],
     timespan_seconds: int,
     distinct_field: str | None,
 ) -> dict[tuple[Any, ...], tuple[int, list[dict[str, Any]], str]]:
-    """Двухфазный счёт одного correlation-правила по всем кандидатным ключам сразу (см.
-    докстринг модуля). anchors - {group-by-ключ: нормализованный anchor_time} из НОВЫХ
-    попаданий этого flush'а (вычисляет evaluate_batch). Возвращает ТОЛЬКО ключи, для которых
-    условие реально выполнено: {ключ: (count, sample_events, anchor_time)}."""
-    windows: dict[tuple[Any, ...], tuple[str, str]] = {}
-    for key, anchor_time in anchors.items():
-        window_start = _shift_iso(anchor_time, -timespan_seconds)
-        if window_start:
-            windows[key] = (window_start, anchor_time)
-    if not windows:
+    """A3-оценка одного correlation-правила по всем кандидатным ключам сразу (см. докстринг
+    модуля / _best_anchor). new_spans - {group-by-ключ: (min, max нормализованного event_time
+    среди НОВЫХ попаданий этого flush'а)} (вычисляет evaluate_batch). Возвращает ТОЛЬКО ключи,
+    для которых условие реально выполнено: {ключ: (count, sample_events, anchor_time)}."""
+    if not new_spans:
         return {}
 
-    combined_from = min(ws for ws, _ in windows.values())
-    combined_to = max(at for _, at in windows.values())
+    # Диапазон точек-якорей: окно [e - timespan, e] может ВПЕРВЫЕ сработать только если содержит
+    # хотя бы одно новое событие -> e in [min(new), max(new) + timespan]. Данные для скользящего
+    # окна нужны от (самый ранний якорь) - timespan.
+    min_new = min(lo for lo, _ in new_spans.values())
+    max_new = max(hi for _, hi in new_spans.values())
+    fetch_from = _shift_iso(min_new, -timespan_seconds)
+    anchor_hi = _shift_iso(max_new, timespan_seconds)
+    if not fetch_from or not anchor_hi:
+        return {}
 
-    if corr_type == "value_count":
-        coarse_mode = "distinct_values"
-    elif corr_type in ("temporal", "temporal_ordered"):
-        coarse_mode = "distinct_rules"
-    else:
-        coarse_mode = "events"
-
-    coarse = store.evaluate_correlation_windows(
+    rows = store.fetch_correlation_hits(
         rule_titles=base_titles, source_batch=source_batch,
-        time_from=combined_from, time_to=combined_to,
-        group_by=group_by, mode=coarse_mode, distinct_field=distinct_field,
+        time_from=fetch_from, time_to=anchor_hi,
+        group_by=group_by, keys=list(new_spans.keys()), distinct_field=distinct_field,
     )
+    by_key: dict[tuple[str, ...], list[tuple[str, str, str | None]]] = {}
+    for key, et, rt, dv in rows:
+        by_key.setdefault(key, []).append((et, rt, dv))
 
     condition = corr.get("condition") or {}
     n_refs = len(base_titles)
     result: dict[tuple[Any, ...], tuple[int, list[dict[str, Any]], str]] = {}
 
-    for key, (window_start, anchor_time) in windows.items():
-        coarse_count = coarse.get(key, 0)
-        # Короткое замыкание фазы 2 по грубому порогу фазы 1: окно фазы 1 (объединённое)
-        # шире-или-равно индивидуальному окну ключа -> coarse_count никогда не занижен
-        # относительно точного - пропуск здесь безопасен, не даёт ложноотрицательных.
+    for key, hits in by_key.items():
+        # Дешёвый гейт: грубая оценка по ВСЕМ вытащенным хитам ключа (диапазон шире любого
+        # под-окна ширины timespan -> оценка сверху). Не прошёл здесь - не пройдёт нигде.
+        if corr_type == "value_count":
+            coarse = len({dv for _, _, dv in hits if dv is not None})
+            gate = _condition_met(condition, coarse)
+        elif corr_type in ("temporal", "temporal_ordered"):
+            coarse = len({rt for _, rt, _ in hits})
+            gate = _temporal_required_met(condition, coarse, n_refs)
+        else:
+            gate = _condition_met(condition, len(hits))
+        if not gate:
+            continue
+
+        anchor_time = _best_anchor(
+            hits, corr_type, timespan_seconds, condition, n_refs, min_new, anchor_hi
+        )
+        if anchor_time is None:
+            continue
+        window_start = _shift_iso(anchor_time, -timespan_seconds)
+        if not window_start:
+            continue
+
+        # Авторитетный счёт + sample_events по найденному окну через тот же store-метод, что и
+        # раньше (единственное место с JOIN к events - ради контента событий, не для счёта).
+        precise = store.evaluate_correlation_window(
+            base_rule_titles=base_titles, group_by=group_by, key_values=key,
+            source_batch=source_batch, time_from=window_start, time_to=anchor_time,
+            mode=("distinct_rules" if corr_type in ("temporal", "temporal_ordered") else None),
+            distinct_field=distinct_field,
+        )
+        count = precise["count"]
         if corr_type in ("temporal", "temporal_ordered"):
-            if not _temporal_required_met(condition, coarse_count, n_refs):
+            if not _temporal_required_met(condition, count, n_refs):
                 continue
-        elif not _condition_met(condition, coarse_count):
+        elif not _condition_met(condition, count):
             continue
 
         if corr_type == "temporal_ordered":
@@ -359,30 +515,6 @@ def _evaluate_correlation_rule(
                 group_by=group_by, key_values=key,
             )
             if not _sequence_matches_order(sequence, base_titles):
-                continue
-            precise = store.evaluate_correlation_window(
-                base_rule_titles=base_titles, group_by=group_by, key_values=key,
-                source_batch=source_batch, time_from=window_start, time_to=anchor_time,
-                mode="distinct_rules",
-            )
-            count = precise["count"]
-        elif corr_type == "temporal":
-            precise = store.evaluate_correlation_window(
-                base_rule_titles=base_titles, group_by=group_by, key_values=key,
-                source_batch=source_batch, time_from=window_start, time_to=anchor_time,
-                mode="distinct_rules",
-            )
-            if not _temporal_required_met(condition, precise["count"], n_refs):
-                continue
-            count = precise["count"]
-        else:
-            precise = store.evaluate_correlation_window(
-                base_rule_titles=base_titles, group_by=group_by, key_values=key,
-                source_batch=source_batch, time_from=window_start, time_to=anchor_time,
-                distinct_field=distinct_field,
-            )
-            count = precise["count"]
-            if not _condition_met(condition, count):
                 continue
 
         result[key] = (count, precise["sample_events"], anchor_time)
@@ -394,11 +526,19 @@ def evaluate_batch(
     ruleset_path: str | None,
     source_batch: str,
     matched_events_by_title: dict[str, list[dict[str, Any]]],
+    link_specs_out: list[dict[str, Any]] | None = None,
 ) -> int:
     """Точка входа, зовётся из app/main.py:_process_batch после каждого store.store_events(...)
     (т.е. после каждого flush ingest-воркера). matched_events_by_title - {rule_title: [сырые
     dict событий, сматченных В ЭТОМ батче под этим source_batch]}. Возвращает число
-    созданных/обновлённых correlation-алертов."""
+    созданных/обновлённых correlation-алертов + инцидентов.
+
+    link_specs_out (Этап 4, необязателен) - если передан список, evaluate_batch дописывает в
+    него по одной записи на КАЖДЫЙ созданный/обновлённый инцидент:
+    {dedup_key, incident_id, source_batch, rule_titles, entity_values, window_start, window_end}.
+    app/main.py:_process_batch по этим записям ПОСЛЕ store.upsert_alerts привязывает уже
+    сохранённые алерты к инциденту (store.link_alerts_to_incident) - раньше, внутри
+    evaluate_batch, алертов zircolite текущего flush ещё нет в БД."""
     if not ruleset_path or not matched_events_by_title:
         return 0
     corr_rules = [c for c in _active_correlation_rules(ruleset_path) if c.get("type") in _EVAL_TYPES]
@@ -414,10 +554,15 @@ def evaluate_batch(
     }
 
     alerts: list[Alert] = []
+    incidents: list[Incident] = []
 
     for corr in corr_rules:
-        if Severity.from_zircolite(corr.get("level")) == Severity.informational:
-            continue  # informational - шум, алерты по нему не заводим (см. normalize.py/UI)
+        incident_spec = corr.get("incident")
+        # informational - шум, алертов по нему не заводим (см. normalize.py/UI). НО помеченное
+        # инцидентное правило пропускаем сквозь эту отсечку: у него severity инцидента берётся
+        # из incident.severity (или дефолт medium), а не из level correlation-правила.
+        if not incident_spec and Severity.from_zircolite(corr.get("level")) == Severity.informational:
+            continue
         group_by = corr.get("group_by") or []
         if not group_by:
             continue  # без group-by корреляция была бы "по всей выборке" - не поддерживаем
@@ -442,44 +587,68 @@ def evaluate_batch(
             if not distinct_field:
                 continue
 
-        # Один кандидатный ключ на набор значений group-by полей; якорь конца окна - event_time
-        # САМОГО ПОЗДНЕГО из новых попаданий с этим ключом (НЕ datetime.now() - иначе
-        # корреляции никогда бы не срабатывали при replay исторических датасетов, напр. OTRF
-        # Security-Datasets, где все event_time уже в прошлом).
-        anchors: dict[tuple[Any, ...], str] = {}
+        # Один кандидатный ключ на набор значений group-by полей. Для КАЖДОГО ключа собираем
+        # (min, max) нормализованного event_time среди НОВЫХ попаданий этого flush'а - это
+        # диапазон, в котором A3-оценка ищет точку-якорь конца окна (см. _best_anchor). НЕ
+        # datetime.now() - иначе корреляции никогда бы не срабатывали при replay исторических
+        # датасетов (напр. OTRF Security-Datasets, где все event_time уже в прошлом).
+        new_spans: dict[tuple[Any, ...], tuple[str, str]] = {}
         for event in new_matches:
             raw_key = tuple(event.get(f) for f in group_by)
             if any(v is None for v in raw_key):
                 continue
             # str(...) на КАЖДОЕ значение - group_json на записи (store_events/
             # insert_correlation_hits) хранит значения ИСКЛЮЧИТЕЛЬНО строками (см. store.py),
-            # а store.evaluate_correlation_windows возвращает ключи ИЗ group_json (тоже
-            # строки). Без этой нормализации числовое/булево поле в group-by (напр. EventID)
-            # давало бы Python-ключ (4625,) (int), который никогда не совпал бы со строковым
-            # ("4625",) из фазы 1 - корреляция молча не срабатывала бы.
+            # а store-методы корреляции возвращают ключи ИЗ group_json (тоже строки). Без этой
+            # нормализации числовое/булево поле в group-by (напр. EventID) давало бы Python-ключ
+            # (4625,) (int), который никогда не совпал бы со строковым ("4625",) - корреляция
+            # молча не срабатывала бы.
             key = tuple(str(v) for v in raw_key)
             normalized = _normalize_event_time(first_present(event, TIME_FIELDS))
             if not normalized:
                 continue
-            if key not in anchors or normalized > anchors[key]:
-                anchors[key] = normalized
-        if not anchors:
+            if key not in new_spans:
+                new_spans[key] = (normalized, normalized)
+            else:
+                lo, hi = new_spans[key]
+                new_spans[key] = (min(lo, normalized), max(hi, normalized))
+        if not new_spans:
             continue
 
         fired = _evaluate_correlation_rule(
             store, corr, corr_type, group_by, base_titles, source_batch,
-            anchors, timespan_seconds, distinct_field,
+            new_spans, timespan_seconds, distinct_field,
         )
         if not fired:
             continue
 
         corr_hit_rows: list[tuple[str, str, str, str, str | None]] = []
         for key, (count, sample_events, anchor_time) in fired.items():
-            alert = _build_alert(corr, key, count, sample_events, source_batch)
-            alerts.append(alert)
             group_values = {f: str(v) for f, v in zip(group_by, key)}
+            if incident_spec:
+                built = _build_incident(
+                    corr, incident_spec, key, group_values, sample_events,
+                    anchor_time, timespan_seconds, base_titles, source_batch,
+                )
+                if built is None:
+                    continue  # anchor_time не распарсился - бакет не посчитать
+                incidents.append(built)
+                hit_dedup = built.dedup_key
+                if link_specs_out is not None:
+                    link_specs_out.append({
+                        "dedup_key": built.dedup_key,
+                        "source_batch": source_batch,
+                        "rule_titles": list(base_titles),
+                        "entity_values": [str(v) for v in key],
+                        "window_start": built.window_start,
+                        "window_end": built.window_end,
+                    })
+            else:
+                alert = _build_alert(corr, key, count, sample_events, source_batch)
+                alerts.append(alert)
+                hit_dedup = alert.dedup_key
             corr_hit_rows.append((
-                f"corr:{corr['title']}:{alert.dedup_key}:{anchor_time}",
+                f"corr:{corr['title']}:{hit_dedup}:{anchor_time}",
                 corr["title"], source_batch, anchor_time, json.dumps(group_values),
             ))
             # Синтетическое "попадание" видно родительским correlation-правилам ЭТОГО ЖЕ
@@ -487,6 +656,8 @@ def evaluate_batch(
             # (по Sigma-спеке цепочки используют одинаковый group-by у всех звеньев), плюс
             # синтетическое SystemTime - anchor родителя вычисляется ТЕМ ЖЕ кодом чуть выше
             # (first_present(event, TIME_FIELDS)), без отдельной ветки под "источник попадания".
+            # Пишется и для инцидентных правил - на случай цепочки, где инцидентное правило
+            # само является звеном другой корреляции (единообразие, лишним не бывает).
             fired_by_title.setdefault(corr["title"], []).append({**group_values, "SystemTime": anchor_time})
         # Пишем СРАЗУ (не батчим до конца прохода) - родительская correlation, обрабатываемая
         # НИЖЕ по topo-порядку в ЭТОМ ЖЕ вызове, считает свой count запросом К БД
@@ -497,6 +668,18 @@ def evaluate_batch(
         if corr_hit_rows:
             store.insert_correlation_hits(corr_hit_rows)
 
-    if not alerts:
-        return 0
-    return store.upsert_correlation_alerts(alerts)
+    n = 0
+    if alerts:
+        n += store.upsert_correlation_alerts(alerts)
+    if incidents:
+        upserted = store.upsert_incidents(incidents)
+        for (incident_id, was_new), inc in zip(upserted, incidents):
+            # Повтор в том же бакете (was_new=False) с уже завершённым расследованием -> ре-энкью
+            # в queued (новый контекст для агента); queued/running не трогается (store.enqueue_*).
+            store.enqueue_investigation(incident_id, requeue_terminal=not was_new)
+            if link_specs_out is not None:
+                for spec in link_specs_out:
+                    if spec.get("dedup_key") == inc.dedup_key:
+                        spec["incident_id"] = incident_id
+        n += len(incidents)
+    return n

@@ -33,6 +33,8 @@
 | `INGEST_BATCH_SIZE` | `SIEM_INGEST_BATCH_SIZE` | `int` | `500` |
 | `INGEST_FLUSH_INTERVAL` | `SIEM_INGEST_FLUSH_INTERVAL` | `float` | `5.0` |
 | `EVENTS_RETENTION_DAYS` | `SIEM_EVENTS_RETENTION_DAYS` | `int` | `14` |
+| `INCIDENT_VERDICT_ENABLED` | `SIEM_INCIDENT_VERDICT_ENABLED` | `bool` | `True` (`0`/`false`/`""` → выкл) |
+| `INCIDENT_VERDICT_INTERVAL` | `SIEM_INCIDENT_VERDICT_INTERVAL` | `float` | `30` (секунды между опросами очереди расследований, см. `docs/spec/incidents.md`) |
 
 ## Приведение типов
 

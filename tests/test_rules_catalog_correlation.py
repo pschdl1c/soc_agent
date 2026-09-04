@@ -251,3 +251,82 @@ def test_validate_accepts_temporal_without_condition():
     }})
     compiled = rules_catalog.compile_custom_rule(doc)
     assert compiled["correlation"] is True
+
+
+# ------------------------------------------------------------------ correlation.incident (Этап 4)
+
+
+def _corr_doc_with_incident(incident: dict) -> str:
+    return _corr_doc({"correlation": {
+        "type": "event_count", "rules": ["failed_auth"], "group-by": ["IpAddress"],
+        "timespan": "5m", "condition": {"gte": 10}, "incident": incident,
+    }})
+
+
+def test_validate_rejects_incident_without_type():
+    with pytest.raises(RuleValidationError, match="incident.type"):
+        rules_catalog.compile_custom_rule(_corr_doc_with_incident({"severity": "high"}))
+
+
+def test_validate_rejects_incident_non_slug_type():
+    with pytest.raises(RuleValidationError, match="incident.type"):
+        rules_catalog.compile_custom_rule(_corr_doc_with_incident({"type": "Brute Force!"}))
+
+
+def test_validate_rejects_incident_bad_severity():
+    with pytest.raises(RuleValidationError, match="incident.severity"):
+        rules_catalog.compile_custom_rule(_corr_doc_with_incident({"type": "bf", "severity": "urgent"}))
+
+
+def test_validate_accepts_incident_block():
+    compiled = rules_catalog.compile_custom_rule(
+        _corr_doc_with_incident({"type": "brute_force", "severity": "high", "title": "Подбор пароля"})
+    )
+    assert compiled["correlation"] is True
+    assert compiled["incident"] is True
+
+
+def test_load_correlation_rules_surfaces_incident_spec():
+    ruleset_path = rules_catalog.create_custom_ruleset("test-ruleset")
+    _save(ruleset_path, _BASE_RULE_A)
+    _save(ruleset_path, _corr_doc_with_incident({"type": "brute_force", "severity": "high"}))
+
+    rules = rules_catalog.load_correlation_rules(ruleset_path)
+    assert len(rules) == 1
+    assert rules[0]["incident"] == {"type": "brute_force", "severity": "high", "title": None}
+
+
+def test_load_correlation_rules_incident_none_when_unmarked():
+    ruleset_path = rules_catalog.create_custom_ruleset("test-ruleset")
+    _save(ruleset_path, _BASE_RULE_A)
+    _save(ruleset_path, _CORR_BY_NAME)
+
+    rules = rules_catalog.load_correlation_rules(ruleset_path)
+    assert rules[0]["incident"] is None
+
+
+# ------------------------------------------------------------------ timespan vs ретеншн
+
+
+def test_validate_rejects_timespan_longer_than_retention(monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "EVENTS_RETENTION_DAYS", 14)
+    doc = _corr_doc({"correlation": {
+        "type": "event_count", "rules": ["failed_auth"], "group-by": ["IpAddress"],
+        "timespan": "30d", "condition": {"gte": 10},
+    }})
+    with pytest.raises(RuleValidationError, match="хранени"):
+        rules_catalog.compile_custom_rule(doc)
+
+
+def test_validate_allows_long_timespan_when_retention_disabled(monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "EVENTS_RETENTION_DAYS", 0)  # ретеншн выключен - храним вечно
+    doc = _corr_doc({"correlation": {
+        "type": "event_count", "rules": ["failed_auth"], "group-by": ["IpAddress"],
+        "timespan": "30d", "condition": {"gte": 10},
+    }})
+    compiled = rules_catalog.compile_custom_rule(doc)
+    assert compiled["correlation"] is True

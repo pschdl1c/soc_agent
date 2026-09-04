@@ -22,12 +22,12 @@ try:
     # `pip install -e .` / `pip install .`). Фолбэк — на случай запуска из исходников без установки.
     __version__ = _pkg_version("soc-agent")
 except PackageNotFoundError:  # pragma: no cover
-    __version__ = "0.4.0"
+    __version__ = "0.5.0"
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from app import config, kb
+from app import config, incidents, kb
 from app.detection import correlation
 from app.detection.engine import ZircoliteEngine
 from app.detection.normalize import zircolite_results_to_alerts
@@ -38,6 +38,7 @@ from app.models import (
     AlertStatusUpdate,
     CustomRuleSubmit,
     CustomRuleUpdate,
+    IncidentStatusUpdate,
     IngestEventsRequest,
     IngestFileRequest,
     IngestResponse,
@@ -137,6 +138,10 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
     # передаётся в store_events (см. app/detection/correlation.py:active_hit_spec).
     hit_spec = correlation.active_hit_spec(ruleset_path)
     correlation_created = 0
+    # link_specs (Этап 4) - evaluate_batch дописывает сюда по записи на каждый созданный/
+    # обновлённый инцидент; привязка member-алертов идёт ПОСЛЕ store.upsert_alerts ниже
+    # (раньше алертов zircolite текущего flush ещё нет в БД).
+    link_specs: list[dict] = []
     # Один прогон движка мог объединять НЕСКОЛЬКО реальных источников (см. _process_events) -
     # события возвращаются в БД под их СОБСТВЕННОЙ меткой, не под source_label всего прогона.
     for label, events_subset in _split_events_by_source(all_events, source_label).items():
@@ -155,11 +160,21 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
                 matched_events_by_title.setdefault(title, []).append(event)
         correlation_created += correlation.evaluate_batch(
             store, ruleset_path=ruleset_path, source_batch=label,
-            matched_events_by_title=matched_events_by_title,
+            matched_events_by_title=matched_events_by_title, link_specs_out=link_specs,
         )
 
     alerts = zircolite_results_to_alerts(raw_results, default_source_batch=source_label)
     created = store.upsert_alerts(alerts)
+
+    # Привязка уже сохранённых алертов к инцидентам этого flush'а (см. link_specs выше и
+    # store.link_alerts_to_incident). Инцидентные правила базовых алертов обычно informational
+    # (алертов не заводят) - список часто пустой, это ожидаемо.
+    for spec in link_specs:
+        if spec.get("incident_id"):
+            store.link_alerts_to_incident(
+                spec["incident_id"], spec["source_batch"], spec["rule_titles"],
+                spec["entity_values"], spec.get("window_start"), spec.get("window_end"),
+            )
 
     return IngestResponse(
         source_batch=source_label,
@@ -212,13 +227,28 @@ def _run_retention() -> None:
         print(f"[retention] удалено {deleted} событий старше {config.EVENTS_RETENTION_DAYS}д")
 
 
+def _run_incident_verdicts() -> None:
+    """Заглушка обработки расследований инцидентов (Этап 4, см. app/incidents.py:run_pending) -
+    периодически зовётся тем же фоновым потоком, что и ретеншн. Настоящий агент - Этап 5."""
+    if not config.INCIDENT_VERDICT_ENABLED:
+        return
+    processed = incidents.run_pending(store)
+    if processed:
+        print(f"[incidents] обработано расследований: {processed}")
+
+
 # Потоковый ingest: воркер зовёт _process_events ОДИН РАЗ на весь флаш (может мешать несколько
 # источников сразу, см. докстринг _process_events). retention_fn - None при
 # EVENTS_RETENTION_DAYS<=0 (ретеншн выключен) - не заводим лишний таймаут ожидания в воркере,
-# если он всё равно ничего бы не делал (см. IngestWorker._run).
+# если он всё равно ничего бы не делал (см. IngestWorker._run). periodic_tasks - прочие
+# фоновые задачи того же потока (Этап 4: заглушка вердиктов инцидентов).
 ingest_worker = IngestWorker(
     process_fn=_process_events,
     retention_fn=_run_retention if config.EVENTS_RETENTION_DAYS > 0 else None,
+    periodic_tasks=(
+        [(_run_incident_verdicts, config.INCIDENT_VERDICT_INTERVAL)]
+        if config.INCIDENT_VERDICT_ENABLED else None
+    ),
 )
 
 
@@ -498,6 +528,139 @@ def update_alert_status(alert_id: str, body: AlertStatusUpdate) -> dict:
     if not ok:
         raise HTTPException(status_code=404, detail="Алерт не найден")
     return {"alert_id": alert_id, "status": body.status}
+
+
+# ------------------------------------------------------------------ Incidents (Этап 4)
+
+def _incident_entity_filter(group_key: dict) -> str | None:
+    """Строит строку мини-языка фильтра (app/filter_lang.py) по значениям group-by инцидента:
+    `Field1 = "v1" and Field2 = "v2"`. Имена полей - те же сырые имена события, что были в
+    group-by правила (они есть в raw_json), значения экранируются под строковый литерал."""
+    parts: list[str] = []
+    for field, value in (group_key or {}).items():
+        if not field or value is None:
+            continue
+        v = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        parts.append(f'{field} = "{v}"')
+    return " and ".join(parts) if parts else None
+
+
+@app.get("/incidents")
+def list_incidents(
+    status: str | None = None,
+    incident_type: str | None = None,
+    source_batch: str | None = None,
+    severity: str | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    limit = max(1, min(limit, 500))
+    filters = dict(
+        status=status, incident_type=incident_type, source_batch=source_batch,
+        severity=severity, time_from=time_from, time_to=time_to,
+    )
+    return {
+        "incidents": store.list_incidents(sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset, **filters),
+        "total": store.count_incidents(**filters),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/incidents/{incident_id}")
+def get_incident(incident_id: str) -> dict:
+    inc = store.get_incident(incident_id)
+    if inc is None:
+        raise HTTPException(status_code=404, detail="Инцидент не найден")
+    # Обогащение MITRE в карточке (как у /alerts/{id}) - объединение тегов правила и member-алертов.
+    tags = list(inc.get("mitre_techniques", []))
+    for ma in inc.get("member_alerts", []):
+        full = store.get_alert(ma["alert_id"])
+        if full:
+            tags += full.get("mitre_techniques", [])
+    inc["mitre"] = kb.enrich_techniques(sorted(set(tags)))
+    return inc
+
+
+@app.patch("/incidents/{incident_id}/status")
+def update_incident_status(incident_id: str, body: IncidentStatusUpdate) -> dict:
+    if not store.update_incident_status(incident_id, body.status):
+        raise HTTPException(status_code=404, detail="Инцидент не найден")
+    return {"incident_id": incident_id, "status": body.status}
+
+
+@app.get("/incidents/{incident_id}/context")
+def get_incident_context(incident_id: str) -> dict:
+    """Полный контекст инцидента одним ответом - под будущего агента (Этап 5) и ручной триаж.
+    Обязан переживать вычищенные ретеншном events (related_events тогда пустой)."""
+    inc = store.get_incident(incident_id)
+    if inc is None:
+        raise HTTPException(status_code=404, detail="Инцидент не найден")
+
+    ruleset_path = inc.get("ruleset_path") or ""
+    notes: list[str] = []
+
+    correlation_rule = None
+    if ruleset_path:
+        try:
+            for c in rules_catalog.load_correlation_rules(ruleset_path):
+                if c.get("id") == inc.get("correlation_rule_id") or c.get("title") == inc.get("correlation_rule_title"):
+                    correlation_rule = {
+                        k: c.get(k) for k in
+                        ("id", "title", "type", "group_by", "timespan", "condition", "level", "description")
+                    }
+                    break
+        except CatalogError:
+            pass
+    if correlation_rule is None:
+        notes.append("correlation-правило инцидента не найдено (удалено или сменило рулсет)")
+
+    member_rules: list[dict] = []
+    member_titles = set(inc.get("member_rule_titles") or [])
+    if ruleset_path and member_titles:
+        try:
+            for r in rules_catalog.load_rules(ruleset_path):
+                if r.get("title") not in member_titles:
+                    continue
+                entry = {
+                    "rule_id": r.get("id"), "title": r.get("title"), "level": r.get("level"),
+                    "description": r.get("description", ""), "rule": r.get("rule", []),
+                }
+                got = rules_catalog.get_rule(ruleset_path, r.get("id"))
+                if got and got.get("yaml_text"):
+                    entry["yaml_text"] = got["yaml_text"]
+                member_rules.append(entry)
+        except CatalogError:
+            pass
+
+    related = {"events": [], "total": 0, "query": None}
+    filter_text = _incident_entity_filter(inc.get("group_key") or {})
+    if filter_text:
+        try:
+            qf = compile_filter_query(filter_text)
+            related = {
+                "events": store.list_events(source_batch=inc["source_batch"], query_filter=qf, limit=100),
+                "total": store.count_events(source_batch=inc["source_batch"], query_filter=qf),
+                "query": filter_text,
+            }
+        except FilterSyntaxError as exc:
+            notes.append(f"фильтр событий по сущности не собрался: {exc}")
+
+    result = {
+        "incident": inc,
+        "correlation_rule": correlation_rule,
+        "member_rules": member_rules,
+        "sample_events": inc.get("sample_events", []),
+        "related_events": related,
+        "entity_history": {"alerts": store.list_alerts(source_batch=inc["source_batch"], limit=50)},
+    }
+    if notes:
+        result["note"] = "; ".join(notes)
+    return result
 
 
 def _parse_filters(filters: str | None) -> list[dict] | None:

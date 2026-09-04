@@ -31,7 +31,7 @@ from app.fields import (
     first_present,
 )
 from app.filter_lang import FILTER_OPS, IS_MATCHED_FIELD, RULE_FIELD, compile_condition, resolve_json_path
-from app.models import SOURCE_DESCRIPTION_MAX, Alert
+from app.models import SOURCE_DESCRIPTION_MAX, Alert, Incident, Investigation, Severity, utcnow_naive
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS alerts (
@@ -134,6 +134,65 @@ CREATE TABLE IF NOT EXISTS sources (
     last_seen_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sources_token ON sources(token_sha256);
+
+-- Инциденты (Этап 4) - агрегат алертов, единица работы AI-агента расследования (Этап 5).
+-- Заводится ТОЛЬКО при срабатывании correlation-правила, помеченного блоком correlation.incident
+-- (см. app/detection/correlation.py:evaluate_batch, app/rules/rules_catalog.py). Обычные алерты
+-- в инциденты сами не собираются - catch-all прохода по alerts НЕТ (осознанное ограничение
+-- этапа, см. docs/spec/incidents.md). dedup_key - фиксированный бакет по timespan правила
+-- (incident_type:group_values:window_bucket): повтор в том же бакете -> UPDATE строки
+-- (store.upsert_incidents), разрыв > timespan -> новый бакет -> новый инцидент. Инцидент
+-- ПЕРЕЖИВАЕТ свои events (ретеншн чистит events, не alerts/incidents) - GET /incidents/{id}/context
+-- обязан работать при пустом related_events. Привязан к ОДНОМУ source_batch (как и корреляция) -
+-- поэтому чистится в delete_batch вместе с events/alerts/rule_hits.
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id TEXT PRIMARY KEY,
+    dedup_key TEXT NOT NULL UNIQUE,
+    incident_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    source_batch TEXT NOT NULL,
+    ruleset_path TEXT NOT NULL DEFAULT '',
+    correlation_rule_id TEXT NOT NULL DEFAULT '',
+    correlation_rule_title TEXT NOT NULL,
+    group_key TEXT NOT NULL DEFAULT '{}',
+    member_rule_titles TEXT NOT NULL DEFAULT '[]',
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    window_bucket TEXT NOT NULL,
+    alert_count INTEGER NOT NULL DEFAULT 0,
+    mitre_techniques TEXT NOT NULL DEFAULT '[]',
+    entities TEXT NOT NULL DEFAULT '{}',
+    sample_events TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_status  ON incidents(status);
+CREATE INDEX IF NOT EXISTS idx_incidents_type    ON incidents(incident_type);
+CREATE INDEX IF NOT EXISTS idx_incidents_batch   ON incidents(source_batch);
+CREATE INDEX IF NOT EXISTS idx_incidents_created ON incidents(created_at);
+
+-- Расследования (Этап 4) - очередь + результат работы агента. На Этапе 4 тело обработки -
+-- заглушка (app/incidents.py:run_pending: queued -> running -> done с placeholder-вердиктом);
+-- жизненный цикл статуса и точка вызова из IngestWorker остаются под настоящего агента (Этап 5).
+-- Одна строка на инцидент; при повторном срабатывании в том же бакете, если расследование уже
+-- в терминальном статусе, оно ре-энкьюится в queued (store.enqueue_investigation).
+CREATE TABLE IF NOT EXISTS investigations (
+    investigation_id TEXT PRIMARY KEY,
+    incident_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    verdict TEXT,
+    rationale TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    steps TEXT NOT NULL DEFAULT '[]',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_investigations_incident ON investigations(incident_id);
+CREATE INDEX IF NOT EXISTS idx_investigations_status   ON investigations(status);
 """
 
 # Имя источника: 1..64 символов, буквы (в т.ч. кириллица - re.UNICODE у \w), цифры, пробел, . _ -
@@ -202,6 +261,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_src_ip ON events(src_ip)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at)")
 
+    # alerts.incident_id (Этап 4) - обратная ссылка алерта на инцидент, к которому он привязан
+    # (store.link_alerts_to_incident). NULL у алертов, не входящих ни в один инцидент (обычный
+    # случай - инциденты только сценарные). Новая таблица incidents/investigations создаётся
+    # прямо в _SCHEMA (CREATE TABLE IF NOT EXISTS отрабатывает и на старой БД), миграции ей не
+    # нужно - здесь только КОЛОНКА на уже существующей alerts.
+    alerts_cols = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)")}
+    if "incident_id" not in alerts_cols:
+        conn.execute("ALTER TABLE alerts ADD COLUMN incident_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_incident ON alerts(incident_id)")
+
 # Ранг severity для сортировки колонки "Правило" (critical - самый высокий).
 _SEVERITY_RANK_SQL = (
     "CASE rule_level "
@@ -225,6 +294,26 @@ _EVENT_SORT_COLUMNS = {
     "event_time": "event_time",
     "host": "host",
     "is_matched": "is_matched",
+}
+# Ранг severity инцидента для сортировки (колонка severity - строка, не rule_level).
+_INCIDENT_SEVERITY_RANK_SQL = (
+    "CASE severity "
+    "WHEN 'critical' THEN 5 "
+    "WHEN 'high' THEN 4 "
+    "WHEN 'medium' THEN 3 "
+    "WHEN 'low' THEN 2 "
+    "ELSE 1 END"
+)
+_INCIDENT_SORT_COLUMNS = {
+    "created_at": "created_at",
+    "updated_at": "updated_at",
+    "alert_count": "alert_count",
+    "status": "status",
+    "severity": _INCIDENT_SEVERITY_RANK_SQL,
+}
+# Поля investigations, которые джобе (app/incidents.py) разрешено обновлять через update_investigation.
+_INVESTIGATION_UPDATABLE = {
+    "status", "verdict", "rationale", "confidence", "steps", "error", "started_at", "finished_at",
 }
 
 
@@ -860,6 +949,79 @@ class Store:
             rows = self._read_conn.execute(query, [*params, limit]).fetchall()
         return [(row["rule_title"], row["event_time"]) for row in rows]
 
+    def fetch_correlation_hits(
+        self,
+        rule_titles: list[str],
+        source_batch: str,
+        time_from: str,
+        time_to: str,
+        group_by: list[str],
+        keys: list[tuple[str, ...]],
+        distinct_field: str | None = None,
+    ) -> list[tuple[tuple[str, ...], str, str, str | None]]:
+        """Все попадания base-правил в окне [time_from, time_to] для source_batch, СУЖЕННЫЕ до
+        перечисленных group-by-ключей (keys - список кортежей строковых значений). Возвращает
+        [(ключ-кортеж, event_time, rule_title, значение distinct_field|None)], по возрастанию
+        event_time. Один индексный range-scan по idx_rule_hits_lookup + OR-фильтр по ключам -
+        стоимость от плотности попаданий В ОКНЕ для ЭТИХ ключей, не от размера БД (тот же
+        принцип, что у evaluate_correlation_windows). Строки с None в любом компоненте ключа
+        отбрасываются (group_json не содержал поля).
+
+        Используется A3-оценкой (app/detection/correlation.py): вместо SQL-счёта на каждое
+        под-окно - один проход скользящим окном в памяти по всем кандидатным точкам-якорям.
+        """
+        if not rule_titles or not group_by or not keys:
+            return []
+        rule_ph = ",".join("?" * len(rule_titles))
+        sel_cols: list[str] = []
+        sel_params: list[Any] = []
+        for i, field in enumerate(group_by):
+            sel_cols.append(f"json_extract(group_json, ?) AS k{i}")
+            sel_params.append(_group_json_path(field))
+        select_sql = ", ".join(sel_cols) + ", event_time, rule_title"
+        params: list[Any] = list(sel_params)
+        if distinct_field:
+            select_sql += ", json_extract(group_json, ?) AS dval"
+            params.append(_group_json_path(distinct_field))
+
+        params += [*rule_titles, source_batch, time_from, time_to]
+        where = [
+            f"rule_title IN ({rule_ph})",
+            "source_batch = ?",
+            "event_time BETWEEN ? AND ?",
+        ]
+        # Сужение до кандидатных ключей: OR по каждому ключу, AND по его полям. Путь поля -
+        # bound-параметр (_group_json_path, как везде в этом модуле), значение ключа - тоже.
+        or_clauses: list[str] = []
+        for kv in keys:
+            parts: list[str] = []
+            for field, val in zip(group_by, kv):
+                parts.append("json_extract(group_json, ?) = ?")
+                params += [_group_json_path(field), str(val)]
+            if parts:
+                or_clauses.append("(" + " AND ".join(parts) + ")")
+        if or_clauses:
+            where.append("(" + " OR ".join(or_clauses) + ")")
+
+        query = (
+            f"SELECT {select_sql} FROM rule_hits WHERE {' AND '.join(where)} "
+            f"ORDER BY event_time ASC"
+        )
+        with self._read_lock:
+            rows = self._read_conn.execute(query, params).fetchall()
+        out: list[tuple[tuple[str, ...], str, str, str | None]] = []
+        for row in rows:
+            key = tuple(row[f"k{i}"] for i in range(len(group_by)))
+            if any(v is None for v in key):
+                continue
+            out.append((
+                tuple(str(v) for v in key),
+                row["event_time"],
+                row["rule_title"],
+                row["dval"] if distinct_field else None,
+            ))
+        return out
+
     def insert_correlation_hits(self, rows: list[tuple[str, str, str, str, str | None]]) -> None:
         """Записывает сработавшую корреляцию как обычное попадание в rule_hits: (синтетический
         event_id якоря, title самой корреляции, source_batch, нормализованный event_time якоря,
@@ -953,6 +1115,316 @@ class Store:
             self._conn.commit()
         return count
 
+    # ------------------------------------------------------------------ Incidents / Investigations
+
+    @staticmethod
+    def _incident_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        """Строка incidents наружу: JSON-колонки распарсены (как entities у алертов)."""
+        d = dict(row)
+        for col in ("group_key", "member_rule_titles", "mitre_techniques", "entities", "sample_events"):
+            if col in d and isinstance(d[col], str):
+                try:
+                    d[col] = json.loads(d[col])
+                except (TypeError, ValueError):
+                    d[col] = {} if col in ("group_key", "entities") else []
+        return d
+
+    def upsert_incidents(self, incidents: list[Incident]) -> list[tuple[str, bool]]:
+        """Создаёт/обновляет строки incidents по dedup_key (фиксированный бакет по timespan,
+        см. схему). Для существующей строки - OVERWRITE-семантика окна: severity =
+        Severity.roll_up([старое, новое]), window_start = min, window_end = max, обновляются
+        sample_events/entities/mitre_techniques/member_rule_titles/title, updated_at = сейчас.
+        alert_count здесь НЕ трогается - его досчитывает link_alerts_to_incident после привязки
+        алертов. Возврат - [(incident_id, was_new), ...] в порядке входа (evaluate_batch по
+        was_new решает, ре-энкьюить ли расследование)."""
+        result: list[tuple[str, bool]] = []
+        now = utcnow_naive().isoformat()
+        with self._lock:
+            cur = self._conn.cursor()
+            for inc in incidents:
+                cur.execute(
+                    "SELECT incident_id, severity, window_start, window_end FROM incidents WHERE dedup_key = ?",
+                    (inc.dedup_key,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    severity = Severity.roll_up([existing["severity"], inc.severity]).value
+                    window_start = min(existing["window_start"], inc.window_start)
+                    window_end = max(existing["window_end"], inc.window_end)
+                    cur.execute(
+                        """
+                        UPDATE incidents SET
+                            severity = ?, title = ?, window_start = ?, window_end = ?,
+                            member_rule_titles = ?, mitre_techniques = ?, entities = ?,
+                            sample_events = ?, updated_at = ?
+                        WHERE dedup_key = ?
+                        """,
+                        (
+                            severity, inc.title, window_start, window_end,
+                            json.dumps(inc.member_rule_titles), json.dumps(inc.mitre_techniques),
+                            json.dumps(inc.entities.model_dump()),
+                            json.dumps(inc.sample_events, default=str), now, inc.dedup_key,
+                        ),
+                    )
+                    result.append((existing["incident_id"], False))
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO incidents (
+                            incident_id, dedup_key, incident_type, title, severity, status,
+                            source_batch, ruleset_path, correlation_rule_id, correlation_rule_title,
+                            group_key, member_rule_titles, window_start, window_end, window_bucket,
+                            alert_count, mitre_techniques, entities, sample_events, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            inc.incident_id, inc.dedup_key, inc.incident_type, inc.title,
+                            inc.severity.value, inc.status, inc.source_batch, inc.ruleset_path,
+                            inc.correlation_rule_id, inc.correlation_rule_title,
+                            json.dumps(inc.group_key), json.dumps(inc.member_rule_titles),
+                            inc.window_start, inc.window_end, inc.window_bucket, inc.alert_count,
+                            json.dumps(inc.mitre_techniques), json.dumps(inc.entities.model_dump()),
+                            json.dumps(inc.sample_events, default=str),
+                            inc.created_at.isoformat(), inc.updated_at.isoformat(),
+                        ),
+                    )
+                    result.append((inc.incident_id, True))
+            self._conn.commit()
+        return result
+
+    def link_alerts_to_incident(
+        self,
+        incident_id: str,
+        source_batch: str,
+        rule_titles: list[str],
+        entity_values: list[str],
+        window_start: str | None = None,
+        window_end: str | None = None,
+    ) -> int:
+        """Привязывает уже сохранённые алерты к инциденту (проставляет alerts.incident_id) и
+        досчитывает incidents.alert_count + roll-up severity по привязанным member-алертам.
+
+        Выборка сужена source_batch + rule_title IN (базовые правила сценария) + значение
+        сущности (host/entities LIKE) + incident_id IS NULL. events НЕ трогаем. Временнóго
+        сужения по created_at НЕТ намеренно: alerts.created_at - наивный wall-clock приёма, а
+        окно корреляции считается по event_time источника; при replay исторических датасетов
+        это разные шкалы (см. docs/spec/incidents.md, "Известные ограничения"). window_start/
+        window_end приняты для симметрии сигнатуры и на будущее ужесточение, сейчас не
+        используются. Возврат - число реально привязанных алертов."""
+        if not rule_titles:
+            return 0
+        title_ph = ",".join("?" * len(rule_titles))
+        where = ["incident_id IS NULL", "source_batch = ?", f"rule_title IN ({title_ph})"]
+        params: list[Any] = [source_batch, *rule_titles]
+        if entity_values:
+            ev_ph = ",".join("?" * len(entity_values))
+            ent_likes = " OR ".join("entities LIKE ('%\"' || ? || '\"%')" for _ in entity_values)
+            where.append(f"(host IN ({ev_ph}) OR {ent_likes})")
+            params += [*entity_values, *entity_values]
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE alerts SET incident_id = ? WHERE " + " AND ".join(where),
+                (incident_id, *params),
+            )
+            linked = cur.rowcount
+            rows = self._conn.execute(
+                "SELECT rule_level FROM alerts WHERE incident_id = ?", (incident_id,)
+            ).fetchall()
+            sev_row = self._conn.execute(
+                "SELECT severity FROM incidents WHERE incident_id = ?", (incident_id,)
+            ).fetchone()
+            if sev_row is not None:
+                new_sev = Severity.roll_up([sev_row["severity"], *(r["rule_level"] for r in rows)]).value
+                self._conn.execute(
+                    "UPDATE incidents SET alert_count = ?, severity = ?, updated_at = ? WHERE incident_id = ?",
+                    (len(rows), new_sev, utcnow_naive().isoformat(), incident_id),
+                )
+            self._conn.commit()
+        return linked
+
+    def enqueue_investigation(self, incident_id: str, requeue_terminal: bool = True) -> str | None:
+        """Ставит расследование инцидента в очередь. Строка queued/running уже есть -> None
+        (не дублируем). Строка в терминальном статусе (done/error) и requeue_terminal -> сброс
+        в queued (новый контекст для агента), тот же investigation_id. Иначе - INSERT новой
+        queued-строки. Возврат - investigation_id или None."""
+        now = utcnow_naive().isoformat()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT investigation_id, status FROM investigations WHERE incident_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (incident_id,),
+            ).fetchone()
+            if row is not None and row["status"] in ("queued", "running"):
+                return None
+            if row is not None and requeue_terminal:
+                self._conn.execute(
+                    "UPDATE investigations SET status = 'queued', verdict = NULL, rationale = '', "
+                    "confidence = NULL, steps = '[]', error = '', started_at = NULL, "
+                    "finished_at = NULL WHERE investigation_id = ?",
+                    (row["investigation_id"],),
+                )
+                self._conn.commit()
+                return row["investigation_id"]
+            inv = Investigation(incident_id=incident_id)
+            self._conn.execute(
+                "INSERT INTO investigations (investigation_id, incident_id, status, created_at) "
+                "VALUES (?, ?, 'queued', ?)",
+                (inv.investigation_id, incident_id, now),
+            )
+            self._conn.commit()
+            return inv.investigation_id
+
+    def list_incidents(
+        self,
+        status: str | None = None,
+        incident_type: str | None = None,
+        source_batch: str | None = None,
+        severity: str | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT i.*, "
+            "(SELECT v.status FROM investigations v WHERE v.incident_id = i.incident_id "
+            " ORDER BY v.created_at DESC LIMIT 1) AS investigation_status "
+            "FROM incidents i WHERE 1=1"
+        )
+        params: list[Any] = []
+        if status:
+            query += " AND i.status = ?"
+            params.append(status)
+        if incident_type:
+            query += " AND i.incident_type = ?"
+            params.append(incident_type)
+        if source_batch:
+            query += " AND i.source_batch = ?"
+            params.append(source_batch)
+        if severity:
+            query += " AND i.severity = ?"
+            params.append(severity)
+        if time_from:
+            query += " AND i.created_at >= ?"
+            params.append(time_from)
+        if time_to:
+            query += " AND i.created_at <= ?"
+            params.append(time_to)
+        order = _order_clause(sort_by, sort_dir, _INCIDENT_SORT_COLUMNS, "ORDER BY created_at DESC")
+        query += f" {order} LIMIT ? OFFSET ?"
+        params += [limit, offset]
+        with self._read_lock:
+            rows = [self._incident_row(r) for r in self._read_conn.execute(query, params).fetchall()]
+        for row in rows:
+            row.pop("sample_events", None)
+        return rows
+
+    def count_incidents(
+        self,
+        status: str | None = None,
+        incident_type: str | None = None,
+        source_batch: str | None = None,
+        severity: str | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+    ) -> int:
+        query = "SELECT COUNT(*) AS c FROM incidents WHERE 1=1"
+        params: list[Any] = []
+        for col, val in (
+            ("status", status), ("incident_type", incident_type),
+            ("source_batch", source_batch), ("severity", severity),
+        ):
+            if val:
+                query += f" AND {col} = ?"
+                params.append(val)
+        if time_from:
+            query += " AND created_at >= ?"
+            params.append(time_from)
+        if time_to:
+            query += " AND created_at <= ?"
+            params.append(time_to)
+        with self._read_lock:
+            return int(self._read_conn.execute(query, params).fetchone()["c"])
+
+    def get_incident(self, incident_id: str) -> dict[str, Any] | None:
+        """Полная карточка инцидента: строка incidents (JSON-колонки распарсены) + member_alerts
+        (облегчённые строки привязанных алертов) + investigation (последняя строка расследования)."""
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            result = self._incident_row(row)
+            result["member_alerts"] = [
+                dict(r) for r in self._read_conn.execute(
+                    "SELECT alert_id, rule_title, rule_level, host, status, event_count, created_at "
+                    "FROM alerts WHERE incident_id = ? ORDER BY created_at ASC",
+                    (incident_id,),
+                ).fetchall()
+            ]
+            inv = self._read_conn.execute(
+                "SELECT * FROM investigations WHERE incident_id = ? ORDER BY created_at DESC LIMIT 1",
+                (incident_id,),
+            ).fetchone()
+        result["investigation"] = self._investigation_row(inv) if inv is not None else None
+        return result
+
+    def update_incident_status(self, incident_id: str, status: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE incidents SET status = ?, updated_at = ? WHERE incident_id = ?",
+                (status, utcnow_naive().isoformat(), incident_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    @staticmethod
+    def _investigation_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        d = dict(row)
+        if isinstance(d.get("steps"), str):
+            try:
+                d["steps"] = json.loads(d["steps"])
+            except (TypeError, ValueError):
+                d["steps"] = []
+        return d
+
+    def list_pending_investigations(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Расследования в статусе queued, FIFO по created_at - для фоновой джобы (app/incidents.py)."""
+        with self._read_lock:
+            return [
+                self._investigation_row(r) for r in self._read_conn.execute(
+                    "SELECT * FROM investigations WHERE status = 'queued' ORDER BY created_at ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            ]
+
+    def get_investigation(self, incident_id: str) -> dict[str, Any] | None:
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT * FROM investigations WHERE incident_id = ? ORDER BY created_at DESC LIMIT 1",
+                (incident_id,),
+            ).fetchone()
+        return self._investigation_row(row) if row is not None else None
+
+    def update_investigation(self, investigation_id: str, **fields: Any) -> bool:
+        """Точечное обновление строки расследования джобой. Только whitelisted-поля
+        (_INVESTIGATION_UPDATABLE); steps сериализуется в JSON."""
+        cols = [k for k in fields if k in _INVESTIGATION_UPDATABLE]
+        if not cols:
+            return False
+        sets = ", ".join(f"{c} = ?" for c in cols)
+        values = [json.dumps(fields[c]) if c == "steps" else fields[c] for c in cols]
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE investigations SET {sets} WHERE investigation_id = ?",
+                (*values, investigation_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
     # ------------------------------------------------------------------ Batches
 
     def list_batches(self) -> list[dict[str, Any]]:
@@ -981,16 +1453,33 @@ class Store:
         return event_rows
 
     def delete_batch(self, source_batch: str) -> dict[str, int]:
-        """Полное удаление источника: все events, alerts И rule_hits с этим source_batch (не
-        только события) - source_batch не отдельная сущность/таблица, просто общая метка на ВСЕХ
-        трёх таблицах, поэтому "удалить источник" технически значит удалить всё с этой меткой.
-        rule_hits важно чистить здесь же: иначе при повторном ingest под ТЕМ ЖЕ source_batch
-        (частый случай в ручном тестировании, см. CLAUDE.md) осиротевшие строки от УДАЛЁННОГО
-        батча продолжали бы учитываться в evaluate_correlation_window (окно фильтруется по
-        source_batch+event_time, не по тому, жив ли ещё сам event_id в events - JOIN просто не
-        вернёт по нему raw_json, но COUNT(*) без JOIN их всё равно посчитал бы; здесь JOIN есть,
-        так что реального искажения счётчика нет, но мусор всё равно накапливался бы вечно)."""
+        """Полное удаление источника: все events, alerts, rule_hits, incidents И investigations
+        с этим source_batch (не только события) - source_batch не отдельная сущность/таблица,
+        просто общая метка на этих таблицах, поэтому "удалить источник" технически значит
+        удалить всё с этой меткой. rule_hits важно чистить здесь же: иначе при повторном ingest
+        под ТЕМ ЖЕ source_batch (частый случай в ручном тестировании, см. CLAUDE.md) осиротевшие
+        строки от УДАЛЁННОГО батча продолжали бы учитываться в evaluate_correlation_window (окно
+        фильтруется по source_batch+event_time, не по тому, жив ли ещё сам event_id в events -
+        JOIN просто не вернёт по нему raw_json, но COUNT(*) без JOIN их всё равно посчитал бы;
+        здесь JOIN есть, так что реального искажения счётчика нет, но мусор всё равно накапливался
+        бы вечно). incidents/investigations (Этап 4) привязаны к одному source_batch - чистим их
+        тем же проходом (investigations - по incident_id удаляемых инцидентов, своей метки
+        source_batch у них нет). Таблица sources под это правило НЕ подпадает намеренно: снять
+        регистрацию источника - отдельное действие (delete_source)."""
         with self._lock:
+            incident_ids = [
+                r["incident_id"] for r in self._conn.execute(
+                    "SELECT incident_id FROM incidents WHERE source_batch = ?", (source_batch,)
+                )
+            ]
+            if incident_ids:
+                placeholders = ",".join("?" * len(incident_ids))
+                self._conn.execute(
+                    f"DELETE FROM investigations WHERE incident_id IN ({placeholders})", incident_ids
+                )
+            incidents_deleted = self._conn.execute(
+                "DELETE FROM incidents WHERE source_batch = ?", (source_batch,)
+            ).rowcount
             events_deleted = self._conn.execute(
                 "DELETE FROM events WHERE source_batch = ?", (source_batch,)
             ).rowcount
@@ -999,7 +1488,11 @@ class Store:
             ).rowcount
             self._conn.execute("DELETE FROM rule_hits WHERE source_batch = ?", (source_batch,))
             self._conn.commit()
-        return {"events_deleted": events_deleted, "alerts_deleted": alerts_deleted}
+        return {
+            "events_deleted": events_deleted,
+            "alerts_deleted": alerts_deleted,
+            "incidents_deleted": incidents_deleted,
+        }
 
     # ------------------------------------------------------------------ Sources (потоковые источники)
 

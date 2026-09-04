@@ -59,9 +59,10 @@
 | `event_count` | INTEGER | NOT NULL |
 | `sample_events` | TEXT | NOT NULL, JSON-массив объектов |
 | `status` | TEXT | NOT NULL DEFAULT `'new'` |
+| `incident_id` | TEXT | NULL — обратная ссылка на инцидент (Этап 4, аддитивная миграция `_migrate`) |
 
 Индексы: `idx_alerts_dedup(dedup_key)`, `idx_alerts_status(status)`, `idx_alerts_level(rule_level)`,
-`idx_alerts_batch(source_batch)`.
+`idx_alerts_batch(source_batch)`, `idx_alerts_incident(incident_id)`.
 
 ### Таблица `events`
 
@@ -216,30 +217,41 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 
 ## API `Store` — корреляция
 
-Двухфазный счёт (Этап A, см. `docs/spec/correlation.md` за подробным разбором и обоснованием
-производительности): `evaluate_correlation_windows` (фаза 1, грубая оценка по объединённому
-окну нескольких ключей сразу) → `evaluate_correlation_window` (фаза 2, точная перепроверка
-кандидатов в их собственном узком окне). Обе читают счёт ИСКЛЮЧИТЕЛЬНО из `rule_hits.group_json`
-(`json_extract`), БЕЗ `JOIN` к `events` — стоимость определяется плотностью попаданий в окне,
-не размером `events`/БД в целом. `JOIN` к `events` есть только в `evaluate_correlation_window`
-и только ради `sample_events` (реальный контент события для карточки алерта), не влияет на
-стоимость счёта.
+A3-оценка (см. `docs/spec/correlation.md` за подробным разбором и обоснованием
+производительности): `fetch_correlation_hits` (один range-scan по `rule_hits`, суженный до
+кандидатных ключей и диапазона `~2×timespan`; счёт делается Python-стороной скользящим окном) →
+`evaluate_correlation_window` (авторитетный счёт + `sample_events` по одному найденному окну).
+Обе читают счёт ИСКЛЮЧИТЕЛЬНО из `rule_hits.group_json` (`json_extract`), БЕЗ `JOIN` к `events`
+на счётном пути — стоимость определяется плотностью попаданий в окне, не размером `events`/БД.
+`JOIN` к `events` есть только в `evaluate_correlation_window` и только ради `sample_events`
+(реальный контент события для карточки), не влияет на стоимость счёта.
+
+### `fetch_correlation_hits(rule_titles, source_batch, time_from, time_to, group_by, keys, distinct_field=None) -> list[tuple[key, event_time, rule_title, distinct_value|None]]`
+
+Все попадания `rule_title IN (rule_titles)` в `[time_from, time_to]` для `source_batch`,
+СУЖЕННЫЕ до `keys` (список кортежей строковых значений group-by; OR по каждому ключу, AND по
+его полям — путь поля и значение bound-параметры). Возвращает строки по возрастанию `event_time`
+с уже извлечёнными из `group_json` значениями ключа, `event_time`, `rule_title` и (для
+`value_count`) значением `distinct_field`. Строки с `None` в любом компоненте ключа
+отбрасываются. Один индексный range-scan по `idx_rule_hits_lookup` — стоимость от плотности
+попаданий этих ключей в диапазоне, не от размера БД.
 
 ### `evaluate_correlation_windows(rule_titles, source_batch, time_from, time_to, group_by, mode, distinct_field=None) -> dict[tuple, int]`
 
-Фаза 1 — один `GROUP BY`-запрос по `rule_hits` сразу по ВСЕМ ключам group-by, попавшим в
-`[time_from, time_to]` (обычно объединённое окно нескольких кандидатных ключей одного flush'а —
-грубая оценка, может завысить счёт отдельных ключей с более ранним anchor, см.
-`docs/spec/correlation.md`). `mode`: `"events"` — `COUNT(*)`; `"distinct_values"` —
+Один `GROUP BY`-запрос по `rule_hits` сразу по ВСЕМ ключам group-by в `[time_from, time_to]`.
+`mode`: `"events"` — `COUNT(*)`; `"distinct_values"` —
 `COUNT(DISTINCT json_extract(group_json, distinct_field))` (`value_count`); `"distinct_rules"` —
 `COUNT(DISTINCT rule_title)` (`temporal`/`temporal_ordered`). Возвращает
-`{tuple(значения group_by): count}` — ключи с хотя бы одним `None`-полем в `group_json`
-(поле отсутствовало) пропускаются.
+`{tuple(значения group_by): count}` — ключи с хотя бы одним `None`-полем пропускаются.
+**Движком (`app/detection/correlation.py`) с переходом на A3 больше не вызывается** — оставлен
+как самостоятельный метод `Store` (свои тесты в `tests/test_store.py`); A3 делает грубый гейт
+Python-стороной по строкам из `fetch_correlation_hits`, без второго прохода по `rule_hits`.
 
 ### `evaluate_correlation_window(base_rule_titles, group_by, key_values, source_batch, time_from, time_to, mode=None, distinct_field=None, sample_limit=10) -> dict`
 
-Фаза 2 — точная оценка ОДНОГО (correlation-правило, group-by-ключ) сочетания. Возвращает
-`{"count": int, "sample_events": list[dict]}`.
+Точная оценка ОДНОГО (correlation-правило, group-by-ключ) сочетания в конкретном окне
+`[time_from, time_to]` — авторитетный `count` + `sample_events` для окна, которое A3 уже выбрал
+скользящим проходом. Возвращает `{"count": int, "sample_events": list[dict]}`.
 
 - Условия: `rule_title IN (base_rule_titles)`, `source_batch = ?`,
   `event_time BETWEEN time_from AND time_to` (нормализованные строки), и по одному условию
@@ -290,8 +302,27 @@ correlation) видит потомка тем же запросом, что и �
 
 ### `delete_batch(source_batch: str) -> dict`
 
-Удаляет строки с этой меткой из `events`, `alerts` и `rule_hits`.
-Возвращает `{"events_deleted": int, "alerts_deleted": int}`. Реестр `sources` не трогает.
+Удаляет строки с этой меткой из `events`, `alerts`, `rule_hits`, `incidents` и — по `incident_id`
+удаляемых инцидентов — `investigations`. Возвращает
+`{"events_deleted": int, "alerts_deleted": int, "incidents_deleted": int}`. Реестр `sources` не трогает.
+
+## API `Store` — инциденты / расследования (Этап 4)
+
+Полная семантика — `docs/spec/incidents.md`. Схема таблиц `incidents` / `investigations` — там же.
+Записи — под `_lock`, чтения — под `_read_lock`; JSON-колонки парсятся на выходе.
+
+| Метод | Поведение |
+|---|---|
+| `upsert_incidents(incidents: list[Incident]) -> list[tuple[str, bool]]` | Insert/update по `dedup_key` (бакет по `timespan`). На update: `severity = Severity.roll_up([старое, новое])`, `window_start = min`, `window_end = max`, обновляются `sample_events`/`entities`/`mitre_techniques`/`member_rule_titles`/`title`. `alert_count` не трогается. Возврат — `[(incident_id, was_new), ...]` в порядке входа. |
+| `link_alerts_to_incident(incident_id, source_batch, rule_titles, entity_values, window_start=None, window_end=None) -> int` | `UPDATE alerts SET incident_id` по `source_batch` + `rule_title IN` + совпадение сущности (`host` / подстрока в `entities`) + `incident_id IS NULL`. `events` НЕ трогает. Досчитывает `incidents.alert_count` и roll-up `severity`. Временнóго сужения по `created_at` нет (см. «Известные ограничения» в `incidents.md`). Возврат — число привязанных алертов. |
+| `enqueue_investigation(incident_id, requeue_terminal=True) -> str | None` | Строка `queued`/`running` есть → `None`. `done`/`error` + `requeue_terminal` → сброс в `queued`, тот же id. Иначе INSERT новой. |
+| `list_incidents(status=None, incident_type=None, source_batch=None, severity=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> list[dict]` | Фильтры по равенству + `time_from/to` по `created_at`. Whitelist сортировки `{created_at, updated_at, alert_count, status, severity}`. Без `sample_events`. Каждая строка несёт `investigation_status` (последняя строка расследования). |
+| `count_incidents(...те же фильтры...) -> int` | — |
+| `get_incident(incident_id) -> dict | None` | Полная строка (JSON распарсен) + `member_alerts` (облегчённые строки `alerts WHERE incident_id`) + `investigation` (последняя строка). |
+| `update_incident_status(incident_id, status) -> bool` | Плюс `updated_at`. |
+| `list_pending_investigations(limit=20) -> list[dict]` | Строки `status='queued'`, FIFO по `created_at`. |
+| `get_investigation(incident_id) -> dict | None` | Последняя строка расследования инцидента. |
+| `update_investigation(investigation_id, **fields) -> bool` | Whitelist полей (`status`/`verdict`/`rationale`/`confidence`/`steps`/`error`/`started_at`/`finished_at`); `steps` сериализуется в JSON. |
 
 ## API `Store` — источники
 
@@ -306,6 +337,20 @@ correlation) видит потомка тем же запросом, что и �
 | `authenticate_source(token) -> dict | None` | По `sha256(token)` ищет **активный** (`enabled=1`) источник. `None` при отсутствии токена / несовпадении / выключенном источнике. Обновляет `last_seen_at` не чаще раза в 60 с (`_SOURCE_LAST_SEEN_THROTTLE_S`). |
 
 Публичная строка источника: `{source_id, name, description, token_hint, enabled (bool), created_at, last_seen_at}`.
+
+### Таблицы `incidents` / `investigations` (Этап 4)
+
+Обе создаются `CREATE TABLE IF NOT EXISTS` в `_SCHEMA` (отрабатывает и на старой `siem.db` —
+как было для `sources`). Полная схема, инварианты и семантика — `docs/spec/incidents.md`.
+
+- `incidents` — `(incident_id PK, dedup_key UNIQUE, incident_type, title, severity, status,
+  source_batch, ruleset_path, correlation_rule_id, correlation_rule_title, group_key JSON,
+  member_rule_titles JSON, window_start, window_end, window_bucket, alert_count,
+  mitre_techniques JSON, entities JSON, sample_events JSON, created_at, updated_at)`.
+  Индексы: `idx_incidents_status`, `idx_incidents_type`, `idx_incidents_batch`, `idx_incidents_created`.
+- `investigations` — `(investigation_id PK, incident_id, status, verdict, rationale, confidence,
+  steps JSON, error, created_at, started_at, finished_at)`.
+  Индексы: `idx_investigations_incident`, `idx_investigations_status`.
 
 ## API `Store` — health
 

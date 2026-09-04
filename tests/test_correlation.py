@@ -371,3 +371,69 @@ def test_active_hit_spec_collects_group_by_and_value_count_field(monkeypatch):
     # "Child" - correlation, не base - не должен попасть в hit_spec (см. докстринг
     # active_hit_spec: её rule_hits пишет сама evaluate_batch через insert_correlation_hits).
     assert "Child" not in spec
+
+
+# --------------------------------------------------- A3: краевой эффект при перемешанном порядке
+
+
+def test_a3_out_of_order_completing_event_still_fires(store, monkeypatch):
+    """Раньше (якорь = max(event_time) НОВЫХ событий) это молча не взводилось: 10-е событие
+    пришло с опозданием и СТАРОЙ меткой времени, окно вокруг неё не накрывало уже сохранённые
+    более свежие хиты. A3 проверяет все точки-якоря -> находит окно [00:00:00, 00:04:00],
+    которое содержит все 10 (в т.ч. новое), и правило взводится."""
+    corr = _corr("Bruteforce", ["Failed Auth"], "event_count", ["IpAddress"], "5m", {"gte": 10})
+    _active(monkeypatch, [corr])
+
+    # 9 событий 00:00:00..00:04:00 (шаг 30с) - в одном 5-минутном окне, но 9 < 10.
+    nine = _events("Failed Auth", 9, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:00:00", step_seconds=30)
+    _ingest(store, nine, "b1", "Failed Auth", {"IpAddress"})
+    assert correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": nine}) == 0
+
+    # 10-е событие приходит ПОЗЖЕ по факту, но с меткой времени 00:02:00 (перемешанный порядок).
+    late = _events("Failed Auth", 1, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:02:00")
+    _ingest(store, late, "b1", "Failed Auth", {"IpAddress"})
+    created = correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": late})
+
+    assert created == 1
+    assert store.list_alerts(source_batch="b1")[0]["event_count"] == 10
+
+
+def test_a3_temporal_ordered_late_first_event_still_fires(store, monkeypatch):
+    """temporal_ordered: события пришли в обратном порядке прихода (B, потом «поздняя» A со
+    старой меткой). Якорь на max(новых) дал бы окно вокруг A@10:00, из которого B@10:30 выпадает.
+    A3 находит окно [09:30, 10:30] с обоими правилами и корректным порядком A->B."""
+    corr = _corr(
+        "Chain", ["Step A", "Step B"], "temporal_ordered", ["User"], "1h",
+        base_refs=[{"title": "Step A", "kind": "base"}, {"title": "Step B", "kind": "base"}],
+    )
+    _active(monkeypatch, [corr])
+
+    b = _events("Step B", 1, {"User": "bob"}, "2024-01-01T10:30:00")
+    _ingest(store, b, "b1", "Step B", {"User"})
+    assert correlation.evaluate_batch(store, "rs", "b1", {"Step B": b}) == 0  # только B
+
+    a_late = _events("Step A", 1, {"User": "bob"}, "2024-01-01T10:00:00")
+    _ingest(store, a_late, "b1", "Step A", {"User"})
+    created = correlation.evaluate_batch(store, "rs", "b1", {"Step A": a_late})
+
+    assert created == 1
+    assert store.list_alerts(source_batch="b1")[0]["rule_title"] == "Chain"
+
+
+def test_a3_does_not_reevaluate_keys_without_new_events(store, monkeypatch):
+    """A3 сужает выборку до ключей, у которых в ЭТОМ флаше были новые события. Событие по
+    другому ключу не должно перезапускать оценку уже сработавшего ключа."""
+    corr = _corr("Bruteforce", ["Failed Auth"], "event_count", ["IpAddress"], "5m", {"gte": 10})
+    _active(monkeypatch, [corr])
+
+    x = _events("Failed Auth", 10, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:00:00")
+    _ingest(store, x, "b1", "Failed Auth", {"IpAddress"})
+    assert correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": x}) == 1
+
+    # одно событие по ДРУГОМУ IP - оценка идёт только для него (10.0.0.2 -> 1 < 10)
+    y = _events("Failed Auth", 1, {"IpAddress": "10.0.0.2"}, "2024-01-01T00:01:00")
+    _ingest(store, y, "b1", "Failed Auth", {"IpAddress"})
+    created = correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": y})
+
+    assert created == 0
+    assert len(store.list_alerts(source_batch="b1")) == 1  # тот же один алерт по 10.0.0.1

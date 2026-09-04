@@ -26,6 +26,10 @@ Aware-форма дала бы суффикс `+00:00` и сломала бы с
 неизвестное или отсутствующее значение (`None`, `"unknown"`, произвольная строка) отображается
 в `Severity.informational`.
 
+`Severity.rank(value) -> int` — числовой ранг (`critical` = 5 … `informational` = 1; неизвестное
+→ 1). `Severity.roll_up(values) -> Severity` — максимальная серьёзность из набора (severity
+инцидента как roll-up member-алертов, см. `app/store.py:link_alerts_to_incident`).
+
 ## `Entities(BaseModel)`
 
 Сущности, извлечённые из событий алерта.
@@ -68,6 +72,48 @@ Aware-форма дала бы суффикс `+00:00` и сломала бы с
 | `sample_events` | `list[dict[str, Any]]` | — | сэмпл событий |
 | `status` | `str` | `"new"` | `new` → `investigating` → `closed` |
 
+## `Incident(BaseModel)` (Этап 4)
+
+Единица хранения таблицы `incidents`. Заводится помеченным `correlation.incident` correlation-правилом
+(см. `docs/spec/incidents.md`).
+
+| Поле | Тип | По умолчанию | Примечание |
+|---|---|---|---|
+| `incident_id` | `str` | `str(uuid4())` | PK |
+| `dedup_key` | `str` | — | `sha256(incident_type:group_values:window_bucket)[:16]` |
+| `incident_type` | `str` | — | slug из `incident.type` |
+| `title` | `str` | — | `incident.title` или title правила |
+| `severity` | `Severity` | — | явная / `level` правила / `medium`; далее roll-up member-алертов |
+| `status` | `str` | `"new"` | `new` → `investigating` → `closed` |
+| `source_batch` | `str` | — | один источник |
+| `ruleset_path` | `str` | `""` | для `/context` |
+| `correlation_rule_id` / `correlation_rule_title` | `str` | `""` / — | правило-триггер |
+| `group_key` | `dict[str, str]` | `{}` | значения group-by |
+| `member_rule_titles` | `list[str]` | `[]` | `base_rule_titles` правила |
+| `window_start` / `window_end` / `window_bucket` | `str` | — | нормализованное ISO; бакет — часть `dedup_key` |
+| `alert_count` | `int` | `0` | привязанных алертов |
+| `mitre_techniques` | `list[str]` | `[]` | union тегов правила + member-алертов |
+| `entities` | `Entities` | `Entities()` | из `sample_events` |
+| `sample_events` | `list[dict]` | `[]` | из фазы 2 корреляции |
+| `created_at` / `updated_at` | `datetime` | `utcnow_naive()` | наивный UTC |
+
+## `Investigation(BaseModel)` (Этап 4)
+
+Строка таблицы `investigations` — очередь и результат расследования инцидента.
+
+| Поле | Тип | По умолчанию |
+|---|---|---|
+| `investigation_id` | `str` | `str(uuid4())` |
+| `incident_id` | `str` | — |
+| `status` | `str` | `"queued"` (`queued` → `running` → `done` → `error`) |
+| `verdict` | `str \| None` | `None` (`TP` / `FP` / `needs-review`) |
+| `rationale` | `str` | `""` |
+| `confidence` | `float \| None` | `None` |
+| `steps` | `list[dict]` | `[]` |
+| `error` | `str` | `""` |
+| `created_at` | `datetime` | `utcnow_naive()` |
+| `started_at` / `finished_at` | `datetime \| None` | `None` |
+
 ## Модели тел запросов
 
 | Модель | Эндпоинт | Поля |
@@ -76,6 +122,7 @@ Aware-форма дала бы суффикс `+00:00` и сломала бы с
 | `IngestEventsRequest` | `POST /ingest/events` | `events: list[dict]`; `source_label: str = "live-queue"` (игнорируется, метку задаёт источник) |
 | `IngestResponse` | ответ `/ingest/*` | `source_batch: str`; `events_processed: int`; `rules_matched: int`; `alerts_created: int`; `duration_seconds: float` |
 | `AlertStatusUpdate` | `PATCH /alerts/{id}/status` | `status: str` |
+| `IncidentStatusUpdate` | `PATCH /incidents/{id}/status` | `status: str` |
 | `CustomRuleSubmit` | `POST /rules/custom` | `yaml_text: str`; `ruleset: str \| None = None`; `new_ruleset_name: str \| None = None` (ровно один из двух) |
 | `CustomRuleUpdate` | `PUT /rules/custom/{rule_id}` | `yaml_text: str` |
 | `MainRulesetRuleToggle` | `POST /main-ruleset/rules` | `ruleset: str`; `rule_id: str`; `include: bool` |

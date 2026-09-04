@@ -151,13 +151,17 @@ def test_delete_batch_removes_events_and_alerts(store):
     )
 
     result = store.delete_batch("batch-1")
-    assert result == {"events_deleted": 1, "alerts_deleted": 1}
+    assert result == {"events_deleted": 1, "alerts_deleted": 1, "incidents_deleted": 0}
     assert store.list_alerts(source_batch="batch-1") == []
     assert store.list_events(source_batch="batch-1") == []
 
 
 def test_delete_batch_missing_returns_zero_counts(store):
-    assert store.delete_batch("does-not-exist") == {"events_deleted": 0, "alerts_deleted": 0}
+    assert store.delete_batch("does-not-exist") == {
+        "events_deleted": 0,
+        "alerts_deleted": 0,
+        "incidents_deleted": 0,
+    }
 
 
 def test_health_ok(store):

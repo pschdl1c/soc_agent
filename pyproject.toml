@@ -24,7 +24,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soc-agent"
-version = "0.4.0"                       # ЕДИНСТВЕННЫЙ источник правды; app/main.py читает через importlib.metadata. См. CHANGELOG.md
+version = "0.5.0"                       # ЕДИНСТВЕННЫЙ источник правды; app/main.py читает через importlib.metadata. См. CHANGELOG.md
 description = "Мини-SIEM на Sigma-правилах (Zircolite) с AI-агентом расследования алертов"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
