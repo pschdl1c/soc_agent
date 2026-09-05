@@ -237,6 +237,12 @@ def _process_events(tagged_events: list[tuple[dict, str]], ruleset_path: str | N
     batch_label = next(iter(distinct_labels)) if len(distinct_labels) == 1 else f"mixed:{len(distinct_labels)}-sources"
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False, encoding="utf-8") as tmp:
         for event, label in tagged_events:
+            # Страховка второго уровня к проверке в _parse_stream_body: ЛЮБАЯ не-dict запись,
+            # добравшаяся сюда любым путём, отбрасывается поштучно. Исключение на этой строке
+            # обрабатывается ingest_queue._flush как ошибка ВСЕГО буфера - то есть одна битая
+            # запись стоила бы всего флаша (см. докстринг _parse_stream_body).
+            if not isinstance(event, dict):
+                continue
             tagged = {**event, INGEST_SOURCE_FIELD: label}
             tmp.write(json.dumps(tagged, default=str) + "\n")
         tmp_path = tmp.name
@@ -362,22 +368,32 @@ def ingest_events(request: Request, body: IngestEventsRequest) -> IngestResponse
     return _process_events([(e, source["name"]) for e in body.events])
 
 
-def _parse_stream_body(raw: bytes) -> list[dict]:
-    """Принимает NDJSON (по событию на строку) или JSON-массив. Пустые строки пропускаем."""
+def _parse_stream_body(raw: bytes) -> tuple[list[dict], int]:
+    """Принимает NDJSON (по событию на строку) или JSON-массив. Пустые строки пропускаем.
+    Возвращает (события, сколько записей отброшено как не-объекты).
+
+    Событием считается ТОЛЬКО JSON-объект: голая строка/число/массив в потоке отбрасывается
+    здесь, а не уезжает дальше в очередь. Иначе одна такая запись роняла бы `{**event, ...}`
+    в _process_events, а ingest_queue._flush ловит исключение на ВЕСЬ буфер разом - и вместе с
+    битой записью молча терялся весь флаш (до INGEST_BATCH_SIZE событий, в т.ч. от других
+    источников), при том что форвардер уже получил 202 и повторять не станет. /ingest/events
+    ту же проверку делает через Pydantic (422), тут её раньше не было вовсе."""
     text = raw.decode("utf-8").strip()
     if not text:
-        return []
+        return [], 0
     if text[0] == "[":  # цельный JSON-массив
         data = json.loads(text)
         if not isinstance(data, list):
             raise ValueError("ожидался JSON-массив событий")
-        return data
-    events: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            events.append(json.loads(line))
-    return events
+        raw_items: list = data
+    else:
+        raw_items = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                raw_items.append(json.loads(line))
+    events = [item for item in raw_items if isinstance(item, dict)]
+    return events, len(raw_items) - len(events)
 
 
 @app.post("/ingest/stream")
@@ -400,12 +416,14 @@ async def ingest_stream(request: Request) -> JSONResponse:
     label = source["name"]
     raw = await request.body()
     try:
-        events = _parse_stream_body(raw)
+        events, skipped = _parse_stream_body(raw)
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=f"Не удалось разобрать тело запроса: {exc}")
 
+    # skipped отдаём в ответе (а не только пишем в лог) - иначе форвардер, шлющий мусор,
+    # никак не узнал бы, что часть записей не принята: код ответа тут всегда 202.
     if not events:
-        return JSONResponse(status_code=202, content={"queued": 0, "source": label})
+        return JSONResponse(status_code=202, content={"queued": 0, "skipped": skipped, "source": label})
 
     try:
         queued = ingest_worker.enqueue(events, source_label=label)
@@ -417,7 +435,7 @@ async def ingest_stream(request: Request) -> JSONResponse:
     except RuntimeError as exc:  # воркер не запущен
         raise HTTPException(status_code=503, detail=f"Очередь ingest недоступна: {exc}")
 
-    return JSONResponse(status_code=202, content={"queued": queued, "source": label})
+    return JSONResponse(status_code=202, content={"queued": queued, "skipped": skipped, "source": label})
 
 
 @app.post("/ingest/upload", response_model=IngestResponse)

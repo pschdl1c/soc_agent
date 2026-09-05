@@ -90,11 +90,15 @@ lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` п
 |---|---|---|---|
 | `POST` | `/ingest/file` | `IngestFileRequest` | прогон файла на диске сервера. Без токена. 404, если файл не найден. `source_label` по умолчанию — `Path(events_path).stem` |
 | `POST` | `/ingest/events` | `IngestEventsRequest` | **требует токен источника**. Синхронный прогон. Метка — имя источника (`source_label` из тела игнорируется). Пустой список → 400 |
-| `POST` | `/ingest/stream` | NDJSON или JSON-массив | **требует токен источника**. Кладёт события в очередь, отвечает `202 {"queued": N, "source": <name>}`. Неразбираемое тело → 400. `IngestQueueFull`/`RuntimeError` → 503 |
+| `POST` | `/ingest/stream` | NDJSON или JSON-массив | **требует токен источника**. Кладёт события в очередь, отвечает `202 {"queued": N, "skipped": M, "source": <name>}`. Неразбираемое тело → 400. `IngestQueueFull`/`RuntimeError` → 503 |
 | `POST` | `/ingest/upload` | multipart: `file`, `input_type="auto"`, `ruleset`, `source_label` | загрузка файла из браузера. Без токена. `input_type == "auto"` → определение по расширению (`_guess_input_type`). Файл сохраняется в `UPLOADS_DIR` и не удаляется |
 
-`_parse_stream_body(raw)` — тело, начинающееся с `[`, парсится как JSON-массив; иначе построчно
-(NDJSON, пустые строки пропускаются).
+`_parse_stream_body(raw) -> (события, skipped)` — тело, начинающееся с `[`, парсится как
+JSON-массив; иначе построчно (NDJSON, пустые строки пропускаются). Событием считается только
+JSON-**объект**: голая строка/число/массив отбрасывается тут же и попадает в счётчик `skipped`
+ответа. Раньше такая запись доезжала до `_process_events`, роняла `{**event, ...}`, а
+`ingest_queue._flush` ловит исключение на ВЕСЬ буфер — вместе с битой записью молча терялся
+весь флаш (до `INGEST_BATCH_SIZE` событий, в т.ч. чужих источников) при уже отданном 202.
 
 `_EXTENSION_TO_INPUT_TYPE`: `.evtx→evtx`, `.json/.jsonl/.ndjson→json`, `.xml→xml`, `.csv→csv`,
 `.log→auditd`; иначе `json`.

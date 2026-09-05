@@ -2079,7 +2079,7 @@ async function refreshBatches() {
   try {
     const batches = await api("/batches");
     select.innerHTML = '<option value="">Все источники</option>' + batches.map(b =>
-      `<option value="${b.source_batch}">${b.source_batch} (${b.event_count} событий, ${b.alert_count} алертов)</option>`
+      `<option value="${attr(b.source_batch)}">${escapeHtml(b.source_batch)} (${b.event_count} событий, ${b.alert_count} алертов)</option>`
     ).join("");
     select.value = prev;
     renderSourcesTable(batches);
@@ -2640,8 +2640,8 @@ async function loadAlerts() {
     tbody.innerHTML = alerts.map(a => `
       <tr class="data-row" data-id="${a.alert_id}" onclick="selectAlert('${a.alert_id}')">
         <td>${sevBar(a.rule_level)}</td>
-        <td>${a.rule_title}</td>
-        <td>${a.host}</td>
+        <td>${escapeHtml(a.rule_title)}</td>
+        <td>${escapeHtml(a.host)}</td>
         <td>${a.event_count}</td>
         <td>${a.created_at.slice(0,19).replace("T"," ")}</td>
       </tr>
@@ -2687,22 +2687,22 @@ async function selectAlert(id) {
     const mitre = renderMitreChips(a.mitre, a.mitre_techniques);
     const ent = a.entities;
     content.innerHTML = `
-      <h3>${sevBar(a.rule_level)}${a.rule_title}</h3>
-      <p class="muted">${a.description || "без описания"}</p>
+      <h3>${sevBar(a.rule_level)}${escapeHtml(a.rule_title)}</h3>
+      <p class="muted">${a.description ? escapeHtml(a.description) : "без описания"}</p>
       ${mitre.tacticsHtml ? `<div style="margin:8px 0 2px 0;">${mitre.tacticsHtml}</div>` : ""}
       <div style="margin:4px 0 10px 0;">${mitre.techniquesHtml}</div>
       <div class="kv"><span>ID</span><span>${escapeHtml(a.alert_id)}</span></div>
       <div class="kv"><span>Уровень</span><span>${sevBar(a.rule_level)}${a.rule_level}</span></div>
-      <div class="kv"><span>Хост</span><span>${a.host}</span></div>
-      <div class="kv"><span>Источник</span><span>${a.source_batch}</span></div>
+      <div class="kv"><span>Хост</span><span>${escapeHtml(a.host)}</span></div>
+      <div class="kv"><span>Источник</span><span>${escapeHtml(a.source_batch)}</span></div>
       <div class="kv"><span>Событий</span><span>${a.event_count}</span></div>
       <!-- Статус алерта в UI больше нигде не показывается и не редактируется (см. app/main.py
            PATCH /alerts/{id}/status - ручка осталась, просто UI ей больше не пользуется):
            триаж-статус меняется только у инцидента, который агрегирует алерты, а не у каждого
            алерта по отдельности. -->
-      <div class="kv"><span>Пользователи</span><span>${(ent.users||[]).join(", ") || "—"}</span></div>
-      <div class="kv"><span>IP (src)</span><span>${(ent.src_ips||[]).join(", ") || "—"}</span></div>
-      <div class="kv"><span>Процессы</span><span>${(ent.processes||[]).join(", ") || "—"}</span></div>
+      <div class="kv"><span>Пользователи</span><span>${escapeHtml((ent.users||[]).join(", ")) || "—"}</span></div>
+      <div class="kv"><span>IP (src)</span><span>${escapeHtml((ent.src_ips||[]).join(", ")) || "—"}</span></div>
+      <div class="kv"><span>Процессы</span><span>${escapeHtml((ent.processes||[]).join(", ")) || "—"}</span></div>
       <p class="panel-title" style="margin-top:14px;">Сэмпл событий (${a.sample_events.length})</p>
       <pre class="json-block">${escapeHtml(JSON.stringify(a.sample_events, null, 2))}</pre>
     `;
@@ -2816,9 +2816,9 @@ async function selectIncident(id) {
       <div class="kv"><span>Источник</span><span>${escapeHtml(inc.source_batch)}</span></div>
       <div class="kv"><span>Алертов привязано</span><span>${inc.alert_count}</span></div>
       <div class="kv"><span>Окно</span><span>${(inc.window_start||"").slice(0,19).replace("T"," ")} — ${(inc.window_end||"").slice(0,19).replace("T"," ")}</span></div>
-      <div class="kv"><span>Пользователи</span><span>${(ent.users||[]).join(", ") || "—"}</span></div>
-      <div class="kv"><span>IP (src)</span><span>${(ent.src_ips||[]).join(", ") || "—"}</span></div>
-      <div class="kv"><span>Процессы</span><span>${(ent.processes||[]).join(", ") || "—"}</span></div>
+      <div class="kv"><span>Пользователи</span><span>${escapeHtml((ent.users||[]).join(", ")) || "—"}</span></div>
+      <div class="kv"><span>IP (src)</span><span>${escapeHtml((ent.src_ips||[]).join(", ")) || "—"}</span></div>
+      <div class="kv"><span>Процессы</span><span>${escapeHtml((ent.processes||[]).join(", ")) || "—"}</span></div>
       <div class="status-select-row">
         <select id="incident-status-select-${inc.incident_id}">
           <option value="new" ${inc.status==="new"?"selected":""}>new</option>
@@ -3029,12 +3029,12 @@ async function selectEvent(id) {
   content.style.opacity = "0.45";
   try {
     const e = await api("/events/" + id);
-    const rules = e.matched_rules.length ? e.matched_rules.map(r => `<span class="tech-tag">${r}</span>`).join(" ") : '<span class="muted">не вызвало срабатывания правил</span>';
+    const rules = e.matched_rules.length ? e.matched_rules.map(r => `<span class="tech-tag">${escapeHtml(r)}</span>`).join(" ") : '<span class="muted">не вызвало срабатывания правил</span>';
     content.innerHTML = `
-      <h3>${e.host}</h3>
+      <h3>${escapeHtml(e.host)}</h3>
       <p class="muted" title="${attr(e.event_time || "")}">${e.event_time ? escapeHtml(formatEventTime(e.event_time)) : "время не определено"}</p>
       <div style="margin:10px 0;">${rules}</div>
-      <div class="kv"><span>Источник</span><span>${e.source_batch}</span></div>
+      <div class="kv"><span>Источник</span><span>${escapeHtml(e.source_batch)}</span></div>
       <div style="display:flex; align-items:center; justify-content:space-between; margin:14px 0 10px;">
         <span class="panel-title" style="margin:0;">Сырое событие</span>
         <button type="button" class="ghost ico" title="Скопировать сырое событие"
