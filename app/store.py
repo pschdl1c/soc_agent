@@ -48,11 +48,13 @@ CREATE TABLE IF NOT EXISTS alerts (
     description TEXT NOT NULL,
     entities TEXT NOT NULL,
     event_count INTEGER NOT NULL,
-    sample_events TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'new'
+    sample_events TEXT NOT NULL
+    -- Статуса больше нет (был "new"/"investigating"/"closed") - триаж-статус только у incidents,
+    -- см. CLAUDE.md/docs/spec/http-api.md. Ни один _SCHEMA/_migrate её не создаёт и не чистит -
+    -- БД, созданные ДО этого изменения (с колонкой status на диске), не поддерживаются, только
+    -- пересоздание файла с нуля (siem.db - одноразовая dev-БД, в .gitignore).
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts(dedup_key);
-CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
 CREATE INDEX IF NOT EXISTS idx_alerts_level ON alerts(rule_level);
 CREATE INDEX IF NOT EXISTS idx_alerts_batch ON alerts(source_batch);
 
@@ -271,6 +273,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE alerts ADD COLUMN incident_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_incident ON alerts(incident_id)")
 
+    # events.alert_id - какой алерт "поглотил" это событие (проставляется app/main.py:
+    # _process_batch сразу после store.upsert_alerts, через store.link_events_to_alerts).
+    # Основа цепочки event -> alert -> incident (store.link_alerts_to_incident), заменившей
+    # сопоставление по значению "сущности" (host/entities LIKE) - то молча не находило алерты,
+    # если correlation group-by был не по хосту/известной категории сущности (напр. DNS
+    # QueryName, путь ключа реестра - см. docs/spec/incidents.md, "Известные ограничения").
+    # NULL у событий built-in-прогонов файлов (там дедуп built-in грубый - см. normalize.py -
+    # и линковка к инциденту всё равно не нужна, built-in в main не допускается) и у событий,
+    # не сматчивших ни одно правило (алерта для них просто нет).
+    if "alert_id" not in events_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN alert_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_alert ON events(alert_id)")
+
 # Ранг severity для сортировки колонки "Правило" (critical - самый высокий).
 _SEVERITY_RANK_SQL = (
     "CASE rule_level "
@@ -287,7 +302,6 @@ _ALERT_SORT_COLUMNS = {
     "rule": _SEVERITY_RANK_SQL,  # сортировка по рангу severity
     "host": "host",
     "event_count": "event_count",
-    "status": "status",
     "created_at": "created_at",
 }
 _EVENT_SORT_COLUMNS = {
@@ -324,6 +338,21 @@ def _order_clause(sort_by: str | None, sort_dir: str | None, columns: dict[str, 
         return default
     direction = "ASC" if (sort_dir or "").lower() == "asc" else "DESC"
     return f"ORDER BY {expr} {direction}"
+
+
+def _incident_matches_query(row: dict[str, Any], q: str) -> bool:
+    """Поиск по вкладке Инциденты - подстрока по correlation_rule_title ("Инцидент" в UI,
+    название сработавшего правила) ИЛИ title ("Описание", incident.title из YAML),
+    регистронезависимо. Тот же паттерн, что rules_catalog.paginate_rules у Sigma-правил -
+    str.lower() в Python, а не SQL LOWER()/LIKE (те регистронезависимы только для ASCII,
+    кириллицу не берут)."""
+    needle = q.strip().lower()
+    if not needle:
+        return True
+    return (
+        needle in str(row.get("correlation_rule_title", "")).lower()
+        or needle in str(row.get("title", "")).lower()
+    )
 
 
 def _event_order(sort_by: str | None, sort_dir: str | None) -> tuple[str, list[Any]]:
@@ -409,6 +438,20 @@ class Store:
 
     # ------------------------------------------------------------------ Alerts
 
+    def get_alert_ids_by_dedup_keys(self, dedup_keys: list[str]) -> dict[str, str]:
+        """{dedup_key: alert_id} для уже сохранённых алертов - зовётся app/main.py:_process_batch
+        СРАЗУ после upsert_alerts (не меняем сигнатуру upsert_alerts ради этого - она и так
+        плотно покрыта тестами на count) за настоящими alert_id, нужными для
+        store.link_events_to_alerts. dedup_keys без совпадения просто не попадают в результат."""
+        if not dedup_keys:
+            return {}
+        with self._read_lock:
+            ph = ",".join("?" * len(dedup_keys))
+            rows = self._read_conn.execute(
+                f"SELECT dedup_key, alert_id FROM alerts WHERE dedup_key IN ({ph})", dedup_keys,
+            ).fetchall()
+        return {r["dedup_key"]: r["alert_id"] for r in rows}
+
     def upsert_alerts(self, alerts: list[Alert]) -> int:
         """Дедуплицирует по dedup_key: повторное срабатывание того же правила на
         том же хосте/сущности увеличивает счётчик существующего алерта."""
@@ -433,8 +476,8 @@ class Store:
                         INSERT INTO alerts (
                             alert_id, dedup_key, created_at, engine, source_batch, host,
                             rule_id, rule_title, rule_level, mitre_techniques, description,
-                            entities, event_count, sample_events, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            entities, event_count, sample_events
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             alert.alert_id, alert.dedup_key, alert.created_at.isoformat(),
@@ -442,7 +485,7 @@ class Store:
                             alert.rule.rule_id, alert.rule.title, alert.rule.level.value,
                             json.dumps(alert.rule.mitre_techniques), alert.rule.description,
                             json.dumps(alert.entities.model_dump()), alert.event_count,
-                            json.dumps(alert.sample_events, default=str), alert.status,
+                            json.dumps(alert.sample_events, default=str),
                         ),
                     )
                 count += 1
@@ -452,7 +495,6 @@ class Store:
     def list_alerts(
         self,
         source_batch: str | None = None,
-        status: str | None = None,
         rule_level: str | None = None,
         time_from: str | None = None,
         time_to: str | None = None,
@@ -466,9 +508,6 @@ class Store:
         if source_batch:
             query += " AND source_batch = ?"
             params.append(source_batch)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
         if rule_level:
             query += " AND rule_level = ?"
             params.append(rule_level)
@@ -501,12 +540,6 @@ class Store:
         result["sample_events"] = json.loads(result["sample_events"])
         return result
 
-    def update_alert_status(self, alert_id: str, status: str) -> bool:
-        with self._lock:
-            cur = self._conn.execute("UPDATE alerts SET status = ? WHERE alert_id = ?", (status, alert_id))
-            self._conn.commit()
-        return cur.rowcount > 0
-
     # ------------------------------------------------------------------ Events
 
     def store_events(
@@ -515,7 +548,7 @@ class Store:
         source_batch: str,
         matched_row_to_rules: dict[Any, list[str]],
         hit_spec: dict[str, set[str]] | None = None,
-    ) -> int:
+    ) -> dict[Any, str]:
         """
         raw_events            - все события батча, как вернул ZircoliteCore (включают row_id)
         matched_row_to_rules  - {row_id: [названия сработавших правил]} для этого же батча
@@ -534,16 +567,25 @@ class Store:
                                  events (см. докстринг схемы rule_hits выше). None/пусто
                                  (обычный ingest без активных корреляций) - rule_hits не
                                  трогается вообще.
-        """
+
+        Возврат - {row_id: event_id} (не count) для ВСЕХ сохранённых событий: row_id -
+        Zircolite-локальный id этого батча (см. normalize.py:zircolite_results_to_alerts,
+        Alert.source_row_ids), event_id - настоящий первичный ключ строки events. Единственное
+        место, где эта связка вообще существует (row_id нигде не персистится) - нужна
+        app/main.py:_process_batch, чтобы потом проставить events.alert_id (цепочка event ->
+        alert -> incident без сущностей, см. store.link_alerts_to_incident). len(результата) -
+        число сохранённых событий (замена старому return count)."""
         ingested_at = datetime.now(timezone.utc).isoformat()
         rows = []
         hit_rows = []
+        row_id_to_event_id: dict[Any, str] = {}
         for event in raw_events:
             row_id = event.get("row_id")
             matched = matched_row_to_rules.get(row_id, [])
             host = first_present(event, HOST_FIELDS) or "unknown-host"
             event_time = first_present(event, TIME_FIELDS)
             event_id = str(uuid4())
+            row_id_to_event_id[row_id] = event_id
             rows.append((
                 event_id,
                 source_batch,
@@ -592,7 +634,23 @@ class Store:
                     hit_rows,
                 )
             self._conn.commit()
-        return len(rows)
+        return row_id_to_event_id
+
+    def link_events_to_alerts(self, event_id_to_alert_id: dict[str, str]) -> int:
+        """Проставляет events.alert_id - основа цепочки event -> alert -> incident (см.
+        link_alerts_to_incident) вместо сопоставления по значению "сущности". Зовётся
+        app/main.py:_process_batch СРАЗУ после store.upsert_alerts (там уже известны настоящие
+        alert_id - и вновь созданные, и переиспользованные по dedup_key), но ДО обработки
+        link_specs correlation-инцидентов этого же батча. Пустой словарь - no-op."""
+        if not event_id_to_alert_id:
+            return 0
+        with self._lock:
+            cur = self._conn.executemany(
+                "UPDATE events SET alert_id = ? WHERE event_id = ?",
+                [(alert_id, event_id) for event_id, alert_id in event_id_to_alert_id.items()],
+            )
+            self._conn.commit()
+        return cur.rowcount
 
     def _events_where(
         self,
@@ -801,7 +859,7 @@ class Store:
         key_values - параллельные списки: поле группировки -> конкретное значение ключа.
         """
         if not base_rule_titles or not group_by or len(group_by) != len(key_values):
-            return {"count": 0, "sample_events": []}
+            return {"count": 0, "sample_events": [], "event_ids": []}
         effective_mode = mode or ("distinct_values" if distinct_field else "events")
 
         rule_placeholders = ",".join("?" * len(base_rule_titles))
@@ -820,7 +878,7 @@ class Store:
 
         if effective_mode == "distinct_values":
             if not distinct_field:
-                return {"count": 0, "sample_events": []}
+                return {"count": 0, "sample_events": [], "event_ids": []}
             count_sql = (
                 f"SELECT COUNT(DISTINCT json_extract(h.group_json, ?)) AS c "
                 f"FROM rule_hits h WHERE {where_sql}"
@@ -837,16 +895,25 @@ class Store:
             f"SELECT e.raw_json FROM rule_hits h JOIN events e ON e.event_id = h.event_id "
             f"WHERE {where_sql} ORDER BY h.event_time ASC LIMIT ?"
         )
+        # event_id ВСЕХ попаданий окна (не усечено sample_limit'ом, в отличие от sample_events) -
+        # без JOIN, event_id уже есть прямо в rule_hits. Реальные (события базовых правил) и
+        # синтетические "corr:{dedup}:{title}:{anchor_time}" (сработки других correlation-записей
+        # в цепочках, см. app/detection/correlation.py) вперемешку - разбор на два вида делает
+        # store.link_alerts_to_incident. Основа цепочки event -> alert -> incident без "сущностей"
+        # (см. докстринг link_alerts_to_incident, docs/spec/incidents.md).
+        event_ids_sql = f"SELECT h.event_id FROM rule_hits h WHERE {where_sql}"
         with self._read_lock:
             count = self._read_conn.execute(count_sql, count_params).fetchone()["c"]
             sample_rows = self._read_conn.execute(sample_sql, [*base_params, sample_limit]).fetchall()
+            event_id_rows = self._read_conn.execute(event_ids_sql, base_params).fetchall()
+        event_ids = [row["event_id"] for row in event_id_rows]
         sample_events = []
         for row in sample_rows:
             try:
                 sample_events.append(json.loads(row["raw_json"]))
             except (TypeError, json.JSONDecodeError):
                 continue
-        return {"count": count, "sample_events": sample_events}
+        return {"count": count, "sample_events": sample_events, "event_ids": event_ids}
 
     def evaluate_correlation_windows(
         self,
@@ -1099,8 +1166,8 @@ class Store:
                         INSERT INTO alerts (
                             alert_id, dedup_key, created_at, engine, source_batch, host,
                             rule_id, rule_title, rule_level, mitre_techniques, description,
-                            entities, event_count, sample_events, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            entities, event_count, sample_events
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             alert.alert_id, alert.dedup_key, alert.created_at.isoformat(),
@@ -1108,7 +1175,7 @@ class Store:
                             alert.rule.rule_id, alert.rule.title, alert.rule.level.value,
                             json.dumps(alert.rule.mitre_techniques), alert.rule.description,
                             json.dumps(alert.entities.model_dump()), alert.event_count,
-                            json.dumps(alert.sample_events, default=str), alert.status,
+                            json.dumps(alert.sample_events, default=str),
                         ),
                     )
                 count += 1
@@ -1196,35 +1263,69 @@ class Store:
         self,
         incident_id: str,
         source_batch: str,
-        rule_titles: list[str],
-        entity_values: list[str],
-        window_start: str | None = None,
-        window_end: str | None = None,
+        event_ids: list[str],
     ) -> int:
         """Привязывает уже сохранённые алерты к инциденту (проставляет alerts.incident_id) и
         досчитывает incidents.alert_count + roll-up severity по привязанным member-алертам.
 
-        Выборка сужена source_batch + rule_title IN (базовые правила сценария) + значение
-        сущности (host/entities LIKE) + incident_id IS NULL. events НЕ трогаем. Временнóго
-        сужения по created_at НЕТ намеренно: alerts.created_at - наивный wall-clock приёма, а
-        окно корреляции считается по event_time источника; при replay исторических датасетов
-        это разные шкалы (см. docs/spec/incidents.md, "Известные ограничения"). window_start/
-        window_end приняты для симметрии сигнатуры и на будущее ужесточение, сейчас не
-        используются. Возврат - число реально привязанных алертов."""
-        if not rule_titles:
+        event_ids - ВСЕ event_id, реально вошедшие в выигрышное окно correlation-правила (см.
+        app/detection/correlation.py:_evaluate_correlation_rule/evaluate_correlation_window) -
+        цепочка "какое событие вошло в окно -> какой алерт его поглотил", ЗАМЕНА старому
+        сопоставлению по значению "сущности" (host IN (...) OR entities LIKE '%...%') - то молча
+        не находило алерты, если group-by correlation-правила был не по хосту и не по одной из
+        5 жёстко зашитых категорий _extract_entities (напр. DNS QueryName, путь ключа реестра -
+        ни то ни другое не "user"/"host"/"src_ip"/"dst_ip"/"process", см. docs/spec/incidents.md).
+
+        Два вида event_id вперемешку: (1) настоящий - events.event_id (сработка БАЗОВОГО
+        правила) - резолвится через events.alert_id (проставляет app/main.py:_process_batch
+        сразу после store.upsert_alerts, см. link_events_to_alerts); (2) синтетический
+        "corr:{dedup}:{title}:{anchor_time}" (сработка ДРУГОЙ correlation-записи в цепочке, см.
+        докстринг correlation.py) - dedup_key ВСЕГДА второй ":"-сегмент (формат гарантирован
+        кодом, который его строит), резолвится прямым поиском alerts.dedup_key. Если та
+        correlation была инцидентной (не рекомендуется - инцидентная запись должна быть
+        терминальной в цепочке, см. CLAUDE.md), её dedup_key принадлежит incidents, не alerts -
+        просто не находится, без падения.
+
+        events НЕ трогаем. Временнóго сужения по created_at НЕТ намеренно: alerts.created_at -
+        наивный wall-clock приёма, а окно корреляции считается по event_time источника; при
+        replay исторических датасетов это разные шкалы (см. docs/spec/incidents.md, "Известные
+        ограничения"). Возврат - число реально привязанных алертов."""
+        if not event_ids:
             return 0
-        title_ph = ",".join("?" * len(rule_titles))
-        where = ["incident_id IS NULL", "source_batch = ?", f"rule_title IN ({title_ph})"]
-        params: list[Any] = [source_batch, *rule_titles]
-        if entity_values:
-            ev_ph = ",".join("?" * len(entity_values))
-            ent_likes = " OR ".join("entities LIKE ('%\"' || ? || '\"%')" for _ in entity_values)
-            where.append(f"(host IN ({ev_ph}) OR {ent_likes})")
-            params += [*entity_values, *entity_values]
+        real_ids: list[str] = []
+        synthetic_dedup_keys: set[str] = set()
+        for eid in event_ids:
+            if eid.startswith("corr:"):
+                parts = eid.split(":", 2)
+                if len(parts) >= 2 and parts[1]:
+                    synthetic_dedup_keys.add(parts[1])
+            else:
+                real_ids.append(eid)
+
         with self._lock:
+            alert_ids: set[str] = set()
+            if real_ids:
+                ph = ",".join("?" * len(real_ids))
+                rows = self._conn.execute(
+                    f"SELECT DISTINCT alert_id FROM events WHERE event_id IN ({ph}) AND alert_id IS NOT NULL",
+                    real_ids,
+                ).fetchall()
+                alert_ids.update(r["alert_id"] for r in rows)
+            if synthetic_dedup_keys:
+                ph2 = ",".join("?" * len(synthetic_dedup_keys))
+                rows2 = self._conn.execute(
+                    f"SELECT alert_id FROM alerts WHERE dedup_key IN ({ph2})",
+                    list(synthetic_dedup_keys),
+                ).fetchall()
+                alert_ids.update(r["alert_id"] for r in rows2)
+            if not alert_ids:
+                return 0
+
+            ph3 = ",".join("?" * len(alert_ids))
             cur = self._conn.execute(
-                "UPDATE alerts SET incident_id = ? WHERE " + " AND ".join(where),
-                (incident_id, *params),
+                f"UPDATE alerts SET incident_id = ? "
+                f"WHERE incident_id IS NULL AND source_batch = ? AND alert_id IN ({ph3})",
+                (incident_id, source_batch, *alert_ids),
             )
             linked = cur.rowcount
             rows = self._conn.execute(
@@ -1282,11 +1383,19 @@ class Store:
         severity: str | None = None,
         time_from: str | None = None,
         time_to: str | None = None,
+        q: str | None = None,
         sort_by: str | None = None,
         sort_dir: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
+        """q - подстрока по correlation_rule_title ("Инцидент" в UI) / title ("Описание"),
+        регистронезависимо, ВКЛЮЧАЯ кириллицу (см. _incident_matches_query - тот же паттерн, что
+        rules_catalog.paginate_rules у Sigma-правил: SQLite LIKE/LOWER регистронезависимы
+        только для ASCII, для кириллицы нужен Python str.lower()). При заданном q LIMIT/OFFSET
+        накладываются уже В ПАМЯТИ, после фильтра по q - инцидентов мало (единицы работы
+        агента, не сырые события, "N алертов -> M инцидентов, M ≪ N"), тянуть их все и
+        фильтровать в Python дёшево."""
         query = (
             "SELECT i.*, "
             "(SELECT v.status FROM investigations v WHERE v.incident_id = i.incident_id "
@@ -1313,10 +1422,16 @@ class Store:
             query += " AND i.created_at <= ?"
             params.append(time_to)
         order = _order_clause(sort_by, sort_dir, _INCIDENT_SORT_COLUMNS, "ORDER BY created_at DESC")
-        query += f" {order} LIMIT ? OFFSET ?"
-        params += [limit, offset]
-        with self._read_lock:
-            rows = [self._incident_row(r) for r in self._read_conn.execute(query, params).fetchall()]
+        if q:
+            query += f" {order}"
+            with self._read_lock:
+                rows = [self._incident_row(r) for r in self._read_conn.execute(query, params).fetchall()]
+            rows = [r for r in rows if _incident_matches_query(r, q)][offset:offset + limit]
+        else:
+            query += f" {order} LIMIT ? OFFSET ?"
+            params += [limit, offset]
+            with self._read_lock:
+                rows = [self._incident_row(r) for r in self._read_conn.execute(query, params).fetchall()]
         for row in rows:
             row.pop("sample_events", None)
         return rows
@@ -1329,7 +1444,17 @@ class Store:
         severity: str | None = None,
         time_from: str | None = None,
         time_to: str | None = None,
+        q: str | None = None,
     ) -> int:
+        if q:
+            # Точный count при активном q требует того же Python-фильтра, что list_incidents -
+            # SQL COUNT(*) тут не годится (см. докстринг list_incidents про кириллицу).
+            rows = self.list_incidents(
+                status=status, incident_type=incident_type, source_batch=source_batch,
+                severity=severity, time_from=time_from, time_to=time_to, q=q,
+                limit=1_000_000, offset=0,
+            )
+            return len(rows)
         query = "SELECT COUNT(*) AS c FROM incidents WHERE 1=1"
         params: list[Any] = []
         for col, val in (
@@ -1360,7 +1485,7 @@ class Store:
             result = self._incident_row(row)
             result["member_alerts"] = [
                 dict(r) for r in self._read_conn.execute(
-                    "SELECT alert_id, rule_title, rule_level, host, status, event_count, created_at "
+                    "SELECT alert_id, rule_title, rule_level, host, event_count, created_at "
                     "FROM alerts WHERE incident_id = ? ORDER BY created_at ASC",
                     (incident_id,),
                 ).fetchall()

@@ -210,23 +210,138 @@ def test_upsert_incidents_insert_then_update_same_bucket(store):
     assert len(store.list_incidents()) == 1
 
 
-def test_link_alerts_to_incident_counts_and_rolls_up(store):
+def _alert_with_event(store, dedup_key, source_batch, host, rule_title, level, ip=None):
+    """Хелпер: заводит Alert + одно реальное event, привязывает event->alert через
+    store.link_events_to_alerts (1-в-1 то, что делает app/main.py:_process_batch), возвращает
+    (alert_id, event_id) - готовый вход для store.link_alerts_to_incident."""
     from app.models import Alert, Entities as E, SigmaRuleRef, Severity
 
-    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
     alert = Alert(
-        dedup_key="a1", source_batch="b1", host="HOST-A",
-        rule=SigmaRuleRef(rule_id="r1", title="Failed Auth", level=Severity.high),
-        entities=E(src_ips=["10.0.0.1"]), event_count=3, sample_events=[],
+        dedup_key=dedup_key, source_batch=source_batch, host=host,
+        rule=SigmaRuleRef(rule_id="r1", title=rule_title, level=Severity(level)),
+        entities=E(src_ips=[ip] if ip else []), event_count=1, sample_events=[],
     )
     store.upsert_alerts([alert])
+    alert_id = store.get_alert_ids_by_dedup_keys([dedup_key])[dedup_key]
 
-    linked = store.link_alerts_to_incident(inc_id, "b1", ["Failed Auth"], ["10.0.0.1"])
+    row_id_to_event_id = store.store_events(
+        [{"row_id": f"{dedup_key}-ev", "Hostname": host, **({"IpAddress": ip} if ip else {})}],
+        source_batch=source_batch, matched_row_to_rules={f"{dedup_key}-ev": [rule_title]},
+    )
+    event_id = row_id_to_event_id[f"{dedup_key}-ev"]
+    store.link_events_to_alerts({event_id: alert_id})
+    return alert_id, event_id
+
+
+def test_link_alerts_to_incident_counts_and_rolls_up(store):
+    """Базовый случай: реальный event_id -> events.alert_id -> alert найден и привязан."""
+    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
+    alert_id, event_id = _alert_with_event(
+        store, "a1", "b1", "HOST-A", "Failed Auth", "high", ip="10.0.0.1",
+    )
+
+    linked = store.link_alerts_to_incident(inc_id, "b1", [event_id])
     assert linked == 1
     row = store.get_incident(inc_id)
     assert row["alert_count"] == 1
     assert row["severity"] == "high"  # roll-up low(incident) + high(member alert)
     assert row["member_alerts"][0]["rule_title"] == "Failed Auth"
+    assert row["member_alerts"][0]["alert_id"] == alert_id
+
+
+def test_link_alerts_to_incident_via_synthetic_correlation_id(store):
+    """Цепочка: событие вида 'corr:{dedup}:{title}:{time}' (сработка ДРУГОЙ, не-инцидентной
+    correlation-записи, см. докстринг correlation.py про цепочки) резолвится напрямую по
+    alerts.dedup_key - тот же dedup_key, что достаётся correlation._dedup_key при постройке её
+    собственного алерта, без похода через events вообще."""
+    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
+    from app.models import Alert, Entities as E, SigmaRuleRef, Severity
+
+    corr_dedup = "deadbeefcafef00d"  # ровно 16 hex, как настоящий sha256[:16]
+    corr_alert = Alert(
+        dedup_key=corr_dedup, source_batch="b1", host="HOST-B", engine="correlation",
+        rule=SigmaRuleRef(rule_id="r2", title="Failures By IP", level=Severity.medium),
+        entities=E(), event_count=10, sample_events=[],
+    )
+    store.upsert_alerts([corr_alert])
+    corr_alert_id = store.get_alert_ids_by_dedup_keys([corr_dedup])[corr_dedup]
+
+    synthetic_id = f"corr:{corr_dedup}:Failures By IP:2024-01-01T00:05:00"
+    linked = store.link_alerts_to_incident(inc_id, "b1", [synthetic_id])
+    assert linked == 1
+    row = store.get_incident(inc_id)
+    assert row["member_alerts"][0]["alert_id"] == corr_alert_id
+
+
+def test_link_alerts_to_incident_mixes_real_and_synthetic_ids(store):
+    """Реалистичный смешанный случай (напр. temporal_ordered, ссылающийся И на другую
+    correlation, И на базовое правило напрямую) - оба вида event_id в одном вызове, оба находят
+    свой алерт."""
+    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
+    _, real_event_id = _alert_with_event(store, "a-real", "b1", "HOST-A", "Success Auth", "high")
+
+    from app.models import Alert, Entities as E, SigmaRuleRef, Severity
+    corr_dedup = "0123456789abcdef"
+    store.upsert_alerts([Alert(
+        dedup_key=corr_dedup, source_batch="b1", host="HOST-A", engine="correlation",
+        rule=SigmaRuleRef(rule_id="r3", title="Failures By IP", level=Severity.medium),
+        entities=E(), event_count=10, sample_events=[],
+    )])
+    synthetic_id = f"corr:{corr_dedup}:Failures By IP:2024-01-01T00:05:00"
+
+    linked = store.link_alerts_to_incident(inc_id, "b1", [real_event_id, synthetic_id])
+    assert linked == 2
+    assert store.get_incident(inc_id)["alert_count"] == 2
+
+
+def test_link_alerts_to_incident_unknown_event_id_links_nothing(store):
+    """Мусорный/несуществующий event_id (например, событие вычищено ретеншном) - не падает,
+    просто ничего не привязывает."""
+    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
+    linked = store.link_alerts_to_incident(inc_id, "b1", ["does-not-exist-anywhere"])
+    assert linked == 0
+    assert store.get_incident(inc_id)["alert_count"] == 0
+
+
+def test_link_alerts_to_incident_synthetic_id_for_incident_marked_correlation_is_noop(store):
+    """Синтетический id ссылается на correlation, которая САМА была инцидентной (не
+    рекомендуемый паттерн - см. CLAUDE.md, инцидентная запись должна быть терминальной в
+    цепочке) - её dedup_key живёт в incidents, не в alerts. Не должно падать, просто не находит
+    алерт для этого конкретного event_id (у самой correlation алерта и не было)."""
+    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
+    other_inc_dedup = "1111222233334444"
+    store.upsert_incidents([_incident(dedup=other_inc_dedup, itype="child_incident")])
+    synthetic_id = f"corr:{other_inc_dedup}:Some Marked Correlation:2024-01-01T00:05:00"
+
+    linked = store.link_alerts_to_incident(inc_id, "b1", [synthetic_id])
+    assert linked == 0
+
+
+def test_link_alerts_to_incident_does_not_steal_already_linked_alert(store):
+    """Алерт, уже привязанный к ДРУГОМУ инциденту (incident_id уже проставлен), не
+    перепривязывается - incident_id IS NULL в условии UPDATE."""
+    inc1 = store.upsert_incidents([_incident(dedup="i1", severity="low")])[0][0]
+    inc2 = store.upsert_incidents([_incident(dedup="i2", severity="low")])[0][0]
+    _, event_id = _alert_with_event(store, "a1", "b1", "HOST-A", "Failed Auth", "high")
+
+    assert store.link_alerts_to_incident(inc1, "b1", [event_id]) == 1
+    assert store.link_alerts_to_incident(inc2, "b1", [event_id]) == 0
+    assert store.get_incident(inc1)["alert_count"] == 1
+    assert store.get_incident(inc2)["alert_count"] == 0
+
+
+def test_link_alerts_to_incident_groups_multiple_distinct_alerts(store):
+    """Несколько РАЗНЫХ алертов (напр. дедуп по содержимому custom-правила разбил их на
+    отдельные строки, см. normalize.py) от одного сценария - все привязываются и группируются
+    под одним инцидентом, не только первый найденный."""
+    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
+    _, ev1 = _alert_with_event(store, "a1", "b1", "HOST-A", "LOLBin Execution", "informational")
+    _, ev2 = _alert_with_event(store, "a2", "b1", "HOST-A", "LOLBin Execution", "informational")
+    _, ev3 = _alert_with_event(store, "a3", "b1", "HOST-A", "LOLBin Execution", "informational")
+
+    linked = store.link_alerts_to_incident(inc_id, "b1", [ev1, ev2, ev3])
+    assert linked == 3
+    assert store.get_incident(inc_id)["alert_count"] == 3
 
 
 def test_enqueue_investigation_dedup_and_requeue(store):
@@ -258,6 +373,61 @@ def test_list_incidents_filters_and_pagination(store):
     assert store.count_incidents(incident_type="brute_force") == 2
     assert len(store.list_incidents(source_batch="b1")) == 2
     assert len(store.list_incidents(limit=1)) == 1
+
+
+# ------------------------------------------------------------------ поиск (q) по вкладке Инциденты
+
+def _incident_with_titles(dedup: str, correlation_rule_title: str, title: str) -> Incident:
+    return Incident(
+        dedup_key=dedup, incident_type="t", title=title, severity="medium", source_batch="b1",
+        correlation_rule_title=correlation_rule_title, correlation_rule_id="id",
+        group_key={}, member_rule_titles=[],
+        window_start="2024-01-01T00:00:00", window_end="2024-01-01T00:04:00",
+        window_bucket="2024-01-01T00:00:00",
+    )
+
+
+def test_list_incidents_q_matches_correlation_rule_title_or_title(store):
+    store.upsert_incidents([_incident_with_titles(
+        "d1", "T5 - Suspicious Domain Queried By Multiple Hosts",
+        "Один и тот же C2-домен запрошен с нескольких хостов",
+    )])
+    store.upsert_incidents([_incident_with_titles(
+        "d2", "T4 - Multiple Run Keys Modified On Host",
+        "Несколько разных ключей автозапуска изменено на хосте",
+    )])
+
+    # По подстроке из "Инцидент" (correlation_rule_title).
+    assert {r["dedup_key"] for r in store.list_incidents(q="Suspicious Domain")} == {"d1"}
+    # По подстроке из "Описание" (title) - в т.ч. кириллица.
+    assert {r["dedup_key"] for r in store.list_incidents(q="ключей автозапуска")} == {"d2"}
+    # Не совпадает ни с чем.
+    assert store.list_incidents(q="совсем другое") == []
+    assert store.count_incidents(q="ключей автозапуска") == 1
+
+
+def test_list_incidents_q_is_case_insensitive_including_cyrillic(store):
+    store.upsert_incidents([_incident_with_titles(
+        "d1", "T5 - Suspicious Domain", "Один и тот же C2-домен",
+    )])
+    assert len(store.list_incidents(q="suspicious domain")) == 1  # разный регистр, ASCII
+    assert len(store.list_incidents(q="ДОМЕН")) == 1  # разный регистр, кириллица
+    assert len(store.list_incidents(q="один и тот же")) == 1
+
+
+def test_list_incidents_q_combines_with_other_filters(store):
+    store.upsert_incidents([_incident_with_titles("d1", "Same Title", "desc a")])
+    store.upsert_incidents([Incident(
+        dedup_key="d2", incident_type="t", title="desc a", severity="medium", source_batch="b2",
+        correlation_rule_title="Same Title", correlation_rule_id="id",
+        group_key={}, member_rule_titles=[],
+        window_start="2024-01-01T00:00:00", window_end="2024-01-01T00:04:00",
+        window_bucket="2024-01-01T00:00:00",
+    )])
+
+    # q совпадает с обоими, но source_batch сужает до одного.
+    assert {r["dedup_key"] for r in store.list_incidents(q="Same Title", source_batch="b1")} == {"d1"}
+    assert store.count_incidents(q="Same Title", source_batch="b1") == 1
 
 
 # ------------------------------------------------------------------ заглушка джобы (app/incidents.py)

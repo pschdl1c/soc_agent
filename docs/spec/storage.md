@@ -58,10 +58,14 @@
 | `entities` | TEXT | NOT NULL, JSON-объект (`Entities.model_dump()`) |
 | `event_count` | INTEGER | NOT NULL |
 | `sample_events` | TEXT | NOT NULL, JSON-массив объектов |
-| `status` | TEXT | NOT NULL DEFAULT `'new'` |
 | `incident_id` | TEXT | NULL — обратная ссылка на инцидент (Этап 4, аддитивная миграция `_migrate`) |
 
-Индексы: `idx_alerts_dedup(dedup_key)`, `idx_alerts_status(status)`, `idx_alerts_level(rule_level)`,
+Колонки `status` больше нет (была `TEXT NOT NULL DEFAULT 'new'`) — триаж-статус остался только у
+`incidents.status`. Миграция под неё не заводилась (`_SCHEMA`/`_migrate` её никогда не создавали
+и не чистили) — БД, созданные ДО этого изменения (с колонкой `status` физически на диске), не
+поддерживаются; для перехода `siem.db` пересоздаётся с нуля (одноразовая dev-БД, `.gitignore`).
+
+Индексы: `idx_alerts_dedup(dedup_key)`, `idx_alerts_level(rule_level)`,
 `idx_alerts_batch(source_batch)`, `idx_alerts_incident(incident_id)`.
 
 ### Таблица `events`
@@ -81,17 +85,25 @@
 | `dst_ip` | TEXT | NULL, ECS-lite — `first_present(event, DST_IP_FIELDS)` |
 | `process` | TEXT | NULL, ECS-lite — `first_present(event, PROCESS_FIELDS)` |
 | `event_code` | TEXT | NULL, ECS-lite — `first_present(event, EVENT_CODE_FIELDS)` (`EventID`/`EventCode`) |
+| `alert_id` | TEXT | NULL — какой `alerts.alert_id` поглотил это событие, см. `link_events_to_alerts` |
 
 ECS-lite колонки (Этап A дорожной карты) — денормализованный индекс поверх `raw_json` под
 группировку Инцидентов по сущности (Этап B) и ручной пивот аналитика; `raw_json` остаётся
 источником правды, `filter_lang.py` их не подменяет.
 
+`alert_id` (аддитивная миграция) — проставляется `main.py:_process_batch` сразу после
+`store.upsert_alerts` (`store.link_events_to_alerts`), НЕ на запись события. Основа цепочки
+event → alert → incident (`store.link_alerts_to_incident`, см. `docs/spec/incidents.md`) —
+заменила сопоставление по значению "сущности". NULL у событий built-in-прогонов файлов (дедуп
+там грубый, линковка к инциденту не нужна — built-in в основной рулсет не допускается) и у
+событий, не сматчивших ни одно правило.
+
 Индексы: `idx_events_batch(source_batch)`, `idx_events_host(host)`, `idx_events_time(event_time)`,
 `idx_events_json_eventid` — индекс на выражении `json_extract(raw_json, '$."EventID"')`,
 `idx_events_user(user_name)`, `idx_events_src_ip(src_ip)`, `idx_events_ingested(ingested_at)`
-(под ретеншн, см. ниже). `idx_events_matched(is_matched)` **убран** (Этап A) — два различимых
-значения, планировщик такой индекс практически не выбирал, а стоимость на каждую вставку
-платилась.
+(под ретеншн, см. ниже), `idx_events_alert(alert_id)`. `idx_events_matched(is_matched)` **убран**
+(Этап A) — два различимых значения, планировщик такой индекс практически не выбирал, а
+стоимость на каждую вставку платилась.
 
 Выражение индекса на `EventID` должно текстуально совпадать с выражением, которое строит
 `resolve_json_path` (`app/filter_lang.py`), иначе планировщик SQLite его не применит.
@@ -149,11 +161,11 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 увеличивается на `alert.event_count`, `sample_events` перезаписывается. Если нет — вставка.
 Возвращает число обработанных алертов.
 
-### `list_alerts(source_batch=None, status=None, rule_level=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> list[dict]`
+### `list_alerts(source_batch=None, rule_level=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> list[dict]`
 
 Фильтры комбинируются по AND. `time_from`/`time_to` сравниваются строково с `created_at`.
-`sort_by` ∈ {`rule` (по рангу severity), `host`, `event_count`, `status`, `created_at`};
-неизвестное значение → `ORDER BY created_at DESC`. `sort_dir` — `asc`/`desc` (по умолчанию `desc`).
+`sort_by` ∈ {`rule` (по рангу severity), `host`, `event_count`, `created_at`}; неизвестное
+значение → `ORDER BY created_at DESC`. `sort_dir` — `asc`/`desc` (по умолчанию `desc`).
 В строках `mitre_techniques` и `entities` десериализуются из JSON; `sample_events` удаляется.
 
 ### `get_alert(alert_id: str) -> dict | None`
@@ -161,13 +173,24 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 Полная строка алерта с десериализованными `mitre_techniques`, `entities`, `sample_events`.
 `None`, если алерта нет.
 
-### `update_alert_status(alert_id: str, status: str) -> bool`
+### `get_alert_ids_by_dedup_keys(dedup_keys: list[str]) -> dict[str, str]`
 
-`UPDATE alerts SET status`. `True`, если затронута строка.
+`{dedup_key: alert_id}` для уже сохранённых алертов. Зовётся `main.py:_process_batch` сразу
+после `upsert_alerts` (не меняя его сигнатуру) — за настоящими `alert_id`, нужными
+`link_events_to_alerts`. Ключи без совпадения просто отсутствуют в результате.
+
+У алерта нет статуса и нет ручки на его смену — статус (`new → investigating → closed`) есть
+только у инцидента (`update_incident_status`).
 
 ## API `Store` — события
 
-### `store_events(raw_events, source_batch, matched_row_to_rules, hit_spec=None) -> int`
+### `store_events(raw_events, source_batch, matched_row_to_rules, hit_spec=None) -> dict[Any, str]`
+
+Возвращает `{row_id: event_id}` (не count — `len(результата)` даёт число сохранённых событий).
+`row_id` — Zircolite-локальный id ЭТОГО батча, нигде не персистится; `event_id` — настоящий
+первичный ключ строки `events`. Единственное место, где эта связка вообще существует — нужна
+`main.py:_process_batch`, чтобы потом проставить `events.alert_id` (см. `link_events_to_alerts`
+ниже и `docs/spec/incidents.md`).
 
 - `raw_events` — события батча из `ZircoliteCore` (содержат `row_id`).
 - `matched_row_to_rules` — `{row_id: [названия правил]}`.
@@ -251,7 +274,7 @@ Python-стороной по строкам из `fetch_correlation_hits`, бе�
 
 Точная оценка ОДНОГО (correlation-правило, group-by-ключ) сочетания в конкретном окне
 `[time_from, time_to]` — авторитетный `count` + `sample_events` для окна, которое A3 уже выбрал
-скользящим проходом. Возвращает `{"count": int, "sample_events": list[dict]}`.
+скользящим проходом. Возвращает `{"count": int, "sample_events": list[dict], "event_ids": list[str]}`.
 
 - Условия: `rule_title IN (base_rule_titles)`, `source_batch = ?`,
   `event_time BETWEEN time_from AND time_to` (нормализованные строки), и по одному условию
@@ -260,8 +283,12 @@ Python-стороной по строкам из `fetch_correlation_hits`, бе�
   `"distinct_values"` при заданном `distinct_field` без явного `mode`).
 - `sample_events` — до `sample_limit` `e.raw_json` (`JOIN rule_hits h ON events e`), отсортированных
   по `h.event_time ASC`.
-- Возвращает нули, если `base_rule_titles` пуст, `group_by` пуст или длины `group_by` и
-  `key_values` не совпадают.
+- `event_ids` — ВСЕ `h.event_id` окна (не урезано `sample_limit`, без JOIN — колонка уже есть в
+  `rule_hits`). Реальные (сработки базовых правил) и синтетические `"corr:..."` (сработки
+  других correlation-записей в цепочках) вперемешку — основа `link_alerts_to_incident` (см.
+  `docs/spec/incidents.md`), БЕЗ сопоставления по значению "сущности".
+- Возвращает нули/пустые списки, если `base_rule_titles` пуст, `group_by` пуст или длины
+  `group_by` и `key_values` не совпадают.
 
 ### `fetch_correlation_hit_sequence(rule_titles, source_batch, time_from, time_to, group_by, key_values, limit=500) -> list[tuple[str, str]]`
 
@@ -314,7 +341,8 @@ correlation) видит потомка тем же запросом, что и �
 | Метод | Поведение |
 |---|---|
 | `upsert_incidents(incidents: list[Incident]) -> list[tuple[str, bool]]` | Insert/update по `dedup_key` (бакет по `timespan`). На update: `severity = Severity.roll_up([старое, новое])`, `window_start = min`, `window_end = max`, обновляются `sample_events`/`entities`/`mitre_techniques`/`member_rule_titles`/`title`. `alert_count` не трогается. Возврат — `[(incident_id, was_new), ...]` в порядке входа. |
-| `link_alerts_to_incident(incident_id, source_batch, rule_titles, entity_values, window_start=None, window_end=None) -> int` | `UPDATE alerts SET incident_id` по `source_batch` + `rule_title IN` + совпадение сущности (`host` / подстрока в `entities`) + `incident_id IS NULL`. `events` НЕ трогает. Досчитывает `incidents.alert_count` и roll-up `severity`. Временнóго сужения по `created_at` нет (см. «Известные ограничения» в `incidents.md`). Возврат — число привязанных алертов. |
+| `link_events_to_alerts(event_id_to_alert_id: dict[str, str]) -> int` | `UPDATE events SET alert_id = ?` построчно (`executemany`). Зовётся `main.py:_process_batch` сразу после `upsert_alerts` — основа цепочки для `link_alerts_to_incident` ниже. Пустой словарь — no-op. |
+| `link_alerts_to_incident(incident_id, source_batch, event_ids: list[str]) -> int` | Резолвит `event_ids` (реальные `events.event_id` через колонку `events.alert_id`, синтетические `"corr:{dedup}:{title}:{time}"` через `alerts.dedup_key` — `dedup_key` всегда второй `":"`-сегмент) в набор `alert_id`, затем `UPDATE alerts SET incident_id` по `incident_id IS NULL AND source_batch = ? AND alert_id IN (...)`. `events` (кроме уже проставленного `alert_id`) не трогает. Досчитывает `incidents.alert_count` и roll-up `severity`. Временнóго сужения по `created_at` нет (см. «Известные ограничения» в `incidents.md`). Возврат — число привязанных алертов. Заменил старую версию по значению "сущности" (`host`/`entities LIKE`) — см. `docs/spec/incidents.md`. |
 | `enqueue_investigation(incident_id, requeue_terminal=True) -> str | None` | Строка `queued`/`running` есть → `None`. `done`/`error` + `requeue_terminal` → сброс в `queued`, тот же id. Иначе INSERT новой. |
 | `list_incidents(status=None, incident_type=None, source_batch=None, severity=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> list[dict]` | Фильтры по равенству + `time_from/to` по `created_at`. Whitelist сортировки `{created_at, updated_at, alert_count, status, severity}`. Без `sample_events`. Каждая строка несёт `investigation_status` (последняя строка расследования). |
 | `count_incidents(...те же фильтры...) -> int` | — |

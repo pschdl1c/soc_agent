@@ -70,7 +70,10 @@ Aware-форма дала бы суффикс `+00:00` и сломала бы с
 | `entities` | `Entities` | — | — |
 | `event_count` | `int` | — | число событий (или размер окна для корреляции) |
 | `sample_events` | `list[dict[str, Any]]` | — | сэмпл событий |
-| `status` | `str` | `"new"` | `new` → `investigating` → `closed` |
+| `source_row_ids` | `list[Any]` | `[]` | транзитное, НЕ персистится как колонка — row_id событий этого батча (см. `normalize.py`), нужны `main.py` для `events.alert_id` |
+
+Статуса у алерта нет (был `new`/`investigating`/`closed`, убран) — триаж-статус есть только у
+`Incident.status`.
 
 ## `Incident(BaseModel)` (Этап 4)
 
@@ -121,7 +124,6 @@ Aware-форма дала бы суффикс `+00:00` и сломала бы с
 | `IngestFileRequest` | `POST /ingest/file` | `events_path: str`; `input_type: str = "json"`; `ruleset: str \| None = None`; `source_label: str \| None = None` |
 | `IngestEventsRequest` | `POST /ingest/events` | `events: list[dict]`; `source_label: str = "live-queue"` (игнорируется, метку задаёт источник) |
 | `IngestResponse` | ответ `/ingest/*` | `source_batch: str`; `events_processed: int`; `rules_matched: int`; `alerts_created: int`; `duration_seconds: float` |
-| `AlertStatusUpdate` | `PATCH /alerts/{id}/status` | `status: str` |
 | `IncidentStatusUpdate` | `PATCH /incidents/{id}/status` | `status: str` |
 | `CustomRuleSubmit` | `POST /rules/custom` | `yaml_text: str`; `ruleset: str \| None = None`; `new_ruleset_name: str \| None = None` (ровно один из двух) |
 | `CustomRuleUpdate` | `PUT /rules/custom/{rule_id}` | `yaml_text: str` |

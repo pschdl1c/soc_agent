@@ -120,9 +120,13 @@ lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` п
 
 | Метод | Путь | Параметры | Поведение |
 |---|---|---|---|
-| `GET` | `/alerts` | `source_batch`, `status`, `rule_level`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `store.list_alerts(...)`. Без ключа `mitre` |
+| `GET` | `/alerts` | `source_batch`, `rule_level`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `store.list_alerts(...)`. Без ключа `mitre` |
 | `GET` | `/alerts/{alert_id}` | — | `store.get_alert(...)`; 404, если нет. Добавляет `alert["mitre"] = kb.enrich_techniques(alert["mitre_techniques"])` |
-| `PATCH` | `/alerts/{alert_id}/status` | `AlertStatusUpdate` | `store.update_alert_status(...)`; 404, если не найден |
+
+У алерта нет статуса и нет ручки на его смену (`PATCH /alerts/{id}/status` убран вместе с
+`AlertStatusUpdate`/`Store.update_alert_status`/колонкой `alerts.status`) — триаж-статус
+(`new → investigating → closed`) есть только у инцидента, см. `PATCH /incidents/{id}/status`
+ниже.
 
 ### Инциденты (Этап 4)
 

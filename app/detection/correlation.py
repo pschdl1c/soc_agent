@@ -439,11 +439,13 @@ def _evaluate_correlation_rule(
     new_spans: dict[tuple[Any, ...], tuple[str, str]],
     timespan_seconds: int,
     distinct_field: str | None,
-) -> dict[tuple[Any, ...], tuple[int, list[dict[str, Any]], str]]:
+) -> dict[tuple[Any, ...], tuple[int, list[dict[str, Any]], str, list[str]]]:
     """A3-оценка одного correlation-правила по всем кандидатным ключам сразу (см. докстринг
     модуля / _best_anchor). new_spans - {group-by-ключ: (min, max нормализованного event_time
     среди НОВЫХ попаданий этого flush'а)} (вычисляет evaluate_batch). Возвращает ТОЛЬКО ключи,
-    для которых условие реально выполнено: {ключ: (count, sample_events, anchor_time)}."""
+    для которых условие реально выполнено: {ключ: (count, sample_events, anchor_time,
+    event_ids)} - event_ids (новое, см. store.evaluate_correlation_window) нужны для
+    store.link_alerts_to_incident (цепочка event -> alert -> incident без "сущностей")."""
     if not new_spans:
         return {}
 
@@ -517,7 +519,7 @@ def _evaluate_correlation_rule(
             if not _sequence_matches_order(sequence, base_titles):
                 continue
 
-        result[key] = (count, precise["sample_events"], anchor_time)
+        result[key] = (count, precise["sample_events"], anchor_time, precise["event_ids"])
     return result
 
 
@@ -535,10 +537,14 @@ def evaluate_batch(
 
     link_specs_out (Этап 4, необязателен) - если передан список, evaluate_batch дописывает в
     него по одной записи на КАЖДЫЙ созданный/обновлённый инцидент:
-    {dedup_key, incident_id, source_batch, rule_titles, entity_values, window_start, window_end}.
-    app/main.py:_process_batch по этим записям ПОСЛЕ store.upsert_alerts привязывает уже
-    сохранённые алерты к инциденту (store.link_alerts_to_incident) - раньше, внутри
-    evaluate_batch, алертов zircolite текущего flush ещё нет в БД."""
+    {dedup_key, incident_id, source_batch, event_ids, window_start, window_end}. event_ids -
+    ВСЕ event_id (реальные и синтетические "corr:...", см. store.evaluate_correlation_window),
+    реально вошедшие в выигрышное окно - цепочка event -> alert -> incident, БЕЗ сопоставления
+    по значению "сущности" (см. store.link_alerts_to_incident, docs/spec/incidents.md).
+    app/main.py:_process_batch по этим записям ПОСЛЕ store.upsert_alerts (и после
+    store.link_events_to_alerts - события этого же батча уже должны знать свой alert_id)
+    привязывает уже сохранённые алерты к инциденту - раньше, внутри evaluate_batch, алертов
+    zircolite текущего flush ещё нет в БД."""
     if not ruleset_path or not matched_events_by_title:
         return 0
     corr_rules = [c for c in _active_correlation_rules(ruleset_path) if c.get("type") in _EVAL_TYPES]
@@ -623,7 +629,7 @@ def evaluate_batch(
             continue
 
         corr_hit_rows: list[tuple[str, str, str, str, str | None]] = []
-        for key, (count, sample_events, anchor_time) in fired.items():
+        for key, (count, sample_events, anchor_time, event_ids) in fired.items():
             group_values = {f: str(v) for f, v in zip(group_by, key)}
             if incident_spec:
                 built = _build_incident(
@@ -638,8 +644,7 @@ def evaluate_batch(
                     link_specs_out.append({
                         "dedup_key": built.dedup_key,
                         "source_batch": source_batch,
-                        "rule_titles": list(base_titles),
-                        "entity_values": [str(v) for v in key],
+                        "event_ids": event_ids,
                         "window_start": built.window_start,
                         "window_end": built.window_end,
                     })
@@ -647,8 +652,14 @@ def evaluate_batch(
                 alert = _build_alert(corr, key, count, sample_events, source_batch)
                 alerts.append(alert)
                 hit_dedup = alert.dedup_key
+            # dedup_key ВСЕГДА второй ":"-сегмент (split(":", 2)) - формат гарантирован именно
+            # этим порядком (не зависит от того, что title/anchor_time сами могут содержать
+            # ":"): store.link_alerts_to_incident парсит его отсюда для цепочек (сработка ДРУГОЙ
+            # correlation-записи среди event_ids родителя) БЕЗ похода в БД - dedup_key сам себя
+            # несёт. Раньше было f"corr:{title}:{dedup}:{anchor}" - dedup оказывался НЕ на
+            # фиксированной позиции, распарсить его надёжно было нельзя.
             corr_hit_rows.append((
-                f"corr:{corr['title']}:{hit_dedup}:{anchor_time}",
+                f"corr:{hit_dedup}:{corr['title']}:{anchor_time}",
                 corr["title"], source_batch, anchor_time, json.dumps(group_values),
             ))
             # Синтетическое "попадание" видно родительским correlation-правилам ЭТОГО ЖЕ

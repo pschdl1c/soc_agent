@@ -1,7 +1,16 @@
 """
-Состав "основного рулсета" (main ruleset) - виртуальная композиция правил из ЛЮБЫХ других
-рулсетов (built-in и custom, см. app/rules/rules_catalog.py), используемая по умолчанию потоковым
-ingest (/ingest/stream) и /ingest/events, где сейчас вообще нет способа выбрать ruleset.
+Состав "основного рулсета" (main ruleset) - виртуальная композиция правил ТОЛЬКО из CUSTOM
+рулсетов (см. app/rules/rules_catalog.py), используемая по умолчанию потоковым ingest
+(/ingest/stream) и /ingest/events, где сейчас вообще нет способа выбрать ruleset.
+
+Built-in рулсеты (Zircolite/rules/*.json) сюда осознанно НЕ допускаются (toggle_rule/
+toggle_ruleset отклоняют built-in ruleset_path) - основной рулсет управляет тем, что видит
+живой поток и, через correlation.incident, агент расследования; built-in-контент не пишется
+с расчётом на сценарии/инциденты (нет YAML, нет способа задать group-by), его место -
+разовые batch-прогоны файлов (/ingest/file, /ingest/upload с явным ruleset=built-in-путь),
+не непрерывный стрим. См. также режим дедупа алертов built-in vs custom в
+app/detection/normalize.py - built-in там всё равно не претендует на точность вплоть до
+конкретного события.
 
 Хранит НЕ копии правил, а только ссылки: какие рулсеты добавлены целиком (included_rulesets) +
 точечные исключения внутри них (excluded_rules) + точечные добавления отдельных правил из
@@ -118,8 +127,13 @@ def rule_count() -> int:
 
 def toggle_rule(ruleset_path: str, rule_id: str, include: bool) -> bool:
     """Включает/выключает одно правило в main. Бросает CatalogError, если ruleset_path/rule_id
-    не существуют (валидация через rules_catalog.load_rules)."""
+    не существуют (валидация через rules_catalog.load_rules) или ruleset_path не custom (см.
+    докстринг модуля - built-in в main не допускается, даже точечным добавлением одного правила)."""
     rules_catalog.load_rules(ruleset_path)
+    if not rules_catalog.is_custom_ruleset(ruleset_path):
+        raise rules_catalog.CatalogError(
+            "В основной рулсет можно добавлять только свои (не встроенные) правила"
+        )
     with _lock:
         state = load_state()
         if ruleset_path in state["included_rulesets"]:
@@ -148,8 +162,15 @@ def toggle_rule(ruleset_path: str, rule_id: str, include: bool) -> bool:
 
 def toggle_ruleset(ruleset_path: str, include: bool) -> str:
     """Добавляет/убирает рулсет ЦЕЛИКОМ из main (сбрасывает точечные исключения/добавления по
-    нему - они теряют смысл при явном переключении на уровне всего рулсета)."""
+    нему - они теряют смысл при явном переключении на уровне всего рулсета). При include=True
+    ruleset_path обязан быть custom (см. докстринг модуля); include=False (снятие) built-in не
+    отклоняет - built-in физически не может там оказаться, но убрать несуществующую ссылку
+    безопасно и дёшево, отдельная проверка тут не нужна."""
     rules_catalog.load_rules(ruleset_path)
+    if include and not rules_catalog.is_custom_ruleset(ruleset_path):
+        raise rules_catalog.CatalogError(
+            "В основной рулсет можно добавить только свой (не встроенный) рулсет"
+        )
     with _lock:
         state = load_state()
         if include:

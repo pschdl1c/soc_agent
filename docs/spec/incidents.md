@@ -39,6 +39,17 @@ correlation:
 не становится и агенту Этапа 5 не виден. Осознанное ограничение этапа; вариант «авто-инцидент на
 любой `critical` без сценария» — вне Этапа 4.
 
+### `correlation.incident` — только на ПОСЛЕДНЕМ звене цепочки
+
+Если правило A (например `event_count`) помечено `correlation.incident`, а правило B ссылается
+на A в своём `rules:` (эскалация «то же самое случилось ещё раз») — **не помечай A**, помечай
+только B (терминальное звено). Иначе на одну и ту же историю заведутся ДВА разных инцидента
+(A — сам по себе, B — поверх него) вместо одного финального, а `incidents` не умеет ссылаться на
+`incidents` (только `alerts.incident_id`, обратная ссылка ровно одна) — U-образной иерархии не
+получится, получится дублирование. Непомеченное A при этом ведёт себя как обычная correlation:
+пишет `Alert` — тот и станет member-алертом финального инцидента B (см. ниже, цепочка по
+`event_id` резолвит такую ссылку через `alerts.dedup_key`, без похода в `events`).
+
 ## Идентичность — фиксированный бакет по `timespan`
 
 ```
@@ -54,21 +65,42 @@ dedup_key = sha256(f"{incident_type}:{':'.join(group_by_values)}:{window_bucket}
 - Это отличает инцидент от correlation-алерта, который дедупится по значениям group-by без учёта
   времени (см. [`correlation.md`](correlation.md), `upsert_correlation_alerts`).
 
-## Привязка member-алертов
+## Привязка member-алертов — цепочкой event → alert → incident, БЕЗ сущностей
 
-После `store.upsert_alerts` в `main.py:_process_batch` вызывается
-`store.link_alerts_to_incident(...)` — проставляет `alerts.incident_id` и досчитывает
-`incidents.alert_count` + roll-up severity.
+`app/detection/correlation.py` знает точно, какие `event_id` реально вошли в выигрышное окно
+correlation-правила (`store.evaluate_correlation_window` отдаёт их наравне со `sample_events` —
+без доп. JOIN, `event_id` уже есть прямо в `rule_hits`). Именно эти `event_id`
+(`link_specs_out[i]["event_ids"]`) и есть основа связи, а не значение какой-либо "сущности".
 
-Выборка сужена `source_batch` + `rule_title IN (member_rule_titles)` + совпадение значения
-сущности (`alerts.host` или подстрока в `alerts.entities`) + `incident_id IS NULL`. **`events` не
-трогается** (требование производительности — см. [`correlation.md`](correlation.md)).
+`event_id` бывает двух видов:
 
-**Ограничение (неточность по времени):** временнóго сужения по `created_at` нет — `alerts.created_at`
-это наивный wall-clock приёма, а окно корреляции считается по `event_time` источника; при replay
-исторических датасетов шкалы расходятся, и алерт того же правила/сущности из соседнего окна может
-быть привязан к инциденту. Приемлемо: базовые правила сценариев обычно `level: informational` и
-алертов вообще не заводят — привязывать часто нечего.
+- **настоящий** — `events.event_id` (сработка БАЗОВОГО Sigma-правила). Резолвится через колонку
+  `events.alert_id`, которую `main.py:_process_batch` проставляет СРАЗУ после `store.upsert_alerts`
+  (`store.link_events_to_alerts`): для каждого построенного `Alert` берётся полный список
+  `row_id` его событий ЭТОГО батча (`Alert.source_row_ids`, см. `normalize.py`), переводится в
+  настоящие `event_id` через словарь, который возвращает `store.store_events` (единственное
+  место, где связка `row_id → event_id` вообще существует), и пишется в `events.alert_id`.
+- **синтетический** — `"corr:{dedup_key}:{title}:{anchor_time}"` (сработка ДРУГОЙ
+  correlation-записи, см. цепочки в [`correlation.md`](correlation.md)). `dedup_key` — ВСЕГДА
+  второй `":"`-сегмент (`split(":", 2)`, формат гарантирован кодом, который его строит) — тот же
+  `dedup_key`, что достаётся `Alert.dedup_key` при постройке алерта этой correlation-записи
+  (`correlation._dedup_key`). Резолвится прямым поиском `alerts.dedup_key`, без похода в
+  `events` вообще. Если та correlation-запись сама была инцидентной (не рекомендуется — см.
+  §"Только последнее звено..." выше), её `dedup_key` живёт в `incidents`, не в `alerts` — просто
+  не находится, без падения.
+
+`store.link_alerts_to_incident(incident_id, source_batch, event_ids)` резолвит оба вида в набор
+`alert_id`, затем одним `UPDATE ... WHERE incident_id IS NULL AND source_batch = ? AND alert_id
+IN (...)` проставляет `alerts.incident_id` и досчитывает `incidents.alert_count` + roll-up
+severity. `events` (кроме уже упомянутой колонки `alert_id`) не трогается.
+
+Это заменило более раннюю версию (сопоставление по значению "сущности": `alerts.host IN (...)
+OR alerts.entities LIKE '%...%'`) — та работала, только пока `group-by` correlation-правила был
+по хосту или одной из пяти жёстко зашитых категорий `_extract_entities` (user/host/src_ip/
+dst_ip/process). Для `group-by` вне этих категорий (например DNS `QueryName`, путь ключа
+реестра) она молча не находила ничего — `entities` этих категорий не знает, а по значению домена
+`alerts.host` не совпадает. Цепочка по `event_id` не зависит от того, что такое group-by-поле —
+работает для любого правила.
 
 ## Инварианты
 

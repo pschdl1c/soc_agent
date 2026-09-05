@@ -57,15 +57,6 @@ def test_get_alert_missing_returns_none(store):
     assert store.get_alert("does-not-exist") is None
 
 
-def test_update_alert_status(store):
-    store.upsert_alerts([_alert("dedup-1")])
-    alert_id = store.list_alerts()[0]["alert_id"]
-
-    assert store.update_alert_status(alert_id, "closed") is True
-    assert store.get_alert(alert_id)["status"] == "closed"
-    assert store.update_alert_status("does-not-exist", "closed") is False
-
-
 def test_list_alerts_filters_by_source_batch(store):
     store.upsert_alerts([_alert("dedup-1", source_batch="batch-a"), _alert("dedup-2", source_batch="batch-b")])
     rows = store.list_alerts(source_batch="batch-a")
@@ -78,8 +69,9 @@ def test_store_events_and_list_events_roundtrip(store):
         {"row_id": 1, "Hostname": "HOST-A", "EventID": 1, "Image": "cmd.exe"},
         {"row_id": 2, "Hostname": "HOST-A", "EventID": 2, "Image": "notepad.exe"},
     ]
-    inserted = store.store_events(events, source_batch="batch-1", matched_row_to_rules={1: ["Test Rule"]})
-    assert inserted == 2
+    row_id_to_event_id = store.store_events(events, source_batch="batch-1", matched_row_to_rules={1: ["Test Rule"]})
+    assert len(row_id_to_event_id) == 2
+    assert set(row_id_to_event_id) == {1, 2}
 
     rows = store.list_events(source_batch="batch-1")
     assert len(rows) == 2

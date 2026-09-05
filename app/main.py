@@ -35,7 +35,6 @@ from app.fields import INGEST_SOURCE_FIELD
 from app.filter_lang import FilterSyntaxError, compile_filter_query
 from app.ingest_queue import IngestQueueFull, IngestWorker
 from app.models import (
-    AlertStatusUpdate,
     CustomRuleSubmit,
     CustomRuleUpdate,
     IncidentStatusUpdate,
@@ -108,11 +107,17 @@ def _split_events_by_source(events: list[dict], default_label: str) -> dict[str,
 
 
 def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, source_label: str) -> IngestResponse:
+    # dedup_by_content выбирает режим дедупа алертов (app/detection/normalize.py): True - хэш
+    # содержимого события (custom-рулсеты и "main" - тот теперь СОБИРАЕТСЯ только из custom, см.
+    # app/rules/main_ruleset.py), False - грубее, только (rule_id, host) (built-in, только
+    # batch-прогоны файлов). Путь пуст/None у /ingest/file без явного ruleset - там движковый
+    # дефолт engine.default_ruleset_path, а он built-in.
     if ruleset_path == main_ruleset.MAIN_RULESET_ID:
         rules = main_ruleset.resolve()
         raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
             events_path=events_path, rules=rules, input_type=input_type,
         )
+        dedup_by_content = True
     elif ruleset_path and ruleset_path.startswith("custom_rulesets/"):
         # Кастомные рулсеты гоняем по УЖЕ скомпилированному .manifest.json
         # (rules_catalog.load_rules), а не пересборкой сырых .yml в RulesetHandler: только в
@@ -126,10 +131,12 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
         raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
             events_path=events_path, rules=rules, input_type=input_type,
         )
+        dedup_by_content = True
     else:
         raw_results, all_events, total_events, elapsed = engine.run_batch(
             events_path=events_path, input_type=input_type, ruleset_path=ruleset_path,
         )
+        dedup_by_content = False
 
     matched_map = _build_matched_row_map(raw_results)
     # Названия БАЗОВЫХ правил + поля, которые нужно денормализовать в rule_hits.group_json,
@@ -142,13 +149,19 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
     # обновлённый инцидент; привязка member-алертов идёт ПОСЛЕ store.upsert_alerts ниже
     # (раньше алертов zircolite текущего flush ещё нет в БД).
     link_specs: list[dict] = []
+    # row_id (Zircolite-локальный id ЭТОГО батча) -> настоящий events.event_id - единственное
+    # место, где эта связка вообще существует (row_id нигде не персистится). Копится по ВСЕМ
+    # label'ам флаша в один общий словарь - zircolite_results_to_alerts ниже работает по ПОЛНОМУ
+    # raw_results батча, не по отдельным label'ам. Нужна для events.alert_id (см. ниже) - основы
+    # цепочки event -> alert -> incident (store.link_alerts_to_incident), без "сущностей".
+    row_id_to_event_id: dict[Any, str] = {}
     # Один прогон движка мог объединять НЕСКОЛЬКО реальных источников (см. _process_events) -
     # события возвращаются в БД под их СОБСТВЕННОЙ меткой, не под source_label всего прогона.
     for label, events_subset in _split_events_by_source(all_events, source_label).items():
-        store.store_events(
+        row_id_to_event_id.update(store.store_events(
             events_subset, source_batch=label, matched_row_to_rules=matched_map,
             hit_spec=hit_spec,
-        )
+        ))
         # Стейтфул-корреляция (app/detection/correlation.py) - переоценивается ПОСЛЕ каждого flush для
         # (правило, group-by-ключ) пар, реально затронутых ЭТИМ батчем (короткое замыкание
         # внутри evaluate_batch, если ни одно активное correlation-правило не ссылается на
@@ -163,18 +176,38 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
             matched_events_by_title=matched_events_by_title, link_specs_out=link_specs,
         )
 
-    alerts = zircolite_results_to_alerts(raw_results, default_source_batch=source_label)
+    alerts = zircolite_results_to_alerts(
+        raw_results, default_source_batch=source_label, dedup_by_content=dedup_by_content,
+    )
     created = store.upsert_alerts(alerts)
 
+    # events.alert_id - проставляем СРАЗУ после upsert_alerts (настоящие alert_id уже известны -
+    # и вновь созданные, и переиспользованные по dedup_key), ДО обработки link_specs ниже: та
+    # линковка резолвит event_id -> alert_id именно через эту колонку (store.link_alerts_to_incident).
+    # alert.source_row_ids - row_id ЭТОГО батча (см. normalize.py); события, чей row_id сюда не
+    # попал (ручные тесты без row_id, либо built-in-режим, где events.alert_id не нужен вовсе -
+    # built-in в main не допускается) просто пропускаются.
+    if alerts:
+        dedup_key_to_alert_id = store.get_alert_ids_by_dedup_keys([a.dedup_key for a in alerts])
+        event_id_to_alert_id: dict[str, str] = {}
+        for alert in alerts:
+            alert_id = dedup_key_to_alert_id.get(alert.dedup_key)
+            if not alert_id:
+                continue
+            for row_id in alert.source_row_ids:
+                event_id = row_id_to_event_id.get(row_id)
+                if event_id:
+                    event_id_to_alert_id[event_id] = alert_id
+        store.link_events_to_alerts(event_id_to_alert_id)
+
     # Привязка уже сохранённых алертов к инцидентам этого flush'а (см. link_specs выше и
-    # store.link_alerts_to_incident). Инцидентные правила базовых алертов обычно informational
-    # (алертов не заводят) - список часто пустой, это ожидаемо.
+    # store.link_alerts_to_incident) - цепочкой event_id -> alert_id -> incident_id, без
+    # сопоставления по значению "сущности" (см. docs/spec/incidents.md). Инцидентные правила
+    # базовых алертов обычно informational, но алерт всё равно заводится (см. normalize.py) -
+    # так что event_ids сценария почти всегда находят member-алерт(ы).
     for spec in link_specs:
         if spec.get("incident_id"):
-            store.link_alerts_to_incident(
-                spec["incident_id"], spec["source_batch"], spec["rule_titles"],
-                spec["entity_values"], spec.get("window_start"), spec.get("window_end"),
-            )
+            store.link_alerts_to_incident(spec["incident_id"], spec["source_batch"], spec["event_ids"])
 
     return IngestResponse(
         source_batch=source_label,
@@ -494,7 +527,6 @@ def delete_source(source_id: str) -> dict:
 @app.get("/alerts")
 def list_alerts(
     source_batch: str | None = None,
-    status: str | None = None,
     rule_level: str | None = None,
     time_from: str | None = None,
     time_to: str | None = None,
@@ -504,7 +536,7 @@ def list_alerts(
     offset: int = 0,
 ) -> list[dict]:
     return store.list_alerts(
-        source_batch=source_batch, status=status, rule_level=rule_level,
+        source_batch=source_batch, rule_level=rule_level,
         time_from=time_from, time_to=time_to, sort_by=sort_by, sort_dir=sort_dir,
         limit=limit, offset=offset,
     )
@@ -520,14 +552,6 @@ def get_alert(alert_id: str) -> dict:
     # без совпадения в KB помечена matched=false (UI покажет её как сырой тег).
     alert["mitre"] = kb.enrich_techniques(alert.get("mitre_techniques", []))
     return alert
-
-
-@app.patch("/alerts/{alert_id}/status")
-def update_alert_status(alert_id: str, body: AlertStatusUpdate) -> dict:
-    ok = store.update_alert_status(alert_id, body.status)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Алерт не найден")
-    return {"alert_id": alert_id, "status": body.status}
 
 
 # ------------------------------------------------------------------ Incidents (Этап 4)
@@ -553,6 +577,7 @@ def list_incidents(
     severity: str | None = None,
     time_from: str | None = None,
     time_to: str | None = None,
+    q: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
     limit: int = 100,
@@ -561,7 +586,7 @@ def list_incidents(
     limit = max(1, min(limit, 500))
     filters = dict(
         status=status, incident_type=incident_type, source_batch=source_batch,
-        severity=severity, time_from=time_from, time_to=time_to,
+        severity=severity, time_from=time_from, time_to=time_to, q=q,
     )
     return {
         "incidents": store.list_incidents(sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset, **filters),

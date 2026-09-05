@@ -217,6 +217,13 @@ def _is_custom_ruleset(ruleset_path: str) -> bool:
         return False
 
 
+def is_custom_ruleset(ruleset_path: str) -> bool:
+    """Публичная обёртка над _is_custom_ruleset - для модулей вне этого файла
+    (app/rules/main_ruleset.py: запрет built-in в основном рулсете; app/main.py: выбор режима
+    дедупа алертов, см. app/detection/normalize.py)."""
+    return _is_custom_ruleset(ruleset_path)
+
+
 def _find_rule_file(target_dir: Path, rule_id: str) -> Path | None:
     """Находит файл правила по id независимо от того, обычное это правило (`.yml`) или
     correlation (CORRELATION_EXT, см. докстринг модуля) - оба хранятся под одним и тем же

@@ -96,7 +96,17 @@ class Alert(BaseModel):
     entities: Entities
     event_count: int
     sample_events: list[dict[str, Any]]
-    status: str = "new"  # new -> investigating -> closed
+    # Статуса тут больше нет - триаж-статус (new -> investigating -> closed) существует только
+    # у Incident. Алерт - сырое срабатывание, статус ему не нужен (см. CLAUDE.md/docs/spec).
+    # Транзитное поле - НЕ персистится как колонка (store.py пишет INSERT явным списком
+    # колонок, этого поля среди них нет). row_id событий ЭТОГО батча (Zircolite-локальный id,
+    # см. normalize.py), из которых собран алерт - app/main.py:_process_batch использует их
+    # (после перевода в настоящий events.event_id через store_events) для events.alert_id -
+    # основа цепочки event -> alert -> incident без всяких "сущностей" (см. store.py:
+    # link_alerts_to_incident, docs/spec/incidents.md). У correlation-алертов (app/detection/
+    # correlation.py:_build_alert) всегда пусто - у них своя, отдельная схема dedup/резолва
+    # через rule_hits (см. докстринг correlation.py про цепочки).
+    source_row_ids: list[Any] = Field(default_factory=list)
 
 
 class Incident(BaseModel):
@@ -170,10 +180,6 @@ class IngestResponse(BaseModel):
     rules_matched: int
     alerts_created: int
     duration_seconds: float
-
-
-class AlertStatusUpdate(BaseModel):
-    status: str
 
 
 class IncidentStatusUpdate(BaseModel):

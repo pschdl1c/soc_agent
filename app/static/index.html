@@ -120,38 +120,81 @@
 
   /* Полноэкранный редактор Sigma-правил (#sigma-editor-panel) - подменяет #sigma-browse-panel
      внутри вкладки Sigma-правила целиком, switchTab/activeTab не трогает (см. openRuleEditor/
-     closeRuleEditor). Выбор рулсета+поиск для референс-списка (#rule-editor-ref-toolbar) живёт
-     СНАРУЖИ этой сетки - см. общую строку "Источник:" в разметке (`.row` с #batch-select) - там
-     он буквально на одном уровне с "Источник:/Все источники/Обновить список", а не просто
-     стилистически похож. Внутри .editor-grid остаётся 3 ряда x 2 колонки через grid-template-areas:
-       header    | refpicker    - тулбар (Назад/Новое правило/Сохранить)+выбор целевого рулсета
-                                   | список правил референса (уже выбранного в toolbar рулсета),
-                                   начинаются РОВНО на одном уровне (оба align-self:start)
+     closeRuleEditor). Сетка - 4 ряда x 2 колонки через grid-template-areas:
+       header    | reftoolbar   - ЛЕВАЯ ячейка (header) спанит этот ряд и следующий: тулбар
+                                   (Назад/Новое правило/Сохранить) + выбор целевого рулсета +
+                                   мини-браузер списков значений. Справа - выбор рулсета+поиск
+                                   для референс-списка (#rule-editor-ref-toolbar). Верх левого
+                                   блока и этот селектор - РОВНО на одном уровне (раньше тулбар
+                                   жил снаружи грида, в общей строке "Источник:", и весь левый
+                                   блок начинался на ряд ниже него)
+       header    | refpicker    - продолжение левого блока | список правил референса (уже
+                                   выбранного в reftoolbar рулсета)
        .         | yamllabel    - пустая ячейка слева (колонка редактора) / подпись "Sigma YAML"
                                    справа - СВОИМ рядом, а не внутри .editor-reference-yaml, чтобы
                                    у обеих колонок следующего ряда был идентичный отступ сверху
        editor    | refyaml      - сам редактор и просмотр Sigma YAML выбранного правила, начинаются
                                    РОВНО на одном уровне (одинаковая высота ряда выше - см.
                                    комментарий у .editor-yaml-label)
-     header/refpicker/yamllabel - высотой auto (по содержимому); editor/refyaml - 1fr,
+     reftoolbar/header/refpicker/yamllabel - высотой auto (по содержимому); editor/refyaml - 1fr,
      делят всю оставшуюся высоту экрана. */
   #sigma-editor-panel { display: flex; flex-direction: column; height: calc(100vh - 100px); }
   /* Правая колонка - управляется тем же resize-паттерном, что и alert-detail/event-detail/
-     rule-detail (PANEL_RESIZE_CONFIG + makeResizable/setGridTrackWidth). var(--editor-ref-w)
-     ставится JS-ом НЕ на #editor-grid, а на #main-panel (см. PANEL_RESIZE_CONFIG.gridEl) - это
-     общий предок и .editor-grid, и вынесенного наружу #rule-editor-ref-toolbar, поэтому одно
-     значение переменной синхронно управляет шириной ОБОИХ (CSS custom property наследуется вниз
-     по DOM, а не только в пределах грида) без дублирования кода на resize. */
+     rule-detail (PANEL_RESIZE_CONFIG + makeResizable/setGridTrackWidth): var(--editor-ref-w)
+     ставится JS-ом на сам #editor-grid (см. PANEL_RESIZE_CONFIG.gridEl). Все три её обитателя
+     (тулбар с выбором рулсета, список правил, просмотр YAML) - ячейки ЭТОГО грида, поэтому одна
+     переменная синхронно двигает ширину всех трёх без дублирования кода на resize. */
   .editor-grid {
     display: grid;
     grid-template-columns: 1fr var(--editor-ref-w, 600px);
-    grid-template-rows: auto auto 1fr;
-    grid-template-areas: "header refpicker" ". yamllabel" "editor refyaml";
+    grid-template-rows: auto auto auto 1fr;
+    grid-template-areas: "header reftoolbar" "header refpicker" "editorlabel yamllabel" "editor refyaml";
     gap: 10px 14px; flex: 1 1 auto; min-height: 0;
   }
-  @media (max-width: 1100px) { .editor-grid { grid-template-columns: 1fr; grid-template-areas: "header" "refpicker" "yamllabel" "editor" "refyaml"; } }
+  @media (max-width: 1100px) { .editor-grid { grid-template-columns: 1fr; grid-template-areas: "header" "reftoolbar" "refpicker" "editorlabel" "editor" "yamllabel" "refyaml"; } }
 
-  .editor-header-col { grid-area: header; align-self: start; }
+  /* padding-left:14px - тот же отступ, что у .editor-reference-pane/.editor-reference-yaml под
+     resize-handle: селектор рулсета встаёт ровно над списком правил, а не левее его на 14px. */
+  .editor-ref-toolbar { grid-area: reftoolbar; padding-left: 14px; flex-wrap: nowrap; }
+
+  /* header-cell грида разъезжается на ДВЕ горизонтальные части (не меняет саму сетку .editor-grid,
+     см. комментарий у неё выше): узкая .editor-header-buttons (тулбар/выбор рулсета/сохранить,
+     ширина по контенту) слева и .editor-vl-pane (мини-браузер списков значений) справа. Ряд editor
+     (код правила) ниже по-прежнему занимает всю ширину этой же грид-колонки (1fr) целиком - деление
+     касается только высоты верхнего ряда. */
+  .editor-header-col { grid-area: header; align-self: start; display: flex; gap: 16px; align-items: flex-start; }
+  .editor-header-buttons { flex: 0 0 auto; }
+  /* Панель списков НЕ тянется на всё свободное место до .editor-reference-pane (было flex:1 1 auto -
+     на широком экране она разъезжалась заметно шире, чем нужно её содержимому): фиксированная
+     основа, ужиматься может, расти - нет. --editor-vl-list-w - ОБЩАЯ ширина левой колонки для
+     ОБЕИХ строк панели (label фильтра сверху и список списков снизу), поэтому поле поиска
+     справа от label и блок значений под ним имеют РОВНО одинаковые левый край и ширину. */
+  /* margin-left:auto - панель прижата к ПРАВОМУ краю левой грид-колонки: её правый край совпадает
+     с правым краем редактора кода в ряду ниже (и с левым краем правой колонки), а свободное место
+     остаётся между ней и кнопками слева, а не справа от неё. */
+  .editor-vl-pane { --editor-vl-list-w: 200px; flex: 0 1 560px; min-width: 0; margin-left: auto; }
+  .editor-vl-pane .row { flex-wrap: nowrap; }
+  /* Схема: фильтр ("Списки:"+поиск) сверху, ниже - список подходящих списков слева и значения
+     выбранного списка (через запятую) справа, единой строкой одинаковой высоты (переиспользует
+     высоту .ref-rule-list = 120px). Обе строки делят ширину одинаково (см. --editor-vl-list-w). */
+  /* margin-right:0 - гасит общий label{margin-right:4px}: иначе поле поиска съезжало бы на 4px правее блока значений под ним. */
+  .editor-vl-filter > label { flex: 0 0 var(--editor-vl-list-w); margin-right: 0; }
+
+  /* Выбор целевого рулсета (#rule-editor-target-row) - СЕТКА 2 колонки, а не две независимые
+     строки .row: подписи у них разной длины ("В существующий рулсет:" / "Новый рулсет:"), и при
+     флексе контролы начинались с разного X. max-content на обе колонки + display:contents на
+     внутренних .row (строки становятся прозрачными, их label/контрол - прямые грид-элементы)
+     дают левой колонке ширину самой длинной подписи, а правой - ширину самого широкого контрола,
+     который и растягивает второй (justify-items:stretch по умолчанию). Итог: select и input
+     ровно друг под другом, одной ширины. */
+  #rule-editor-target-row { display: grid; grid-template-columns: max-content max-content; gap: 6px 10px; align-items: center; }
+  #rule-editor-target-row > .row { display: contents; }
+  #rule-editor-target-row label { margin-right: 0; }
+  /* margin-top:10px - тот же вертикальный зазор, что между #rule-editor-ref-toolbar и списком
+     правил под ним (row-gap самого .editor-grid), чтобы обе колонки дышали одинаково. */
+  .editor-vl-body { display: flex; gap: 10px; margin-top: 10px; }
+  .editor-vl-body .ref-rule-list { flex: 0 0 var(--editor-vl-list-w); min-width: 0; }
+  .editor-vl-values { flex: 1 1 auto; min-width: 0; height: 120px; max-height: 120px; margin: 0; white-space: pre-wrap; }
 
   .code-editor-wrap { grid-area: editor; position: relative; min-height: 0; }
   .code-editor-highlight, .code-editor-input {
@@ -163,8 +206,8 @@
   .code-editor-input { background: transparent; color: transparent; caret-color: var(--text); border: 1px solid transparent; resize: none; }
   .code-editor-input:focus { outline: none; border-color: var(--accent); }
 
-  /* Список правил референса (уже выбранного в #rule-editor-ref-toolbar рулсета) - на одном уровне
-     с тулбаром (grid-area: header) слева, у'же прежнего (420px дефолт вместо 620 - раньше сюда же
+  /* Список правил референса (уже выбранного в #rule-editor-ref-toolbar рулсета) - прямо под самим
+     тулбаром, справа от .editor-header-col (grid-area: header), у'же прежнего (420px дефолт вместо 620 - раньше сюда же
      помещались select+поиск, теперь только список). position:relative + padding-left под
      resize-handle (тот же приём, что у .detail-panel). ВАЖНО: height (не min-height!) на
      .ref-rule-list - без явной высоты overflow-y:auto считает "естественным" размером высоту
@@ -177,14 +220,13 @@
   .ref-rule-row:hover { background: var(--surface-2); }
   .ref-rule-row.selected { background: var(--surface-2); outline: 1px solid var(--accent); outline-offset: -1px; }
 
-  /* Подпись "Sigma YAML" - СВОИМ рядом грида (grid-area: yamllabel), а не внутри
-     .editor-reference-yaml как раньше: там она добавляла высоту только колонке refyaml, из-за
-     чего сам просмотр YAML (pre) начинался НИЖЕ текста в .code-editor-wrap слева (тот вообще
-     без подписи). Вынесенная в отдельный ряд (с пустой ячейкой "." слева для колонки редактора)
-     подпись даёт ОБЕИМ колонкам одинаковый отступ сверху - editor и refyaml начинаются ровно
-     на одном уровне. */
+  /* Подписи колонок ("Editor" слева, "Sigma YAML" справа) - СВОИМ рядом грида, а не внутри
+     самих панелей: внутри .editor-reference-yaml подпись добавляла высоту только правой колонке,
+     и просмотр YAML начинался НИЖЕ редактора слева. Отдельный ряд из двух ячеек даёт ОБЕИМ
+     колонкам одинаковый отступ сверху - editor и refyaml начинаются ровно на одном уровне. */
+  .editor-code-label { grid-area: editorlabel; }
   .editor-yaml-label { grid-area: yamllabel; }
-  .editor-yaml-label .panel-title { margin: 0; }
+  .editor-code-label .panel-title, .editor-yaml-label .panel-title { margin: 0; }
   /* position:relative + padding-left:14px - под второй resize-handle (editor-refyaml-handle),
      тот же приём, что у .editor-reference-pane выше. Управляет ТЕМ ЖЕ --editor-ref-w (см.
      makeResizable("editor-refyaml-handle", "editor-reference-pane") в конце файла) - таскать
@@ -370,6 +412,16 @@
   .badge-matched { background: #2a1520; color: var(--crit); }
   .badge-unmatched { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 
+  /* Инциденты (Этап 4): статус investigations (queued->running->done->error, jobа-заглушка,
+     см. app/incidents.py) и вердикт агента (TP/FP/needs-review, Этап 5 - пока всегда needs-review). */
+  .badge-queued { background: #1c2230; color: var(--muted); }
+  .badge-running { background: #1a2230; color: var(--accent); }
+  .badge-done { background: #1c2622; color: var(--muted); }
+  .badge-error { background: #2a1520; color: var(--crit); }
+  .badge-tp { background: #2a1520; color: var(--crit); }
+  .badge-fp { background: #16281f; color: var(--accent); }
+  .badge-needs-review { background: #3a2e0c; color: var(--med); }
+
   .empty-state { color: var(--muted); padding: 24px 8px; text-align: center; font-size: 13px; }
   .error-state { color: var(--crit); padding: 10px; font-size: 12px; }
 
@@ -406,9 +458,36 @@
 
   .detail-panel h3 { margin: 0 0 4px 0; font-size: 14px; }
   .detail-panel .muted { color: var(--muted); font-size: 12px; }
+
+  /* Компактные таблицы внутри detail-панелей (карточка инцидента: member-алерты, связанные
+     события, история). table-layout:fixed ОБЯЗАТЕЛЕН - под auto-раскладку колонка вроде
+     matched_rules (событие может матчить сразу десяток правил из разных рулсетов) растёт под
+     самую длинную строку и выталкивает всю панель в горизонтальный скролл вместо переноса
+     текста внутри своей ячейки. Узкие колонки (.ctx-col-*) - фиксированной ширины, "длинная"
+     текстовая колонка (.ctx-wrap, аналог .col-wrap у таблицы Событий) забирает остаток и
+     переносится по словам; .ctx-table-scroll - страховка на случай совсем длинного токена без
+     пробелов (тот же паттерн, что .table-scroll у основных таблиц). */
+  .ctx-table-scroll { overflow-x: auto; max-width: 100%; }
+  .ctx-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+  .ctx-table td {
+    padding: 4px 6px 4px 0; border-bottom: 1px dashed var(--border);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ctx-table td.ctx-wrap { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
+  .ctx-table td.ctx-col-time { width: 130px; }
+  .ctx-table td.ctx-col-host { width: 120px; }
+  .ctx-table td.ctx-col-narrow { width: 56px; }
+  .ctx-table td.ctx-col-sev { width: 14px; padding-right: 4px; }
+  .ctx-table tr.data-row { cursor: pointer; }
+  .ctx-table tr.data-row:hover { background: var(--surface-2); }
   .kv { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed var(--border); font-size: 12px; }
-  .kv span:first-child { color: var(--muted); }
-  .kv span:last-child { font-family: var(--mono); text-align: right; }
+  /* Прямой child-комбинатор (>) обязателен: без него ".kv span:first-child" случайно матчит
+     ещё и вложенный бейдж-статус (напр. <span><span class="badge badge-new">...) - тот тоже
+     "first-child", просто СВОЕГО родителя (враппер-span значения), а не .kv - и получал бы
+     тот же серый var(--muted), забивая собственный цвет .badge-* (см. Статус в карточке
+     инцидента/расследования, Вердикт). */
+  .kv > span:first-child { color: var(--muted); }
+  .kv > span:last-child { font-family: var(--mono); text-align: right; }
   .tech-tag { display: inline-block; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-family: var(--mono); font-size: 11px; margin: 2px 4px 2px 0; color: var(--accent); }
   pre.json-block { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 11px; overflow: auto; max-height: 280px; font-family: var(--mono); white-space: pre-wrap; word-break: break-all; resize: vertical; }
   pre.json-block.raw-event { max-height: 70vh; min-height: 260px; }
@@ -471,6 +550,7 @@
   <div class="panel" id="main-panel">
     <div class="tabs">
       <div class="tab" id="tab-source" onclick="switchTab('source')">Источник данных</div>
+      <div class="tab" id="tab-incidents" onclick="switchTab('incidents')">Инциденты</div>
       <div class="tab active" id="tab-alerts" onclick="switchTab('alerts')">Алерты</div>
       <div class="tab" id="tab-events" onclick="switchTab('events')">События</div>
       <div class="tab" id="tab-sigma" onclick="switchTab('sigma')">Sigma-правила</div>
@@ -478,17 +558,18 @@
       <div class="tab" id="tab-kb" onclick="switchTab('kb')">База знаний</div>
     </div>
 
-    <div class="row" style="margin-bottom:14px;">
-      <label>Источник:</label>
-      <select id="batch-select"><option value="">Все источники</option></select>
-      <button type="button" class="ghost" onclick="refreshBatches(); refreshActiveTab();">Обновить список</button>
-      <!-- Выбор рулсета/поиск для референс-списка редактора правил - живёт в ОБЩЕЙ строке
-           "Источник:" (а не внутри .editor-grid), чтобы буквально быть на одном уровне с ней;
-           показывается только когда открыт редактор правил (openRuleEditor/closeRuleEditor). -->
-      <div id="rule-editor-ref-toolbar" class="row" style="display:none; margin-left:auto; width:var(--editor-ref-w, 600px); max-width:100%; box-sizing:border-box; flex:0 0 auto;">
-        <select id="rule-editor-ref-ruleset" onchange="loadEditorReferenceRules(0)" style="flex:1 1 auto; min-width:0;"></select>
-        <input type="text" id="rule-editor-ref-search" placeholder="поиск" oninput="loadEditorReferenceRules(0)" style="flex:1 1 160px; min-width:0;">
-      </div>
+    <div class="row" id="source-select-row" style="margin-bottom:14px;">
+      <!-- Селектор источника нужен только там, где данные реально фильтруются по source_batch
+           (Источник данных/Алерты/Инциденты/События) - на Sigma-правилах/Списках/Базе знаний
+           его прячем целиком (см. switchTab), там фильтра по источнику нет и не будет.
+           display:contents - группа НЕ становится отдельным flex-item'ом .row, её label/select/
+           button остаются прямыми детьми .row (как без обёртки), только чтобы можно было скрыть
+           их одним style. -->
+      <span id="batch-select-group" style="display:contents;">
+        <label>Источник:</label>
+        <select id="batch-select"><option value="">Все источники</option></select>
+        <button type="button" class="ghost" onclick="refreshBatches(); refreshActiveTab();">Обновить список</button>
+      </span>
     </div>
 
     <div id="view-source" style="display:none;">
@@ -647,13 +728,6 @@
           <option value="low">low</option>
           <option value="informational">informational</option>
         </select>
-        <label>Статус:</label>
-        <select id="alert-filter-status" onchange="loadAlerts()">
-          <option value="">все</option>
-          <option value="new">new</option>
-          <option value="investigating">investigating</option>
-          <option value="closed">closed</option>
-        </select>
         <label>Период:</label>
         <select id="alert-filter-time" onchange="onTimePresetChange('alert'); loadAlerts()">
           <option value="">всё время</option>
@@ -686,6 +760,65 @@
           </div>
           <div id="alert-detail-content" class="detail-body">
             <p class="muted">Выбери алерт в списке слева, чтобы увидеть детали.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="view-incidents" style="display:none;">
+      <div class="row">
+        <label>Severity:</label>
+        <select id="incident-filter-level" onchange="loadIncidents()">
+          <option value="">все</option>
+          <option value="critical">critical</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+          <option value="informational">informational</option>
+        </select>
+        <label>Статус:</label>
+        <select id="incident-filter-status" onchange="loadIncidents()">
+          <option value="">все</option>
+          <option value="new">new</option>
+          <option value="investigating">investigating</option>
+          <option value="closed">closed</option>
+        </select>
+        <label>Тип:</label>
+        <input type="text" id="incident-filter-type" placeholder="incident_type" style="width:140px;" onkeydown="if(event.key==='Enter') loadIncidents();">
+        <label>Поиск:</label>
+        <input type="text" id="incident-filter-query" placeholder="название/описание" onkeydown="if(event.key==='Enter') loadIncidents();">
+        <label>Период:</label>
+        <select id="incident-filter-time" onchange="onTimePresetChange('incident'); loadIncidents()">
+          <option value="">всё время</option>
+          <option value="15m">15 минут</option>
+          <option value="1h">1 час</option>
+          <option value="24h">24 часа</option>
+          <option value="7d">7 дней</option>
+          <option value="custom">свой интервал…</option>
+        </select>
+        <span class="time-custom" id="incident-time-custom">
+          <input type="datetime-local" id="incident-time-from" step="1" onchange="loadIncidents()">
+          <span style="color:var(--muted)">—</span>
+          <input type="datetime-local" id="incident-time-to" step="1" onchange="loadIncidents()">
+        </span>
+        <button type="button" class="ghost" onclick="loadIncidents()">Обновить</button>
+      </div>
+
+      <div class="content-grid" id="incidents-content-grid" style="margin-top:12px;">
+        <div class="table-scroll" id="incidents-table-scroll">
+          <table>
+            <thead><tr id="incidents-head-row"></tr></thead>
+            <tbody id="incidents-tbody"></tbody>
+          </table>
+          <div id="incidents-empty" class="empty-state" style="display:none;">Нет инцидентов для выбранных фильтров</div>
+        </div>
+        <div id="incident-detail" class="detail-panel">
+          <div class="resize-handle" id="incident-detail-handle"></div>
+          <div class="panel-toolbar">
+            <button type="button" class="ghost" onclick="resetPanelWidth('incident-detail')" title="Сбросить ширину">&#8634;</button>
+          </div>
+          <div id="incident-detail-content" class="detail-body">
+            <p class="muted">Выбери инцидент в списке слева, чтобы увидеть детали.</p>
           </div>
         </div>
       </div>
@@ -947,26 +1080,66 @@
 
       <div id="sigma-editor-panel" style="display:none;">
         <div class="editor-grid" id="editor-grid">
+          <!-- Выбор рулсета + поиск для референс-списка правил - ПЕРВЫЙ ряд ПРАВОЙ колонки грида
+               (grid-area: reftoolbar). Левая .editor-header-col спанит этот ряд и следующий, поэтому
+               её верх (кнопки + мини-браузер списков значений) начинается РОВНО на одном уровне с
+               этим селектором. Раньше тулбар жил СНАРУЖИ грида, в общей строке "Источник:", и весь
+               левый блок висел на ряд ниже него. -->
+          <div id="rule-editor-ref-toolbar" class="editor-ref-toolbar row" style="display:none;">
+            <select id="rule-editor-ref-ruleset" onchange="loadEditorReferenceRules(0)" style="flex:1 1 auto; min-width:0;"></select>
+            <input type="text" id="rule-editor-ref-search" placeholder="поиск" oninput="loadEditorReferenceRules(0)" style="flex:1 1 160px; min-width:0;">
+          </div>
+
           <div class="editor-header-col">
-            <div class="row" style="margin-bottom:10px;">
-              <button type="button" class="ghost" onclick="closeRuleEditor()">&larr; Назад к списку правил</button>
+            <div class="editor-header-buttons">
+              <div class="row" style="margin-bottom:10px;">
+                <button type="button" class="ghost" onclick="closeRuleEditor()">&larr; Назад к списку правил</button>
+              </div>
+              <div id="rule-editor-target-row">
+                <div class="row">
+                  <label><input type="radio" name="rule-editor-target-mode" value="existing" checked onchange="updateSigmaTargetMode('rule-editor')"> В существующий рулсет:</label>
+                  <select id="rule-editor-target-existing"></select>
+                </div>
+                <div class="row">
+                  <label><input type="radio" name="rule-editor-target-mode" value="new" onchange="updateSigmaTargetMode('rule-editor')"> Новый рулсет:</label>
+                  <input type="text" id="rule-editor-target-new" placeholder="Название нового рулсета" disabled style="width:200px;">
+                </div>
+              </div>
+              <div id="rule-editor-static-target" class="muted" style="display:none; font-size:12px;"></div>
+              <!-- padding-left:6px - лёгкий отступ, чтобы заголовок с кнопкой не липли к самому
+                   краю колонки под радио-переключателями выбора рулсета. -->
+              <div class="row" style="margin-top:10px; padding-left:6px;">
+                <span style="font-size:14px;" id="rule-editor-title">Новое правило</span>
+                <button type="button" onclick="saveRuleEditor()">Сохранить</button>
+              </div>
             </div>
-            <div id="rule-editor-target-row" class="row">
-              <label><input type="radio" name="rule-editor-target-mode" value="existing" checked onchange="updateSigmaTargetMode('rule-editor')"> В существующий рулсет:</label>
-              <select id="rule-editor-target-existing"></select>
-              <label><input type="radio" name="rule-editor-target-mode" value="new" onchange="updateSigmaTargetMode('rule-editor')"> Новый рулсет:</label>
-              <input type="text" id="rule-editor-target-new" placeholder="Название нового рулсета" disabled style="width:200px;">
-            </div>
-            <div id="rule-editor-static-target" class="muted" style="display:none; font-size:12px;"></div>
-            <div class="row" style="margin-top:10px;">
-              <span style="font-size:14px;" id="rule-editor-title">Новое правило</span>
-              <button type="button" onclick="saveRuleEditor()">Сохранить</button>
+
+            <!-- Просмотр/поиск списков значений (%name%|expand) прямо в редакторе - под руками,
+                 пока пишешь правило, без переключения на вкладку "Списки". Занимает пространство,
+                 освободившееся справа от кнопок (.editor-header-buttons) и слева от референс-списка
+                 правил (.editor-reference-pane) - см. pic.PNG (зелёная схема) в корне проекта: сверху
+                 фильтр по имени/описанию, ниже - список подходящих списков слева и значения
+                 выбранного списка (через запятую) справа, единой строкой по высоте с фильтром+списком.
+                 Данные (value lists, не Sigma-правила) - грузятся один раз в openRuleEditor. -->
+            <div class="editor-vl-pane">
+              <div class="row editor-vl-filter">
+                <label style="font-size:12px; color:var(--muted);">Списки:</label>
+                <input type="text" id="rule-editor-vl-search" placeholder="имя/описание" oninput="renderRuleEditorValueLists()" style="flex:1 1 auto; min-width:0;">
+              </div>
+              <div class="editor-vl-body">
+                <div id="rule-editor-vl-list" class="ref-rule-list"></div>
+                <pre id="rule-editor-vl-values" class="json-block editor-vl-values">Выбери список слева, чтобы увидеть значения.</pre>
+              </div>
             </div>
           </div>
 
           <div class="editor-reference-pane" id="editor-reference-pane">
             <div class="resize-handle" id="editor-reference-handle"></div>
             <div id="rule-editor-ref-list-body" class="ref-rule-list"></div>
+          </div>
+
+          <div class="editor-code-label">
+            <p class="panel-title">Editor</p>
           </div>
 
           <div class="editor-yaml-label">
@@ -1137,6 +1310,7 @@ let eventsRequestSeq = 0;
 
 // Состояние сортировки на вкладку. by=null -> серверный дефолт (created_at/ingested_at desc).
 const alertsSort = { by: null, dir: "desc" };
+const incidentsSort = { by: null, dir: "desc" };
 const eventsSort = { by: null, dir: "desc" };
 const sigmaSort = { by: null, dir: "asc" };
 
@@ -1319,7 +1493,24 @@ const ALERT_COLUMNS = [
   { key: "rule", label: "Правило" },
   { key: "host", label: "Хост" },
   { key: "event_count", label: "События" },
+  { key: "created_at", label: "Создан" },
+];
+
+// sort_by у GET /incidents: created_at/updated_at/alert_count/status/severity (см. app/main.py).
+// incident_type/title сервер не сортирует - соответствующие колонки key:null.
+// "Инцидент" = correlation_rule_title (само сработавшее правило, напр. "T5 - Suspicious Domain
+// Queried By Multiple Hosts"), "Описание" = incident.title из YAML (напр. "Один и тот же
+// C2-домен запрошен с нескольких хостов") - две разные вещи: правило может быть одно, а
+// incident_type (слаг, см. correlation.incident.type) - смысловая категория поверх него, не
+// показывается отдельной колонкой (остаётся доступен через фильтр "Тип:" и подзаголовок в
+// детейл-панели), чтобы не дублировать то же самое, что уже несёт "Инцидент"/"Описание".
+const INCIDENT_COLUMNS = [
+  { key: "severity", label: "" },
+  { key: null, label: "Инцидент" },
+  { key: null, label: "Описание" },
+  { key: "alert_count", label: "Алертов" },
   { key: "status", label: "Статус" },
+  { key: null, label: "Расследование" },
   { key: "created_at", label: "Создан" },
 ];
 
@@ -1341,8 +1532,8 @@ function currentBatch() {
 // Реестр состояния сортировки/перезагрузки по вкладке - вместо тернарника/if-else на каждую
 // таблицу (было только alerts/events, стало +sigma). Новая сортируемая таблица - это одна
 // строка в обоих объектах, без изменений в sortBy/thHtml.
-const SORT_STATES = { alerts: alertsSort, events: eventsSort, sigma: sigmaSort };
-const RELOAD_FNS = { alerts: loadAlerts, events: () => loadEvents(0), sigma: () => loadSigmaRules(0), "value-lists": loadValueLists };
+const SORT_STATES = { alerts: alertsSort, incidents: incidentsSort, events: eventsSort, sigma: sigmaSort };
+const RELOAD_FNS = { alerts: loadAlerts, incidents: loadIncidents, events: () => loadEvents(0), sigma: () => loadSigmaRules(0), "value-lists": loadValueLists };
 
 function sortBy(tab, key) {
   if (!key) return;
@@ -2167,21 +2358,31 @@ function switchTab(tab) {
   activeTab = tab;
   document.getElementById("tab-source").classList.toggle("active", tab === "source");
   document.getElementById("tab-alerts").classList.toggle("active", tab === "alerts");
+  document.getElementById("tab-incidents").classList.toggle("active", tab === "incidents");
   document.getElementById("tab-events").classList.toggle("active", tab === "events");
   document.getElementById("tab-sigma").classList.toggle("active", tab === "sigma");
   document.getElementById("tab-value-lists").classList.toggle("active", tab === "value-lists");
   document.getElementById("tab-kb").classList.toggle("active", tab === "kb");
   document.getElementById("view-source").style.display = tab === "source" ? "block" : "none";
   document.getElementById("view-alerts").style.display = tab === "alerts" ? "block" : "none";
+  document.getElementById("view-incidents").style.display = tab === "incidents" ? "block" : "none";
   document.getElementById("view-events").style.display = tab === "events" ? "block" : "none";
   document.getElementById("view-sigma").style.display = tab === "sigma" ? "block" : "none";
   document.getElementById("view-value-lists").style.display = tab === "value-lists" ? "block" : "none";
   document.getElementById("view-kb").style.display = tab === "kb" ? "block" : "none";
+  // Селектор "Источник:" нужен только там, где данные реально фильтруются по source_batch
+  // (Источник данных/Алерты/Инциденты/События) - на Sigma-правилах/Списках/Базе знаний фильтра
+  // по источнику нет, прячем строку целиком, а не оставляем пустую полосу: тулбар редактора
+  // правил (#rule-editor-ref-toolbar) в ней больше не живёт - он переехал внутрь .editor-grid.
+  const hideSourceSelector = tab === "sigma" || tab === "value-lists" || tab === "kb";
+  document.getElementById("batch-select-group").style.display = hideSourceSelector ? "none" : "contents";
+  document.getElementById("source-select-row").style.display = hideSourceSelector ? "none" : "flex";
   refreshActiveTab();
 }
 
 function refreshActiveTab() {
   if (activeTab === "alerts") loadAlerts();
+  else if (activeTab === "incidents") loadIncidents();
   else if (activeTab === "events") loadEvents(eventsOffset);
   else if (activeTab === "sigma") loadSigmaRules(0);
   else if (activeTab === "value-lists") loadValueLists();
@@ -2420,8 +2621,6 @@ async function loadAlerts() {
   if (batch) params.set("source_batch", batch);
   const level = document.getElementById("alert-filter-level").value;
   if (level) params.set("rule_level", level);
-  const status = document.getElementById("alert-filter-status").value;
-  if (status) params.set("status", status);
   applyTimeParams("alert", params);
   sortParams(alertsSort, params);
 
@@ -2444,7 +2643,6 @@ async function loadAlerts() {
         <td>${a.rule_title}</td>
         <td>${a.host}</td>
         <td>${a.event_count}</td>
-        <td><span class="badge badge-${a.status}">${a.status}</span></td>
         <td>${a.created_at.slice(0,19).replace("T"," ")}</td>
       </tr>
     `).join("");
@@ -2493,21 +2691,18 @@ async function selectAlert(id) {
       <p class="muted">${a.description || "без описания"}</p>
       ${mitre.tacticsHtml ? `<div style="margin:8px 0 2px 0;">${mitre.tacticsHtml}</div>` : ""}
       <div style="margin:4px 0 10px 0;">${mitre.techniquesHtml}</div>
-      <div class="kv"><span>Хост</span><span>${a.host}</span></div>
+      <div class="kv"><span>ID</span><span>${escapeHtml(a.alert_id)}</span></div>
       <div class="kv"><span>Уровень</span><span>${sevBar(a.rule_level)}${a.rule_level}</span></div>
+      <div class="kv"><span>Хост</span><span>${a.host}</span></div>
       <div class="kv"><span>Источник</span><span>${a.source_batch}</span></div>
       <div class="kv"><span>Событий</span><span>${a.event_count}</span></div>
+      <!-- Статус алерта в UI больше нигде не показывается и не редактируется (см. app/main.py
+           PATCH /alerts/{id}/status - ручка осталась, просто UI ей больше не пользуется):
+           триаж-статус меняется только у инцидента, который агрегирует алерты, а не у каждого
+           алерта по отдельности. -->
       <div class="kv"><span>Пользователи</span><span>${(ent.users||[]).join(", ") || "—"}</span></div>
       <div class="kv"><span>IP (src)</span><span>${(ent.src_ips||[]).join(", ") || "—"}</span></div>
       <div class="kv"><span>Процессы</span><span>${(ent.processes||[]).join(", ") || "—"}</span></div>
-      <div class="status-select-row">
-        <select id="status-select-${a.alert_id}">
-          <option value="new" ${a.status==="new"?"selected":""}>new</option>
-          <option value="investigating" ${a.status==="investigating"?"selected":""}>investigating</option>
-          <option value="closed" ${a.status==="closed"?"selected":""}>closed</option>
-        </select>
-        <button type="button" onclick="updateStatus('${a.alert_id}')">Сохранить статус</button>
-      </div>
       <p class="panel-title" style="margin-top:14px;">Сэмпл событий (${a.sample_events.length})</p>
       <pre class="json-block">${escapeHtml(JSON.stringify(a.sample_events, null, 2))}</pre>
     `;
@@ -2519,15 +2714,242 @@ async function selectAlert(id) {
   requestAnimationFrame(() => window.scrollTo(0, scrollY));
 }
 
-async function updateStatus(id) {
-  const status = document.getElementById("status-select-" + id).value;
+// Переход из карточки инцидента (member-алерт / история алертов источника) в карточку алерта.
+// switchTab уже сам зовёт loadAlerts() через refreshActiveTab - второй await loadAlerts() ниже
+// не лишний (без него список слева мог остаться пуст/от прошлой вкладки на момент отрисовки
+// detail-панели), а дублирующий запрос за ~50 алертов дешёвый. Фильтры вкладки Алерты (статус/
+// severity/период) на выбор карточки не влияют - /alerts/{id} отдаёт её независимо от них.
+async function jumpToAlert(alertId) {
+  switchTab("alerts");
+  await loadAlerts();
+  await selectAlert(alertId);
+}
+
+// ---------- Incidents (Этап 4) ----------
+
+function verdictBadge(v) {
+  if (!v) return '<span class="muted">—</span>';
+  return `<span class="badge badge-${v.toLowerCase()}">${escapeHtml(v)}</span>`;
+}
+
+async function loadIncidents() {
+  const tbody = document.getElementById("incidents-tbody");
+  const emptyEl = document.getElementById("incidents-empty");
+  document.getElementById("incidents-head-row").innerHTML = INCIDENT_COLUMNS.map(c => thHtml("incidents", c)).join("");
+  const params = new URLSearchParams();
+  const batch = currentBatch();
+  if (batch) params.set("source_batch", batch);
+  const level = document.getElementById("incident-filter-level").value;
+  if (level) params.set("severity", level);
+  const status = document.getElementById("incident-filter-status").value;
+  if (status) params.set("status", status);
+  const type = document.getElementById("incident-filter-type").value.trim();
+  if (type) params.set("incident_type", type);
+  const q = document.getElementById("incident-filter-query").value.trim();
+  if (q) params.set("q", q);
+  applyTimeParams("incident", params);
+  sortParams(incidentsSort, params);
+
   try {
-    await api("/alerts/" + id + "/status", { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify({status}) });
-    await loadAlerts();
-    await selectAlert(id);
+    const resp = await api("/incidents?" + params.toString());
+    const incidents = resp.incidents || [];
+    if (incidents.length === 0) {
+      tbody.innerHTML = "";
+      emptyEl.className = "empty-state";
+      emptyEl.textContent = "Нет инцидентов для выбранных фильтров";
+      emptyEl.style.display = "block";
+      return;
+    }
+    emptyEl.style.display = "none";
+    tbody.innerHTML = incidents.map(i => `
+      <tr class="data-row" data-id="${i.incident_id}" onclick="selectIncident('${i.incident_id}')">
+        <td>${sevBar(i.severity)}</td>
+        <td>${escapeHtml(i.correlation_rule_title)}</td>
+        <td>${escapeHtml(i.title)}</td>
+        <td>${i.alert_count}</td>
+        <td><span class="badge badge-${i.status}">${i.status}</span></td>
+        <td>${i.investigation_status ? `<span class="badge badge-${i.investigation_status}">${i.investigation_status}</span>` : '<span class="muted">—</span>'}</td>
+        <td>${i.created_at.slice(0,19).replace("T"," ")}</td>
+      </tr>
+    `).join("");
+  } catch (e) {
+    tbody.innerHTML = "";
+    emptyEl.style.display = "block";
+    emptyEl.className = "error-state";
+    emptyEl.textContent = "Ошибка загрузки: " + e.message;
+  }
+}
+
+// incident_id, чей контекст (GET /incidents/{id}/context) уже подгружен в ТЕКУЩЕЙ открытой
+// панели - сбрасывается на каждый selectIncident (панель перерисовывается целиком), так что
+// раскрытие блока на новом инциденте всегда бьёт по сети заново, а повторное сворачивание/
+// разворачивание одного и того же - нет.
+let incidentContextLoadedFor = null;
+
+async function selectIncident(id) {
+  const scrollY = window.scrollY;
+  document.querySelectorAll("#incidents-tbody tr").forEach(tr => tr.classList.toggle("selected", tr.dataset.id === id));
+  const content = document.getElementById("incident-detail-content");
+  content.style.opacity = "0.45";
+  incidentContextLoadedFor = null;
+  try {
+    const inc = await api("/incidents/" + id);
+    const mitre = renderMitreChips(inc.mitre, inc.mitre_techniques);
+    const ent = inc.entities || {};
+    const inv = inc.investigation;
+    const memberRows = (inc.member_alerts || []).map(a => `
+      <tr class="data-row" onclick="jumpToAlert('${a.alert_id}')">
+        <td class="ctx-col-sev">${sevBar(a.rule_level)}</td>
+        <td class="ctx-wrap">${escapeHtml(a.rule_title)}</td>
+        <td class="ctx-col-host">${escapeHtml(a.host)}</td>
+        <td class="ctx-col-narrow">${a.event_count}</td>
+      </tr>
+    `).join("");
+    content.innerHTML = `
+      <h3>${sevBar(inc.severity)}${escapeHtml(inc.correlation_rule_title || "—")}</h3>
+      <p class="muted">${escapeHtml(inc.title) || "без описания"} · type: ${escapeHtml(inc.incident_type)}</p>
+      ${mitre.tacticsHtml ? `<div style="margin:8px 0 2px 0;">${mitre.tacticsHtml}</div>` : ""}
+      <div style="margin:4px 0 10px 0;">${mitre.techniquesHtml}</div>
+      <div class="kv"><span>ID</span><span>${escapeHtml(inc.incident_id)}</span></div>
+      <div class="kv"><span>Уровень</span><span>${sevBar(inc.severity)}${inc.severity}</span></div>
+      <div class="kv"><span>Статус</span><span><span class="badge badge-${inc.status}">${inc.status}</span></span></div>
+      <div class="kv"><span>Источник</span><span>${escapeHtml(inc.source_batch)}</span></div>
+      <div class="kv"><span>Алертов привязано</span><span>${inc.alert_count}</span></div>
+      <div class="kv"><span>Окно</span><span>${(inc.window_start||"").slice(0,19).replace("T"," ")} — ${(inc.window_end||"").slice(0,19).replace("T"," ")}</span></div>
+      <div class="kv"><span>Пользователи</span><span>${(ent.users||[]).join(", ") || "—"}</span></div>
+      <div class="kv"><span>IP (src)</span><span>${(ent.src_ips||[]).join(", ") || "—"}</span></div>
+      <div class="kv"><span>Процессы</span><span>${(ent.processes||[]).join(", ") || "—"}</span></div>
+      <div class="status-select-row">
+        <select id="incident-status-select-${inc.incident_id}">
+          <option value="new" ${inc.status==="new"?"selected":""}>new</option>
+          <option value="investigating" ${inc.status==="investigating"?"selected":""}>investigating</option>
+          <option value="closed" ${inc.status==="closed"?"selected":""}>closed</option>
+        </select>
+        <button type="button" onclick="updateIncidentStatus('${inc.incident_id}')">Сохранить статус</button>
+      </div>
+
+      <p class="panel-title" style="margin-top:14px;">Расследование агента</p>
+      ${inv ? `
+        <div class="kv"><span>Статус джобы</span><span><span class="badge badge-${inv.status}">${inv.status}</span></span></div>
+        <div class="kv"><span>Вердикт</span><span>${verdictBadge(inv.verdict)}</span></div>
+        ${inv.confidence != null ? `<div class="kv"><span>Confidence</span><span>${Math.round(inv.confidence*100)}%</span></div>` : ""}
+        ${inv.rationale ? `<p class="muted" style="margin:6px 0;">${escapeHtml(inv.rationale)}</p>` : ""}
+        ${inv.error ? `<p class="error-state">${escapeHtml(inv.error)}</p>` : ""}
+      ` : `<p class="muted">Расследование ещё не поставлено в очередь.</p>`}
+      <!-- На Этапе 4 run_pending - заглушка (queued -> done, verdict всегда needs-review, без
+           анализа) - см. app/incidents.py. Настоящий вердикт агента (Этап 5) отрисуется тут же,
+           без изменений в разметке. -->
+
+      <p class="panel-title" style="margin-top:14px;">Алерты в инциденте (${(inc.member_alerts||[]).length})</p>
+      <div class="ctx-table-scroll"><table class="ctx-table"><tbody>${memberRows || '<tr><td class="muted">нет</td></tr>'}</tbody></table></div>
+
+      <p class="panel-title" style="margin-top:14px;">Сэмпл событий (${(inc.sample_events||[]).length})</p>
+      <pre class="json-block">${escapeHtml(JSON.stringify(inc.sample_events, null, 2))}</pre>
+
+      <p class="panel-title" style="margin-top:14px;">
+        <span class="toggle-link" id="incident-context-toggle" onclick="toggleIncidentContext('${inc.incident_id}')">+ Контекст расследования (правило, связанные события, история) &#9662;</span>
+      </p>
+      <div id="incident-context-box" style="display:none;"></div>
+    `;
+  } catch (e) {
+    content.innerHTML = `<p class="error-state">Ошибка: ${e.message}</p>`;
+  } finally {
+    content.style.opacity = "1";
+  }
+  requestAnimationFrame(() => window.scrollTo(0, scrollY));
+}
+
+async function updateIncidentStatus(id) {
+  const status = document.getElementById("incident-status-select-" + id).value;
+  try {
+    await api("/incidents/" + id + "/status", { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify({status}) });
+    await loadIncidents();
+    await selectIncident(id);
   } catch (e) {
     alert("Не удалось обновить статус: " + e.message);
   }
+}
+
+// Контекст (GET /incidents/{id}/context) тяжелее самой карточки (тянет YAML/SQL member-правил +
+// связанные события) - подгружается по клику, не вместе с selectIncident.
+function toggleIncidentContext(id) {
+  const box = document.getElementById("incident-context-box");
+  const toggle = document.getElementById("incident-context-toggle");
+  const show = box.style.display === "none";
+  box.style.display = show ? "block" : "none";
+  toggle.textContent = show ? "Свернуть ▴" : "+ Контекст расследования (правило, связанные события, история) ▾";
+  if (show && incidentContextLoadedFor !== id) {
+    incidentContextLoadedFor = id;
+    loadIncidentContext(id);
+  }
+}
+
+async function loadIncidentContext(id) {
+  const box = document.getElementById("incident-context-box");
+  box.innerHTML = '<p class="muted">Загрузка контекста…</p>';
+  try {
+    const ctx = await api("/incidents/" + id + "/context");
+    box.innerHTML = renderIncidentContext(ctx);
+  } catch (e) {
+    box.innerHTML = `<p class="error-state">Ошибка: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+// Деградация /incidents/{id}/context (правило удалено / events вычищены ретеншном) отражается
+// как есть - "не найдено"/"нет", без 5xx (см. app/main.py:get_incident_context).
+function renderIncidentContext(ctx) {
+  const parts = [];
+  if (ctx.note) parts.push(`<p class="muted" style="color:var(--med);">${escapeHtml(ctx.note)}</p>`);
+
+  const cr = ctx.correlation_rule;
+  parts.push('<p class="panel-title">Correlation-правило</p>');
+  if (cr) {
+    parts.push(`
+      <div class="kv"><span>Название</span><span>${escapeHtml(cr.title || "")}</span></div>
+      <div class="kv"><span>Тип</span><span>${escapeHtml(cr.type || "")}</span></div>
+      <div class="kv"><span>group-by</span><span>${escapeHtml((cr.group_by||[]).join(", ")) || "—"}</span></div>
+      <div class="kv"><span>timespan</span><span>${escapeHtml(cr.timespan || "")}</span></div>
+      ${cr.condition ? `<div class="kv"><span>condition</span><span>${escapeHtml(JSON.stringify(cr.condition))}</span></div>` : ""}
+    `);
+  } else {
+    parts.push('<p class="muted">не найдено (правило удалено или сменило рулсет)</p>');
+  }
+
+  const members = ctx.member_rules || [];
+  parts.push(`<p class="panel-title" style="margin-top:10px;">Правила-участники (${members.length})</p>`);
+  parts.push(members.length
+    ? members.map(r => `<div class="kv"><span>${escapeHtml(r.title)}</span><span>${escapeHtml(r.level || "")}</span></div>`).join("")
+    : '<p class="muted">нет</p>');
+
+  const rel = ctx.related_events || {};
+  const relEvents = rel.events || [];
+  parts.push(`<p class="panel-title" style="margin-top:10px;">Связанные события по сущности (${rel.total ?? relEvents.length})</p>`);
+  if (rel.query) parts.push(`<p class="muted" style="font-size:11px;">${escapeHtml(rel.query)}</p>`);
+  if (relEvents.length) {
+    // table-layout:fixed - без него авто-раскладка таблицы растит колонку под самую длинную
+    // строку matched_rules (событие может матчить сразу десяток правил из разных рулсетов) и
+    // выталкивает всю панель за пределы её ширины (горизонтальный скролл всей страницы вместо
+    // переноса текста внутри ячейки) - тот же класс проблемы, что и переполнение панели
+    // группировки Событий (см. .group-panel-wrap выше), только для detail-панели.
+    parts.push('<div class="ctx-table-scroll"><table class="ctx-table"><tbody>' + relEvents.slice(0, 20).map(e => `
+      <tr><td class="ctx-col-time">${escapeHtml((e.event_time||"").slice(0,19).replace("T"," "))}</td><td class="ctx-col-host">${escapeHtml(e.host||"")}</td><td class="ctx-wrap">${(e.matched_rules||[]).length ? escapeHtml(e.matched_rules.join(", ")) : '<span class="muted">—</span>'}</td></tr>
+    `).join("") + "</tbody></table></div>");
+    if (relEvents.length > 20) parts.push(`<p class="muted" style="font-size:11px;">показаны первые 20 из ${rel.total}</p>`);
+  } else {
+    parts.push('<p class="muted">нет (events вычищены ретеншном или сущность не заполнена)</p>');
+  }
+
+  const hist = (ctx.entity_history || {}).alerts || [];
+  parts.push(`<p class="panel-title" style="margin-top:10px;">История алертов источника (${hist.length})</p>`);
+  parts.push(hist.length
+    ? '<div class="ctx-table-scroll"><table class="ctx-table"><tbody>' + hist.slice(0, 20).map(a => `
+        <tr class="data-row" onclick="jumpToAlert('${a.alert_id}')">
+          <td class="ctx-col-sev">${sevBar(a.rule_level)}</td><td class="ctx-wrap">${escapeHtml(a.rule_title)}</td><td class="ctx-col-host">${escapeHtml(a.host)}</td><td class="ctx-col-time">${escapeHtml((a.created_at||"").slice(0,19).replace("T"," "))}</td>
+        </tr>
+      `).join("") + "</tbody></table></div>"
+    : '<p class="muted">нет</p>');
+
+  return parts.join("");
 }
 
 // ---------- Events ----------
@@ -3041,7 +3463,9 @@ level: medium
 function openRuleEditor(mode, ctx) {
   ruleEditorMode = mode;
   document.getElementById("rule-editor-title").textContent = mode === "edit" ? "Редактирование правила" : "Новое правило";
-  document.getElementById("rule-editor-target-row").style.display = mode === "create" ? "flex" : "none";
+  // "grid", не "block" - раскладка строки задана сеткой (см. #rule-editor-target-row в CSS),
+  // инлайновый block её бы отключил.
+  document.getElementById("rule-editor-target-row").style.display = mode === "create" ? "grid" : "none";
   const staticTarget = document.getElementById("rule-editor-static-target");
   let refRuleset;
   if (mode === "edit") {
@@ -3073,12 +3497,80 @@ function openRuleEditor(mode, ctx) {
   } else {
     document.getElementById("rule-editor-ref-yaml").innerHTML = "";
   }
+  document.getElementById("rule-editor-vl-search").value = "";
+  loadRuleEditorValueLists();
 }
 
 function closeRuleEditor() {
   document.getElementById("sigma-editor-panel").style.display = "none";
   document.getElementById("sigma-browse-panel").style.display = "block";
   document.getElementById("rule-editor-ref-toolbar").style.display = "none";
+}
+
+// Мини-браузер списков значений внутри редактора правил (см. .editor-vl-pane в разметке, pic.PNG
+// в корне проекта - зелёная схема) - поиск/просмотр %name%|expand, не отрываясь от написания
+// правила. Список списков (имя/описание/value_count) грузится ОДИН раз при открытии редактора
+// (см. openRuleEditor) - их мало, фильтр по имени/описанию (регистронезависимо) - целиком в JS,
+// без похода на сервер на каждый символ. Схема: фильтр сверху, список подходящих списков слева,
+// значения ВЫБРАННОГО (кликом, единственного, не "развёрнутого" - обычная селекция строки, как
+// .ref-rule-row.selected у референс-списка правил справа) списка через запятую - в отдельной
+// pre-панели справа (#rule-editor-vl-values), а не инлайном под строкой списка. Сами values -
+// лениво, по клику (GET /value-lists/{name}), с кэшем на сессию редактора
+// (ruleEditorVlValuesCache), чтобы повторный клик не бил в сеть заново.
+let ruleEditorValueLists = [];
+let ruleEditorVlValuesCache = {};
+let ruleEditorVlSelected = null;
+
+async function loadRuleEditorValueLists() {
+  ruleEditorVlValuesCache = {};
+  ruleEditorVlSelected = null;
+  document.getElementById("rule-editor-vl-values").textContent = "Выбери список слева, чтобы увидеть значения.";
+  try {
+    ruleEditorValueLists = await api("/value-lists");
+  } catch (e) {
+    ruleEditorValueLists = [];
+  }
+  renderRuleEditorValueLists();
+}
+
+function renderRuleEditorValueLists() {
+  const box = document.getElementById("rule-editor-vl-list");
+  const needle = document.getElementById("rule-editor-vl-search").value.trim().toLowerCase();
+  const rows = needle
+    ? ruleEditorValueLists.filter(r =>
+        r.name.toLowerCase().includes(needle) || (r.description || "").toLowerCase().includes(needle))
+    : ruleEditorValueLists;
+  if (!rows.length) {
+    box.innerHTML = `<p class="muted" style="padding:8px; font-size:12px;">${
+      ruleEditorValueLists.length ? "Ничего не найдено" : "Списков пока нет (вкладка «Списки»)"
+    }</p>`;
+    return;
+  }
+  box.innerHTML = rows.map(r => `
+    <div class="ref-rule-row${r.name === ruleEditorVlSelected ? " selected" : ""}" onclick="selectRuleEditorVlItem('${escapeAttr(r.name)}')" title="${attr(r.description || "")}">
+      <span style="flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">%${escapeHtml(r.name)}%</span>
+      <span class="muted" style="font-size:11px; flex:0 0 auto;">${r.value_count}</span>
+    </div>
+  `).join("");
+}
+
+async function selectRuleEditorVlItem(name) {
+  ruleEditorVlSelected = name;
+  renderRuleEditorValueLists();
+  const box = document.getElementById("rule-editor-vl-values");
+  if (ruleEditorVlValuesCache[name]) {
+    box.textContent = ruleEditorVlValuesCache[name];
+    return;
+  }
+  box.textContent = "Загрузка...";
+  try {
+    const d = await api("/value-lists/" + name);
+    const text = (d.values || []).join(", ") || "(пусто)";
+    ruleEditorVlValuesCache[name] = text;
+    if (ruleEditorVlSelected === name) box.textContent = text;
+  } catch (e) {
+    if (ruleEditorVlSelected === name) box.textContent = "Ошибка: " + e.message;
+  }
 }
 
 // Референс-панель редактора (справа) - список правил выбранного рулсета сверху, их
@@ -3468,6 +3960,7 @@ async function selectKbTechnique(tid) {
 
 const PANEL_RESIZE_CONFIG = {
   "alert-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "alerts-content-grid", gridVar: "--alert-detail-w" },
+  "incident-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "incidents-content-grid", gridVar: "--alert-detail-w" },
   "kb-tech-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "kb-mitre-grid", gridVar: "--alert-detail-w" },
   "event-detail": { defaultWidth: 380, minWidth: 300, anchor: "end", gridEl: "events-grid", gridVar: "--event-detail-w" },
   "group-panel-wrap": { defaultWidth: 280, minWidth: 200, maxWidth: 640, anchor: "start", gridEl: "events-grid", gridVar: "--group-col-w" },
@@ -3475,10 +3968,10 @@ const PANEL_RESIZE_CONFIG = {
   // её как inline style конкретного грид-элемента), поэтому одно и то же имя у #sigma-content-grid
   // и #alerts-content-grid работает независимо, новый CSS-класс не нужен (см. .content-grid).
   "rule-detail": { defaultWidth: 700, minWidth: 300, maxWidth: 900, anchor: "end", gridEl: "sigma-content-grid", gridVar: "--alert-detail-w" },
-  // gridEl - #main-panel (общий предок и .editor-grid, и вынесенного в строку "Источник:"
-  // #rule-editor-ref-toolbar), а НЕ #editor-grid - иначе CSS-переменная не дотягивалась бы до
-  // toolbar, живущего выше editor-grid по DOM (см. комментарий у .editor-grid).
-  "editor-reference-pane": { defaultWidth: 600, minWidth: 320, maxWidth: 780, anchor: "end", gridEl: "main-panel", gridVar: "--editor-ref-w" },
+  // gridEl - сам #editor-grid: тулбар с выбором рулсета (#rule-editor-ref-toolbar) теперь тоже
+  // внутри этого грида (grid-area: reftoolbar), поэтому общий предок повыше (#main-panel) под
+  // CSS-переменную больше не нужен - ширину правой колонки задаёт одна переменная на гриде.
+  "editor-reference-pane": { defaultWidth: 600, minWidth: 320, maxWidth: 780, anchor: "end", gridEl: "editor-grid", gridVar: "--editor-ref-w" },
   "vl-detail": { defaultWidth: 440, minWidth: 320, maxWidth: 760, anchor: "end", gridEl: "vl-content-grid", gridVar: "--alert-detail-w" },
 };
 
@@ -3554,6 +4047,7 @@ ruleEditorTextarea.addEventListener("keydown", e => {
 });
 
 makeResizable("alert-detail-handle", "alert-detail");
+makeResizable("incident-detail-handle", "incident-detail");
 makeResizable("event-detail-handle", "event-detail");
 makeResizable("group-panel-handle", "group-panel-wrap");
 makeResizable("rule-detail-handle", "rule-detail");
