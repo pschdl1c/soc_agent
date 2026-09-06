@@ -73,8 +73,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _normalize_values(values: Any) -> list[str]:
-    """Список непустых строк: trim, выкидываем пустые, дедуп с сохранением порядка."""
+def _normalize_values(values: Any, *, name: str = "") -> list[str]:
+    """Список непустых строк: trim, выкидываем пустые, дедуп с сохранением порядка.
+
+    ПУСТОЙ результат - ошибка, а не валидный список: плейсхолдер %имя% на пустом списке
+    роняет компиляцию ЛЮБОГО правила, которое на него ссылается (_resolve_placeholder_values),
+    то есть создать такой список было можно, а пользоваться им - нет. Отказ на записи вместо
+    отказа при компиляции чужого правила."""
     if not isinstance(values, list):
         raise ValueListError("'values' должен быть списком строк")
     out: list[str] = []
@@ -87,6 +92,12 @@ def _normalize_values(values: Any) -> list[str]:
         out.append(s)
     if len(out) > _MAX_VALUES:
         raise ValueListError(f"слишком много значений в списке (> {_MAX_VALUES})")
+    if not out:
+        where = f" '{name}'" if name else ""
+        raise ValueListError(
+            f"список{where} пуст - добавь хотя бы одно значение: правило с плейсхолдером "
+            "%имя% на пустой список не скомпилируется"
+        )
     return out
 
 
@@ -159,7 +170,7 @@ def create_list(name: str, description: str, values: list[str]) -> dict[str, Any
             "Имя списка: 1-64 символа A-Z a-z 0-9 _ (оно же имя плейсхолдера %имя%)"
         )
     description = (description or "").strip()[:_MAX_DESCRIPTION]
-    values = _normalize_values(values)
+    values = _normalize_values(values, name=name)
     with _lock:
         if _list_path(name).exists():
             raise ValueListError(f"Список '{name}' уже существует")
@@ -169,7 +180,7 @@ def create_list(name: str, description: str, values: list[str]) -> dict[str, Any
 def update_list(name: str, description: str, values: list[str]) -> dict[str, Any] | None:
     """Имя неизменяемо (переименование порвало бы ссылки в правилах). None - списка нет."""
     description = (description or "").strip()[:_MAX_DESCRIPTION]
-    values = _normalize_values(values)
+    values = _normalize_values(values, name=name)
     with _lock:
         raw = _load_raw(name)
         if raw is None:
@@ -396,7 +407,9 @@ def parse_list_file(text: str) -> list[ParsedList]:
             raise ValueListError(
                 f"Недопустимое имя списка '{name}' - нужно [A-Za-z0-9_] длиной 1..64"
             )
-        vals = _normalize_values(list(values) if isinstance(values, (list, tuple)) else [values])
+        vals = _normalize_values(
+            list(values) if isinstance(values, (list, tuple)) else [values], name=str(name)
+        )
         if name in collected:
             prev = collected[name]
             merged = prev.values + [v for v in vals if v not in prev.values]

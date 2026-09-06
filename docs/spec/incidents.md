@@ -50,12 +50,22 @@ correlation:
 пишет `Alert` — тот и станет member-алертом финального инцидента B (см. ниже, цепочка по
 `event_id` резолвит такую ссылку через `alerts.dedup_key`, без похода в `events`).
 
-## Идентичность — фиксированный бакет по `timespan`
+## Идентичность — источник + фиксированный бакет по `timespan`
 
 ```
 window_bucket = anchor_time, округлённое ВНИЗ до кратности timespan (в секундах)
-dedup_key = sha256(f"{incident_type}:{':'.join(group_by_values)}:{window_bucket}")[:16]
+dedup_key = sha256(f"{source_batch}:{incident_type}:{':'.join(group_by_values)}:{window_bucket}")[:16]
 ```
+
+`source_batch` в ключе обязателен: инцидент живёт в рамках ОДНОГО источника — счёт корреляции
+сужен по `source_batch` (`store.fetch_correlation_hits`), колонка `incidents.source_batch` одна,
+`DELETE /batches/{источник}` чистит инциденты по ней. Без источника в ключе два разных источника,
+увидевшие ту же сущность в том же бакете (обычный случай: один IP по двум серверам, у каждого
+свой форвардер), схлопывались в одну строку: `UPDATE` перезаписывал окно/`sample_events`/
+`entities` данными второго источника, метка `source_batch` оставалась от первого, member-алерты
+приезжали из обоих (`link_alerts_to_incident` фильтрует по ТЕКУЩЕМУ батчу, не по батчу
+инцидента), а `GET /incidents/{id}/context` собирал `related_events`/`entity_history` по
+источнику из колонки — то есть по тому, чьих сэмплов в карточке уже не было.
 
 - Повтор того же ключа в том же бакете → **UPDATE** строки инцидента (`store.upsert_incidents`):
   `severity = roll_up([старое, новое])`, `window_start = min`, `window_end = max`, обновляются
@@ -136,5 +146,5 @@ placeholder-обоснованием, без какого-либо анализ�
 |---|---|---|
 | GET | `/incidents` | Список. Фильтры `status`/`incident_type`/`source_batch`/`severity`/`time_from`/`time_to`, сортировка `sort_by` (`created_at`\|`updated_at`\|`alert_count`\|`status`\|`severity`)/`sort_dir`, `limit` (1..500)/`offset`. Ответ `{incidents, total, limit, offset}`; каждая строка несёт `investigation_status`. |
 | GET | `/incidents/{id}` | Карточка: строка инцидента + `member_alerts` + `investigation` + `mitre` (обогащение тегов через `app/kb.py`, объединение правила и member-алертов). |
-| GET | `/incidents/{id}/context` | Полный контекст: `correlation_rule` (структурные поля), `member_rules` (+ `yaml_text`/SQL), `sample_events`, `related_events` (события по сущности через `store.list_events` + `compile_filter_query`), `entity_history` (последние алерты источника). Удалённое правило/вычищенные события → пустые секции + `note`, не 5xx. |
+| GET | `/incidents/{id}/context` | Полный контекст: `correlation_rule` (структурные поля), `member_rules` (+ `yaml_text`/SQL), `sample_events`, `related_events` (события по сущности через `store.list_events` + `compile_filter_query`), `entity_history` (алерты, где встречаются значения `group_key` — `store.list_alerts_by_entity`; `scope: "entity"`, либо `scope: "source"` + `note`, если `group_key` пуст). Удалённое правило/вычищенные события → пустые секции + `note`, не 5xx. |
 | PATCH | `/incidents/{id}/status` | `new → investigating → closed`. |

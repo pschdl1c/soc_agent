@@ -25,10 +25,6 @@ import threading
 from app.config import KB_DB_PATH
 
 
-class KbError(Exception):
-    """Ошибка работы с базой знаний (для трансляции в HTTP в app/main.py)."""
-
-
 _lock = threading.Lock()
 _kb_path: str = KB_DB_PATH
 _conn: sqlite3.Connection | None = None
@@ -102,18 +98,6 @@ def meta() -> dict:
     out: dict = {r["key"]: r["value"] for r in rows}
     out["available"] = True
     return out
-
-
-def list_tactics() -> list[dict]:
-    with _lock:
-        conn = _ensure_conn_locked()
-        if conn is None:
-            return []
-        rows = conn.execute(
-            "SELECT tactic_id, shortname, name, description, url, sort_order "
-            "FROM mitre_tactic ORDER BY sort_order, tactic_id"
-        ).fetchall()
-    return [dict(r) for r in rows]
 
 
 def matrix() -> dict:

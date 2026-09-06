@@ -46,7 +46,8 @@ SQL-строка вместо dict, что валит компиляцию Zirco
 
 | Класс | Смысл | HTTP |
 |---|---|---|
-| `CatalogError` | рулсет/правило не найдено, невалиден путь | 400 / 404 |
+| `CatalogNotFound` (подкласс `CatalogError`) | запрошенного рулсета/правила нет | 404 |
+| `CatalogError` | объект есть, но действие недопустимо: встроенный рулсет как цель записи/удаления/добавления в main, невалидный путь или id, взаимоисключающие параметры | 400 |
 | `RuleValidationError` | пользовательский YAML не прошёл валидацию/компиляцию | 400 |
 
 ## Кэш чтения
@@ -64,8 +65,11 @@ SQL-строка вместо dict, что валит компиляцию Zirco
 
 ### `_custom_ruleset_dir(ruleset_path) -> Path`
 
-Требует префикс `custom_rulesets/`, id по `_SAFE_ID_RE = ^[A-Za-z0-9_-]{1,128}$`, существующий
-`meta.json`. Иначе `CatalogError`.
+Требует префикс `CUSTOM_PREFIX = "custom_rulesets/"`, id по `_SAFE_ID_RE = ^[A-Za-z0-9_-]{1,128}$`,
+существующий `meta.json`. Нет префикса / кривой id → `CatalogError`; нет такого рулсета →
+`CatalogNotFound`. Путь с префиксом `CUSTOM_PREFIX` разбирается ТОЛЬКО как кастомный (в т.ч.
+несуществующий) — иначе он проваливался бы в builtin-ветку и получал сообщение про
+«недопустимый путь»/«встроенные рулсеты» вместо честного «не найден».
 
 ### `_find_rule_file(target_dir, rule_id) -> Path | None`
 
@@ -117,12 +121,23 @@ base-ссылки) молча пропадает целиком (Этап A до
 }
 ```
 
+`id` — `id:` из YAML, а при его отсутствии **имя файла** (`<rule_id>.sigmacorr`). Фолбэк
+обязателен: Sigma не требует `id:`, в файл он не дописывается, а по `id` correlation-запись
+сопоставляется с `.manifest.json` в `correlation._active_correlation_rules` для «основного
+рулсета» — с `id=None` правило молча выпадало из main (сохранено, видно в UI, никогда не
+срабатывает).
+
 `incident` (Этап 4) — нормализованный блок `correlation.incident` (`_parse_incident_spec`);
 `None`, если блока нет. Помечает правило как инцидентное (см. `docs/spec/incidents.md`).
 `_compile_correlation_doc` кладёт в `.manifest.json` булев бейдж `incident: true` (без slug —
 его читает `load_correlation_rules` из raw YAML).
 
 `_validate_correlation_doc` на сохранении дополнительно проверяет:
+- разрешимость КАЖДОЙ ссылки `correlation.rules` по `ref_index` (см. `build_ref_index`):
+  неизвестное имя → `RuleValidationError` с перечислением доступных имён рулсета. Ссылки
+  резолвятся только внутри своего рулсета; при загрузке пака в индекс дополнительно входят
+  документы самого файла. Без этой проверки правило сохранялось успешно и молча выпадало из
+  `load_correlation_rules` — корреляция никогда не срабатывала;
 - блок `correlation.incident`, если задан: `type` обязателен и slug `^[a-z0-9][a-z0-9_]{0,63}$`,
   `severity` из набора `Severity`, `title` непуст;
 - `timespan` не длиннее срока хранения событий: `parse_timespan(timespan) >
@@ -134,7 +149,16 @@ base-ссылки) молча пропадает целиком (Этап A до
 SQL); `base_rule_refs` — параллельный список с `kind`, нужен `app/detection/correlation.py`
 (`active_hit_spec` различает, кому писать `rule_hits`-попадание: `store_events` — для "base",
 сама сработавшая корреляция — для "correlation", см. `docs/spec/correlation.md`). Правило с
-хотя бы одной неразрешённой ссылкой `correlation.rules` пропускается целиком.
+хотя бы одной неразрешённой ссылкой `correlation.rules` пропускается целиком — защитно, для
+файлов, отредактированных мимо API (через API такая ссылка отклоняется на сохранении).
+
+### `build_ref_index(target_dir, *, exclude_filename=None) -> dict[str, dict[str, str]]`
+
+Индекс Sigma `name`/`id` → `{"title", "kind"}` по всем файлам одной директории рулсета:
+`*.yml`/`*.yaml` → `kind="base"`, `*.sigmacorr` (только документы с блоком `correlation`) →
+`kind="correlation"`. Файл `exclude_filename` пропускается (старая версия редактируемого
+правила). Один и тот же индекс используют и рантайм-резолв (`load_correlation_rules`), и
+валидация на сохранении — иначе они разъехались бы («сохранилось, но не работает»).
 
 **Кэш** — по сигнатуре директории (`_correlation_dir_signature`: число файлов + максимальный
 `mtime` среди `*.yml`/`*.yaml`/`*.sigmacorr`), не по одному файлу как `_load_json_rules` —
@@ -152,8 +176,11 @@ SQL); `base_rule_refs` — параллельный список с `kind`, ну
 
 Строка рулсета: `{path, category, name, rule_count, size_bytes, deletable}`.
 
-`_resolve_target_ruleset(ruleset, new_ruleset_name)` — ровно один из двух; builtin как
-existing-цель отклоняется.
+`_resolve_existing_target(ruleset, new_ruleset_name) -> tuple[str|None, Path|None]` — ровно
+один из двух; builtin как existing-цель отклоняется. Ничего не создаёт: для существующего
+рулсета `(ruleset_path, директория)`, для нового `(None, None)`. И `save_custom_rule`, и
+`save_ruleset_yaml` создают новый рулсет только после успешной компиляции — иначе ошибка в
+правиле оставляла бы в каталоге пустой рулсет с `rule_count: 0`.
 
 ## Компиляция
 
@@ -162,22 +189,26 @@ existing-цель отклоняется.
 Валидация + компиляция одного правила без записи на диск.
 
 1. Пустой YAML → `RuleValidationError`.
-2. Структурная пре-проверка `_looks_like_sigma_rule` (title+logsource+detection ЛИБО
-   title+correlation) → иначе `RuleValidationError`.
-3. Если первый документ — correlation (`_looks_like_correlation_doc`): `_validate_correlation_doc`
+2. Разбор YAML (`yaml.safe_load_all`) — ОДИН раз и до всех проверок; `yaml.YAMLError` →
+   `RuleValidationError("Некорректный YAML: ...")` с позицией ошибки от парсера.
+3. Структурная пре-проверка разобранных документов `_docs_look_like_sigma_rule`
+   (title+logsource+detection ЛИБО title+correlation) → иначе `RuleValidationError`.
+4. Если первый документ — correlation (`_looks_like_correlation_doc`): `_validate_correlation_doc`
+   (с `ref_index=build_ref_index(target_dir, exclude_filename=...)`, если `target_dir` задан)
    + возврат `_compile_correlation_doc` (без обращения к pySigma).
-4. Иначе: `value_lists.expand_placeholders(yaml_text)`; `ValueListError` → `RuleValidationError`.
-5. `target_dir is None` → компиляция во временном одиночном файле; берётся `handler.rulesets[0]`.
-6. `target_dir` задан → соседние `*.yml`/`*.yaml` (кроме `exclude_filename`) с раскрытыми
+5. Иначе: `value_lists.expand_placeholders(yaml_text)`; `ValueListError` → `RuleValidationError`.
+6. `target_dir is None` → компиляция во временном одиночном файле; берётся `handler.rulesets[0]`.
+7. `target_dir` задан → соседние `*.yml`/`*.yaml` (кроме `exclude_filename`) с раскрытыми
    плейсхолдерами копируются в scratch-каталог вместе с новым правилом; компиляция каталога;
    среди результатов выбирается запись с совпадающим `title`. Более одного кандидата →
    `RuleValidationError` (коллизия title внутри рулсета).
-7. Пустой `handler.rulesets` → `RuleValidationError`.
+8. Пустой `handler.rulesets` → `RuleValidationError`.
 
-### `compile_ruleset_yaml(yaml_text) -> list[dict]`
+### `compile_ruleset_yaml(yaml_text, *, target_dir=None) -> list[dict]`
 
 Компиляция всех документов multi-document YAML. Correlation-документы валидируются отдельно
-(`_validate_correlation_doc` + `_compile_correlation_doc`), обычные — разворачиваются
+(`_validate_correlation_doc` с `ref_index` = правила `target_dir` (если задан) плюс документы
+самого файла + `_compile_correlation_doc`), обычные — разворачиваются
 (`expand_placeholders`) и компилируются одним файлом **без** correlation-документов. Пустой
 результат обоих видов → `RuleValidationError`. Возврат — `compiled_plain + corr_results`.
 
@@ -185,7 +216,7 @@ existing-цель отклоняется.
 
 ### `save_custom_rule(yaml_text, ruleset=None, new_ruleset_name=None) -> tuple[dict, str]`
 
-`_resolve_target_ruleset` → `compile_custom_rule(..., target_dir=...)`. `rule_id` — валидный
+`_resolve_existing_target` → `compile_custom_rule(..., target_dir=...)`. `rule_id` — валидный
 Sigma `id:` (`_SAFE_ID_RE`) или новый `uuid4().hex`. Явный `id`, занятый в любом рулсете
 (`_find_rule_id_owner`) → `RuleValidationError`. Запись `<rule_id>{.yml|.sigmacorr}`; запись в
 `.manifest.json` под `_manifest_lock`. Возврат `(скомпилированное правило, ruleset_path)`.
@@ -197,11 +228,17 @@ Sigma `id:` (`_SAFE_ID_RE`) или новый `uuid4().hex`. Явный `id`, з
 - `_peel_value_list_docs` извлекает документы-определения списков (строго — `is_list_document`),
   импортирует их `mode="replace"` первыми.
 - Если после извлечения правил не осталось → `(None, None, [], imported)`.
-- `compile_ruleset_yaml` + сопоставление исходных YAML-документов с правилами по `title`
-  (`_match_yaml_by_title`; дубль title — документ исключается).
+- `_resolve_existing_target` — цель проверяется ДО компиляции, но новый рулсет пока не создаётся.
+- `compile_ruleset_yaml(..., target_dir=<существующий рулсет|None>)` + сопоставление исходных
+  YAML-документов с правилами по `title` (`_match_yaml_by_title`; дубль title — документ
+  исключается).
 - Правило с занятым явным `id` (в этом рулсете, в другом рулсете или дубль в файле) не
   добавляется; запись — в `collisions` (`{title, id, conflict_ruleset, conflict_title}`).
   Остальные правила сохраняются (частичный успех).
+- Если не прошло НИ ОДНО правило: на диск не пишется ничего — новый рулсет не создаётся
+  (`(None, None, collisions, imported)`), у существующего манифест не переписывается.
+- Иначе (только теперь) создаётся новый рулсет, если целью был `new_ruleset_name`, пишутся
+  файлы правил и манифест.
 
 ### `update_custom_rule(ruleset_path, rule_id, yaml_text) -> dict`
 
@@ -211,7 +248,7 @@ Sigma `id:` (`_SAFE_ID_RE`) или новый `uuid4().hex`. Явный `id`, з
 
 ### `delete_custom_rule(ruleset_path, rule_id) -> None`
 
-Удаляет запись из `.manifest.json` и файл правила. Отсутствие правила → `CatalogError`.
+Удаляет запись из `.manifest.json` и файл правила. Отсутствие правила → `CatalogNotFound`.
 
 ## Списки значений ↔ правила
 

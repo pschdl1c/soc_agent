@@ -65,3 +65,13 @@ def test_matched_rules_chips_are_escaped(index_html: str):
     элемент экранируется отдельно (title кастомного правила пишет пользователь)."""
     assert '<span class="tech-tag">${escapeHtml(r)}</span>' in index_html
     assert '<span class="tech-tag">${r}</span>' not in index_html
+
+
+def test_group_key_is_escaped_everywhere(index_html: str):
+    """group_key инцидента (значение ключа группировки - имя хоста/пользователя/путь из лога,
+    т.е. текст атакующего) показывается в списке инцидентов и в шапке карточки - обе
+    подстановки обязаны идти через escapeHtml/attr."""
+    assert "${groupKeyText(i.group_key)}" not in index_html
+    assert "${groupKeyText(inc.group_key)}" not in index_html
+    assert "${escapeHtml(groupKeyText(i.group_key))" in index_html
+    assert "${escapeHtml(groupKeyText(inc.group_key))" in index_html

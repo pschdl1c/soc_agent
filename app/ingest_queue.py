@@ -22,12 +22,15 @@
 """
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
 from typing import Any, Callable
 
 from app import config
+
+logger = logging.getLogger(__name__)
 
 # Дефолты флаш-политики (переопределяются через SIEM_INGEST_BATCH_SIZE/SIEM_INGEST_FLUSH_INTERVAL
 # в окружении или .env, см. app/config.py).
@@ -99,7 +102,9 @@ class IngestWorker:
         self._running = True
         self._thread = threading.Thread(target=self._run, name="ingest-worker", daemon=True)
         self._thread.start()
-        print(f"[ingest] воркер запущен (batch_size={self._batch_size}, flush_interval={self._flush_interval}s)")
+        logger.info(
+            "воркер запущен (batch_size=%s, flush_interval=%ss)", self._batch_size, self._flush_interval
+        )
 
     def stop(self, timeout: float = 10.0) -> None:
         """Останавливает воркер и даёт ему дренировать остаток очереди."""
@@ -109,7 +114,7 @@ class IngestWorker:
         self._queue.put(_SENTINEL)
         if self._thread is not None:
             self._thread.join(timeout=timeout)
-        print("[ingest] воркер остановлен")
+        logger.info("воркер остановлен")
 
     def health(self) -> dict[str, Any]:
         """Проверка для /health: если фоновый поток умер (необработанное исключение внутри
@@ -219,7 +224,7 @@ class IngestWorker:
         try:
             fn()
         except Exception as exc:  # noqa: BLE001 - фоновый воркер не должен падать из-за периодической задачи
-            print(f"[ingest] ошибка периодической задачи {getattr(fn, '__name__', fn)}: {exc}")
+            logger.exception("ошибка периодической задачи %s: %s", getattr(fn, "__name__", fn), exc)
 
     def _flush(self, buffer: list[tuple[dict[str, Any], str]]) -> None:
         # ОДИН прогон движка на весь буфер, независимо от того, сколько разных source_label
@@ -228,4 +233,6 @@ class IngestWorker:
             self._process_fn(buffer)
         except Exception as exc:  # noqa: BLE001 - воркер не должен падать из-за одного битого батча
             sources = len({label for _, label in buffer})
-            print(f"[ingest] ошибка обработки батча ({len(buffer)} событий, {sources} источников): {exc}")
+            logger.exception(
+                "ошибка обработки батча (%s событий, %s источников): %s", len(buffer), sources, exc
+            )

@@ -95,6 +95,12 @@ CUSTOM_ROOT = BASE_DIR / "data" / "custom_rulesets"
 
 CUSTOM_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Префикс ruleset_path кастомного рулсета - "custom_rulesets/<id>". Один литерал на модуль:
+# по нему И только по нему решается, кастомный это путь или встроенный (в т.ч. когда рулсета с
+# таким id вообще нет - иначе несуществующий кастомный путь уходил бы в builtin-ветку и получал
+# сообщение про "недопустимый путь"/"встроенные рулсеты" вместо честного "не найден").
+CUSTOM_PREFIX = "custom_rulesets/"
+
 LEVEL_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -115,7 +121,20 @@ _SEVERITY_VALUES = {s.value for s in Severity}
 
 
 class CatalogError(Exception):
-    """Проблема с рулсетом/правилом на уровне каталога (не найден, невалиден, недопустимый путь) - main.py транслирует в HTTP 400/404."""
+    """Проблема с рулсетом/правилом на уровне каталога, из-за которой ДЕЙСТВИЕ невозможно, хотя
+    объект существует: встроенный рулсет как цель записи/удаления, недопустимый путь, взаимно
+    исключающие параметры. main.py транслирует в HTTP 400 (см. _catalog_http)."""
+
+
+class CatalogNotFound(CatalogError):
+    """Частный случай: запрошенного рулсета/правила просто НЕТ - main.py транслирует в 404.
+
+    Отдельный подкласс, потому что раньше оба случая были одним CatalogError и на всех ручках
+    каталога отдавались как 404: попытка добавить встроенный рулсет в основной или удалить его
+    отвечала «не найден» про существующий рулсет, а запрос к несуществующему кастомному пути -
+    наоборот, сообщением про встроенность. Наследование от CatalogError оставлено намеренно:
+    старые `except CatalogError` (напр. в main_ruleset.resolve_with_sources, где осиротевшая
+    ссылка просто пропускается) продолжают ловить оба вида."""
 
 
 class RuleValidationError(Exception):
@@ -137,7 +156,7 @@ def _load_json_rules(path: Path) -> list[dict[str, Any]]:
     try:
         mtime = path.stat().st_mtime
     except OSError as exc:
-        raise CatalogError(f"Рулсет не найден: {path.name} ({exc})")
+        raise CatalogNotFound(f"Рулсет не найден: {path.name} ({exc})")
     with _cache_lock:
         cached = _cache.get(abs_path)
         if cached and cached[0] == mtime:
@@ -196,16 +215,16 @@ def _safe_resolve(ruleset_path: str) -> Path:
 
 def _custom_ruleset_dir(ruleset_path: str) -> Path:
     """"custom_rulesets/<id>" -> резолвленный Path под CUSTOM_ROOT. Валидирует id и требует
-    существующий meta.json (иначе это не (валидный) кастомный рулсет) - CatalogError иначе."""
-    prefix = "custom_rulesets/"
-    if not ruleset_path.startswith(prefix):
+    существующий meta.json. Не кастомный путь/кривой id - CatalogError (действие недопустимо,
+    400), нет такого рулсета - CatalogNotFound (404)."""
+    if not ruleset_path.startswith(CUSTOM_PREFIX):
         raise CatalogError(f"Не кастомный рулсет: {ruleset_path}")
-    ruleset_id = ruleset_path[len(prefix):]
+    ruleset_id = ruleset_path[len(CUSTOM_PREFIX):]
     if not _SAFE_ID_RE.match(ruleset_id):
         raise CatalogError(f"Недопустимый id рулсета: {ruleset_path}")
     path = CUSTOM_ROOT / ruleset_id
     if not (path / "meta.json").is_file():
-        raise CatalogError(f"Рулсет не найден: {ruleset_path}")
+        raise CatalogNotFound(f"Рулсет не найден: {ruleset_path}")
     return path
 
 
@@ -239,13 +258,17 @@ def _find_rule_file(target_dir: Path, rule_id: str) -> Path | None:
 
 
 def load_rules(ruleset_path: str) -> list[dict[str, Any]]:
-    """Список правил рулсета по пути/id - тот же 'ruleset', что уже принимают /ingest/*."""
-    if _is_custom_ruleset(ruleset_path):
+    """Список правил рулсета по пути/id - тот же 'ruleset', что уже принимают /ingest/*.
+
+    Путь с префиксом custom_rulesets/ разбирается ТОЛЬКО как кастомный - даже если такого
+    рулсета нет: иначе несуществующий кастомный путь проваливался в ветку builtin и получал
+    "Недопустимый путь рулсета" (400) вместо честного "Рулсет не найден" (404)."""
+    if ruleset_path.startswith(CUSTOM_PREFIX):
         manifest_path = _custom_ruleset_dir(ruleset_path) / ".manifest.json"
         return _load_manifest(manifest_path)
     path = _safe_resolve(ruleset_path)
     if not path.is_file():
-        raise CatalogError(f"Рулсет не найден: {ruleset_path}")
+        raise CatalogNotFound(f"Рулсет не найден: {ruleset_path}")
     return _load_json_rules(path)
 
 
@@ -384,6 +407,44 @@ def load_correlation_rules(ruleset_path: str) -> list[dict[str, Any]]:
     return result
 
 
+def build_ref_index(
+    target_dir: Path, *, exclude_filename: str | None = None
+) -> dict[str, dict[str, str]]:
+    """Индекс Sigma 'name'/'id' -> {"title", "kind"} по ВСЕМ правилам ОДНОЙ директории рулсета:
+    *.yml/*.yaml дают kind="base", *{CORRELATION_EXT} - kind="correlation" (без второй
+    категории ссылка correlation -> correlation, т.е. цепочка, никогда бы не резолвилась).
+    Это ровно тот словарь, по которому резолвится correlation.rules - и в рантайме
+    (_load_correlation_rules_uncached), и при валидации на сохранении
+    (_validate_correlation_doc), поэтому он ОДИН на оба пути: разъехавшись, они дали бы
+    "сохранилось, но не работает".
+
+    exclude_filename - не учитывать конкретный файл (редактирование существующего правила:
+    его старая версия на диске не должна участвовать в резолве ссылок новой).
+
+    Ссылки резолвятся ТОЛЬКО внутри своего рулсета - межрулсетные correlation.rules не
+    поддержаны (см. _validate_correlation_doc)."""
+    ref_index: dict[str, dict[str, str]] = {}
+    sources = [(p, "base") for p in list(target_dir.glob("*.yml")) + list(target_dir.glob("*.yaml"))]
+    sources += [(p, "correlation") for p in target_dir.glob(f"*{CORRELATION_EXT}")]
+    for path, kind in sources:
+        if exclude_filename and path.name == exclude_filename:
+            continue
+        try:
+            docs = [d for d in yaml.safe_load_all(path.read_text(encoding="utf-8")) if isinstance(d, dict)]
+        except (OSError, yaml.YAMLError):
+            continue
+        for doc in docs:
+            title = doc.get("title")
+            if not title:
+                continue
+            if kind == "correlation" and not isinstance(doc.get("correlation"), dict):
+                continue
+            for key in ("name", "id"):
+                if doc.get(key):
+                    ref_index[str(doc[key])] = {"title": title, "kind": kind}
+    return ref_index
+
+
 def _load_correlation_rules_uncached(target_dir: Path) -> list[dict[str, Any]]:
     """Тело load_correlation_rules без кэша - см. его докстринг.
 
@@ -404,27 +465,12 @@ def _load_correlation_rules_uncached(target_dir: Path) -> list[dict[str, Any]]:
     correlation.py (active_hit_spec различает, куда писать hit: store_events - для "base",
     сама корреляция при срабатывании - для "correlation", см. insert_correlation_hits).
     Правило с хотя бы одной неразрешённой ссылкой пропускается защитно - каталог не должен
-    падать на кривом/неполном YAML (например пока сохраняется только часть файла)."""
-    ref_index: dict[str, dict[str, str]] = {}
+    падать на кривом/неполном YAML (например пока сохраняется только часть файла). На
+    СОХРАНЕНИИ такая ссылка теперь отклоняется громко (_validate_correlation_doc с ref_index),
+    так что тихий пропуск здесь остаётся только страховкой для правки файлов мимо API."""
+    ref_index = build_ref_index(target_dir)
 
-    for yml_path in list(target_dir.glob("*.yml")) + list(target_dir.glob("*.yaml")):
-        try:
-            text = yml_path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        try:
-            docs = [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
-        except yaml.YAMLError:
-            continue
-        for doc in docs:
-            title = doc.get("title")
-            if not title:
-                continue
-            for key in ("name", "id"):
-                if doc.get(key):
-                    ref_index[str(doc[key])] = {"title": title, "kind": "base"}
-
-    corr_docs: list[dict[str, Any]] = []
+    corr_docs: list[tuple[dict[str, Any], str]] = []
     for corr_path in target_dir.glob(f"*{CORRELATION_EXT}"):
         try:
             text = corr_path.read_text(encoding="utf-8")
@@ -436,13 +482,17 @@ def _load_correlation_rules_uncached(target_dir: Path) -> list[dict[str, Any]]:
             title = doc.get("title")
             if not title or not isinstance(corr, dict):
                 continue
-            for key in ("name", "id"):
-                if doc.get(key):
-                    ref_index[str(doc[key])] = {"title": title, "kind": "correlation"}
-            corr_docs.append(doc)
+            # Имя файла - это rule_id, под которым правило лежит в .manifest.json (см.
+            # save_custom_rule/_safe_rule_id): в САМОМ YAML поля 'id:' может не быть - Sigma
+            # его не требует, и мы его в файл не дописываем. Фолбэк обязателен: по id
+            # correlation-запись сопоставляется с манифестом в correlation._active_correlation_rules
+            # для "основного рулсета", и с id=None правило молча выпадало из main - сохранялось,
+            # показывалось в UI и никогда не срабатывало (ровно тот же класс тихого отказа, что
+            # и неразрешимая ссылка correlation.rules).
+            corr_docs.append((doc, corr_path.stem))
 
     results: list[dict[str, Any]] = []
-    for doc in corr_docs:
+    for doc, file_rule_id in corr_docs:
         corr = doc["correlation"]
         title = doc["title"]
         refs = corr.get("rules") or []
@@ -457,7 +507,7 @@ def _load_correlation_rules_uncached(target_dir: Path) -> list[dict[str, Any]]:
         if unresolved:
             continue
         results.append({
-            "id": doc.get("id"),
+            "id": doc.get("id") or file_rule_id,
             "title": title,
             "level": doc.get("level", "informational"),
             "description": doc.get("description", ""),
@@ -536,25 +586,36 @@ def create_custom_ruleset(name: str) -> str:
     return f"custom_rulesets/{ruleset_id}"
 
 
-def _resolve_target_ruleset(ruleset: str | None, new_ruleset_name: str | None) -> str:
-    """Общая валидация "существующий рулсет ИЛИ новый" для создания правила/загрузки рулсета -
-    ровно один из двух должен быть задан; builtin как existing-цель отклоняется (read-only)."""
+def _resolve_existing_target(
+    ruleset: str | None, new_ruleset_name: str | None
+) -> tuple[str | None, Path | None]:
+    """Проверка "существующий рулсет ИЛИ новый" (ровно один из двух; builtin как existing-цель
+    отклоняется), НИЧЕГО при этом не создающая: для существующего рулсета возвращает
+    (ruleset_path, директория), для нового - (None, None).
+
+    Создание нового рулсета откладывает вызывающий (save_custom_rule/save_ruleset_yaml) - до
+    момента, когда известно, что в него реально что-то ляжет. Иначе любая ошибка компиляции
+    оставляла бы в каталоге пустой рулсет с rule_count: 0."""
     ruleset = (ruleset or "").strip()
     new_ruleset_name = (new_ruleset_name or "").strip()
     if ruleset and new_ruleset_name:
         raise CatalogError("Укажи либо существующий рулсет, либо имя нового - не оба сразу")
     if new_ruleset_name:
-        return create_custom_ruleset(new_ruleset_name)
+        return None, None
     if not ruleset:
         raise CatalogError("Нужно выбрать существующий рулсет или указать имя нового")
-    if not _is_custom_ruleset(ruleset):
-        raise CatalogError("Правила можно добавлять только в свои (не встроенные) рулсеты")
-    return ruleset
+    if ruleset.startswith(CUSTOM_PREFIX):
+        return ruleset, _custom_ruleset_dir(ruleset)
+    raise CatalogError(
+        f"Правила можно добавлять только в свои (не встроенные) рулсеты - '{ruleset}' встроенный"
+    )
 
 
 def delete_custom_ruleset(ruleset_path: str) -> None:
-    """Удаляет именованный custom-рулсет целиком (встроенные отклоняются автоматически -
-    не матчат префикс custom_rulesets/)."""
+    """Удаляет именованный custom-рулсет целиком. Встроенный рулсет - осмысленный отказ
+    (CatalogError -> 400), а не "не найден": файл существует, удалять его просто нельзя."""
+    if not ruleset_path.startswith(CUSTOM_PREFIX):
+        raise CatalogError(f"Встроенный рулсет удалить нельзя: {ruleset_path}")
     target_dir = _custom_ruleset_dir(ruleset_path)
     for f in target_dir.iterdir():
         if f.is_file():
@@ -605,7 +666,9 @@ def _parse_incident_spec(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def _validate_correlation_doc(doc: dict[str, Any]) -> None:
+def _validate_correlation_doc(
+    doc: dict[str, Any], *, ref_index: dict[str, dict[str, str]] | None = None
+) -> None:
     """Лёгкая структурная валидация correlation-документа БЕЗ pySigma (см. докстринг модуля
     про CORRELATION_EXT/почему pySigma тут не участвует вообще). Не полный валидатор Sigma-
     спеки - ловит только очевидные ошибки, чтобы автор правила увидел понятную причину отказа
@@ -619,7 +682,14 @@ def _validate_correlation_doc(doc: dict[str, Any]) -> None:
     "по всей выборке" корреляция не поддерживается), формат timespan через тот же парсер,
     что и в рантайме (app/timespan.parse_timespan - раньше валидация принимала любую
     непустую строку, включая 'M'/'y', которые рантайм не понимает), и явный отказ
-    "расширенных" condition-выражений вместо тихой инертности."""
+    "расширенных" condition-выражений вместо тихой инертности.
+
+    ref_index (build_ref_index целевого рулсета + документы того же загружаемого файла) -
+    если передан, КАЖДАЯ ссылка correlation.rules проверяется на разрешимость. Раньше правило
+    с опечаткой в ссылке сохранялось с 201 и молча исчезало из load_correlation_rules (оно
+    пропускает записи с неразрешёнными ссылками целиком) - корреляция никогда не срабатывала,
+    и в UI это ничем не отличалось от рабочего правила. None - валидация без контекста
+    рулсета (прямой вызов compile_custom_rule без target_dir, тесты), ссылки не проверяются."""
     if not doc.get("title"):
         raise RuleValidationError("Correlation-правило должно содержать 'title'")
     corr = doc.get("correlation")
@@ -633,6 +703,21 @@ def _validate_correlation_doc(doc: dict[str, Any]) -> None:
     refs = corr.get("rules")
     if not refs or not isinstance(refs, list):
         raise RuleValidationError("correlation.rules должен быть непустым списком ссылок на правила")
+    if ref_index is not None:
+        unresolved = [str(r) for r in refs if str(r) not in ref_index]
+        if unresolved:
+            known = sorted(ref_index)
+            hint = (
+                f" Доступные в этом рулсете: {', '.join(known[:12])}"
+                + ("..." if len(known) > 12 else "")
+            ) if known else " В этом рулсете пока нет ни одного правила, на которое можно сослаться."
+            raise RuleValidationError(
+                "correlation.rules ссылается на правила, которых нет в этом рулсете: "
+                + ", ".join(unresolved)
+                + ". Ссылка резолвится по Sigma 'name' или 'id' СОСЕДНЕГО правила того же "
+                "рулсета (межрулсетные ссылки не поддержаны - положи базовое правило и "
+                "корреляцию в один рулсет)." + hint
+            )
     group_by = corr.get("group-by")
     if not group_by or not isinstance(group_by, list):
         raise RuleValidationError(
@@ -728,21 +813,20 @@ def _compile_correlation_doc(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _looks_like_sigma_rule(yaml_text: str) -> bool:
-    """Структурная пре-проверка без обращения к Zircolite/pySigma - эквивалент
-    RulesetHandler.is_valid_sigma_rule (title+logsource+detection, либо title+correlation),
-    но работает прямо со строкой (не требует ни временного файла, ни RulesetHandler-инстанса
-    только чтобы дёрнуть у него один не использующий self метод)."""
-    try:
-        for doc in yaml.safe_load_all(yaml_text):
-            if not isinstance(doc, dict):
-                continue
-            if all(f in doc for f in ("title", "logsource", "detection")):
-                return True
-            if "title" in doc and "correlation" in doc:
-                return True
-    except yaml.YAMLError:
-        return False
+def _docs_look_like_sigma_rule(docs: list[dict[str, Any]]) -> bool:
+    """Структурная пре-проверка УЖЕ РАЗОБРАННЫХ документов без обращения к Zircolite/pySigma -
+    эквивалент RulesetHandler.is_valid_sigma_rule (title+logsource+detection, либо
+    title+correlation).
+
+    Принимает разобранные документы, а не текст, специально: прежняя версия парсила YAML сама
+    и на yaml.YAMLError возвращала False, из-за чего вызывающий отвечал общим "должен
+    содержать title, logsource и detection" на ЛЮБУЮ синтаксическую ошибку, а ветка с
+    реальной позицией ошибки парсера ниже по коду была недостижима."""
+    for doc in docs:
+        if all(f in doc for f in ("title", "logsource", "detection")):
+            return True
+        if "title" in doc and "correlation" in doc:
+            return True
     return False
 
 
@@ -801,7 +885,11 @@ def _find_rule_id_owner(rule_id: str) -> tuple[str, str] | None:
 
 
 def compile_custom_rule(
-    yaml_text: str, *, target_dir: Path | None = None, exclude_filename: str | None = None
+    yaml_text: str,
+    *,
+    target_dir: Path | None = None,
+    exclude_filename: str | None = None,
+    ref_index: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Валидация + компиляция ОДНОГО правила БЕЗ сохранения на диск (переиспользуется в
     save_custom_rule/update_custom_rule).
@@ -833,6 +921,12 @@ def compile_custom_rule(
     сейчас этот сценарий просто не наступает: обычные правила НИКОГДА не делят SigmaCollection
     с correlation-документами.
 
+    ref_index - чем резолвить ссылки correlation.rules. None (по умолчанию) - взять из
+    target_dir; если и его нет (прямой вызов без контекста рулсета), ссылки не проверяются.
+    ПУСТОЙ словарь - осмысленное значение "сослаться не на что" (правило сохраняется ПЕРВЫМ в
+    ещё не созданный рулсет, см. save_custom_rule): корреляция в таком рулсете заведомо
+    мертва, и это надо сказать сразу, а не молчать.
+
     exclude_filename - при редактировании существующего правила (update_custom_rule) не копировать
     его СТАРУЮ версию в scratch-директорию: иначе там на момент компиляции окажутся одновременно
     старый и новый (temp) вариант одного и того же правила, и сопоставление по title становится
@@ -844,17 +938,25 @@ def compile_custom_rule(
     корреляция, если они оба в одном SigmaCollection)."""
     if not yaml_text or not yaml_text.strip():
         raise RuleValidationError("Пустой YAML")
-    if not _looks_like_sigma_rule(yaml_text):
+    # YAML разбирается ОДИН раз и до всех проверок - структурная проверка идёт уже по
+    # разобранным документам, поэтому синтаксическая ошибка доезжает до пользователя со своей
+    # позицией, а не маскируется общим "должен содержать title, logsource и detection".
+    try:
+        docs = [d for d in yaml.safe_load_all(yaml_text) if isinstance(d, dict)]
+    except yaml.YAMLError as exc:
+        raise RuleValidationError(f"Некорректный YAML: {exc}")
+    if not _docs_look_like_sigma_rule(docs):
         raise RuleValidationError(
             "YAML должен содержать title, logsource и detection (или title и correlation)."
         )
 
-    try:
-        first_doc = next((d for d in yaml.safe_load_all(yaml_text) if isinstance(d, dict)), None)
-    except yaml.YAMLError as exc:
-        raise RuleValidationError(f"Некорректный YAML: {exc}")
+    first_doc = docs[0] if docs else None
     if first_doc is not None and _looks_like_correlation_doc(first_doc):
-        _validate_correlation_doc(first_doc)
+        # Ссылки correlation.rules проверяем в контексте целевого рулсета - неразрешимая
+        # ссылка означает правило, которое сохранится, но никогда не сработает.
+        if ref_index is None and target_dir is not None:
+            ref_index = build_ref_index(target_dir, exclude_filename=exclude_filename)
+        _validate_correlation_doc(first_doc, ref_index=ref_index)
         return _compile_correlation_doc(first_doc)
 
     # Разворот именованных списков значений (%name% / |expand, см. app/rules/value_lists.py) ДО
@@ -879,11 +981,9 @@ def compile_custom_rule(
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    try:
-        docs = [d for d in yaml.safe_load_all(yaml_text) if isinstance(d, dict)]
-    except yaml.YAMLError as exc:
-        raise RuleValidationError(f"Некорректный YAML: {exc}")
-    title = docs[0].get("title") if docs else None
+    # title берём из разобранных ВЫШЕ документов: expand_placeholders трогает только detection,
+    # заголовок он изменить не может - повторно парсить развёрнутый текст незачем.
+    title = first_doc.get("title") if first_doc else None
 
     scratch_dir = Path(tempfile.mkdtemp(prefix="sigma-compile-"))
     try:
@@ -915,7 +1015,7 @@ def compile_custom_rule(
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
-def compile_ruleset_yaml(yaml_text: str) -> list[dict[str, Any]]:
+def compile_ruleset_yaml(yaml_text: str, *, target_dir: Path | None = None) -> list[dict[str, Any]]:
     """Валидация + компиляция ВСЕХ правил multi-document YAML (одна или несколько Sigma-rule
     документов в одном файле - SigmaCollection.load_ruleset поддерживает это нативно).
 
@@ -923,13 +1023,31 @@ def compile_ruleset_yaml(yaml_text: str) -> list[dict[str, Any]]:
     валидацией без pySigma (см. докстринг модуля/CORRELATION_EXT). Обычные документы отдаются
     в RulesetHandler ОДНИМ файлом БЕЗ correlation-документов вовсе - именно их совместное
     присутствие в одном SigmaCollection и ломает компиляцию referenced-правила (см. докстринг
-    модуля), поэтому исключаем эту ситуацию физически, а не боремся с её последствиями."""
+    модуля), поэтому исключаем эту ситуацию физически, а не боремся с её последствиями.
+
+    target_dir - директория целевого рулсета, если он уже существует: её правила участвуют в
+    резолве correlation.rules наравне с документами самого файла (корреляция в паке может
+    ссылаться и на правило из того же файла, и на уже лежащее в рулсете). None - новый рулсет,
+    ссылаться можно только внутри файла."""
     if not yaml_text or not yaml_text.strip():
         raise RuleValidationError("Пустой YAML")
     try:
         list(yaml.safe_load_all(yaml_text))  # ранний фейл на невалидном YAML целиком
     except yaml.YAMLError as exc:
         raise RuleValidationError(f"Некорректный YAML: {exc}")
+
+    ref_index = build_ref_index(target_dir) if target_dir is not None else {}
+    for doc_text in _split_yaml_documents(yaml_text):
+        try:
+            parsed = yaml.safe_load(doc_text)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(parsed, dict) or not parsed.get("title"):
+            continue
+        kind = "correlation" if _looks_like_correlation_doc(parsed) else "base"
+        for key in ("name", "id"):
+            if parsed.get(key):
+                ref_index[str(parsed[key])] = {"title": str(parsed["title"]), "kind": kind}
 
     corr_results: list[dict[str, Any]] = []
     plain_docs: list[str] = []
@@ -941,7 +1059,7 @@ def compile_ruleset_yaml(yaml_text: str) -> list[dict[str, Any]]:
         if not isinstance(parsed, dict):
             continue
         if _looks_like_correlation_doc(parsed):
-            _validate_correlation_doc(parsed)
+            _validate_correlation_doc(parsed, ref_index=ref_index)
             corr_results.append(_compile_correlation_doc(parsed))
         else:
             try:
@@ -972,10 +1090,17 @@ def save_custom_rule(
 ) -> tuple[dict[str, Any], str]:
     """Компилирует и сохраняет ОДНО правило в существующий (ruleset) или новый
     (new_ruleset_name) именованный custom-рулсет. Возвращает (скомпилированное правило,
-    ruleset_path, куда оно попало)."""
-    target = _resolve_target_ruleset(ruleset, new_ruleset_name)
-    target_dir = _custom_ruleset_dir(target)
-    compiled = compile_custom_rule(yaml_text, target_dir=target_dir)
+    ruleset_path, куда оно попало).
+
+    Новый рулсет создаётся на диске ТОЛЬКО после успешной компиляции и проверки id: иначе
+    любая ошибка в правиле (битый YAML, неразрешимая ссылка корреляции, занятый id) оставляла
+    бы в каталоге пустой рулсет с rule_count: 0 - то же, что и у пака в save_ruleset_yaml."""
+    target, target_dir = _resolve_existing_target(ruleset, new_ruleset_name)
+    # Новый рулсет ещё не создан и заведомо пуст - ссылаться correlation.rules не на что
+    # (явный пустой индекс, не "проверку пропустить").
+    compiled = compile_custom_rule(
+        yaml_text, target_dir=target_dir, ref_index=None if target_dir is not None else {}
+    )
     candidate = compiled.get("id")
     rule_id = _safe_rule_id(candidate)
     if candidate and rule_id == candidate:
@@ -987,6 +1112,9 @@ def save_custom_rule(
                 f"'{owner_ruleset}' - укажи другой id или убери поле 'id' из YAML, чтобы он "
                 "сгенерировался автоматически."
             )
+    if target_dir is None:
+        target = create_custom_ruleset(new_ruleset_name or "")
+        target_dir = _custom_ruleset_dir(target)
     compiled["id"] = rule_id
     ext = CORRELATION_EXT if compiled.get("correlation") else ".yml"
     (target_dir / f"{rule_id}{ext}").write_text(yaml_text, encoding="utf-8")
@@ -1036,7 +1164,11 @@ def save_ruleset_yaml(
     файла) - НЕ добавляется; уже существующий владелец id не трогается. Это частичный успех:
     остальные правила файла без коллизий сохраняются как обычно, ошибка не поднимается на
     весь запрос. collisions - список {title, id, conflict_ruleset, conflict_title} для UI
-    (что именно и с чем не добавилось) - см. app/main.py:upload_ruleset."""
+    (что именно и с чем не добавилось) - см. app/main.py:upload_ruleset.
+
+    Новый рулсет (new_ruleset_name) создаётся на диске ТОЛЬКО когда известно, что в него
+    реально ляжет хотя бы одно правило: пак, все правила которого столкнулись по id с уже
+    существующими, раньше оставлял в каталоге пустую директорию с rule_count: 0."""
     parsed_lists, rule_yaml = _peel_value_list_docs(yaml_text)
     imported = value_lists.import_lists(parsed_lists, mode="replace") if parsed_lists else {
         "created": [], "replaced": [], "merged": [], "skipped": [], "recompile_needed": [],
@@ -1044,14 +1176,19 @@ def save_ruleset_yaml(
     if not rule_yaml.strip():
         return None, None, [], imported
 
-    target = _resolve_target_ruleset(ruleset, new_ruleset_name)
-    target_dir = _custom_ruleset_dir(target)
-    compiled_rules = compile_ruleset_yaml(rule_yaml)
+    # Цель проверяем ДО компиляции (чтобы не компилировать пак впустую при кривой цели), но
+    # создание нового рулсета откладываем до момента, когда есть что писать.
+    target, target_dir = _resolve_existing_target(ruleset, new_ruleset_name)
+    compiled_rules = compile_ruleset_yaml(rule_yaml, target_dir=target_dir)
     doc_by_title = _match_yaml_by_title(_split_yaml_documents(rule_yaml))
-    manifest_path = target_dir / ".manifest.json"
     collisions: list[dict[str, Any]] = []
     with _manifest_lock:
-        manifest_by_id = {r.get("id"): r for r in _load_manifest_uncached(manifest_path)}
+        manifest_path = (target_dir / ".manifest.json") if target_dir is not None else None
+        manifest_by_id = (
+            {r.get("id"): r for r in _load_manifest_uncached(manifest_path)}
+            if manifest_path is not None else {}
+        )
+        accepted: list[tuple[str, dict[str, Any]]] = []
         for compiled in compiled_rules:
             candidate = compiled.get("id")
             rule_id = _safe_rule_id(candidate)
@@ -1061,7 +1198,10 @@ def save_ruleset_yaml(
                 # внутрифайловый дубль, который _find_rule_id_owner (читает с диска) не
                 # увидит, пока манифест не записан.
                 existing = manifest_by_id.get(rule_id)
-                owner = (target, str(existing.get("title") or "")) if existing else _find_rule_id_owner(rule_id)
+                owner = (
+                    (target or (new_ruleset_name or ""), str(existing.get("title") or ""))
+                    if existing else _find_rule_id_owner(rule_id)
+                )
                 if owner is not None:
                     owner_ruleset, owner_title = owner
                     collisions.append({
@@ -1073,6 +1213,19 @@ def save_ruleset_yaml(
                     continue
             compiled["id"] = rule_id
             manifest_by_id[rule_id] = compiled
+            accepted.append((rule_id, compiled))
+
+        if not accepted:
+            # Ни одно правило не прошло - на диск не пишем ничего. Нового рулсета не появится
+            # вовсе, существующий остаётся как был (манифест не переписываем).
+            info = _custom_ruleset_info(target_dir / "meta.json") if target_dir is not None else None
+            return info, target, collisions, imported
+
+        if target_dir is None:
+            target = create_custom_ruleset(new_ruleset_name or "")
+            target_dir = _custom_ruleset_dir(target)
+            manifest_path = target_dir / ".manifest.json"
+        for rule_id, compiled in accepted:
             source_doc = doc_by_title.get(compiled.get("title"))
             if source_doc is not None:
                 ext = CORRELATION_EXT if compiled.get("correlation") else ".yml"
@@ -1096,7 +1249,7 @@ def update_custom_rule(ruleset_path: str, rule_id: str, yaml_text: str) -> dict[
     target_dir = _custom_ruleset_dir(ruleset_path)
     rule_path = _find_rule_file(target_dir, rule_id)
     if rule_path is None:
-        raise CatalogError(f"Правило не найдено: {rule_id}")
+        raise CatalogNotFound(f"Правило не найдено: {rule_id}")
     compiled = compile_custom_rule(yaml_text, target_dir=target_dir, exclude_filename=rule_path.name)
     candidate = compiled.get("id")
     if candidate and candidate != rule_id:
@@ -1122,7 +1275,7 @@ def delete_custom_rule(ruleset_path: str, rule_id: str) -> None:
     target_dir = _custom_ruleset_dir(ruleset_path)
     rule_path = _find_rule_file(target_dir, rule_id)
     if rule_path is None:
-        raise CatalogError(f"Правило не найдено: {rule_id}")
+        raise CatalogNotFound(f"Правило не найдено: {rule_id}")
     manifest_path = target_dir / ".manifest.json"
     with _manifest_lock:
         manifest = [r for r in _load_manifest_uncached(manifest_path) if r.get("id") != rule_id]

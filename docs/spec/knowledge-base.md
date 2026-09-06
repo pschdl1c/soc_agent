@@ -24,10 +24,10 @@
 `configure(path: str | None)` — подмена пути и переоткрытие (тестовый хук; `None` → значение
 из `config`). `_reset()` — сброс кэша соединения без смены пути.
 
-## Исключение
+## Ошибки
 
-`KbError(Exception)` — объявлено для трансляции в HTTP; штатные пути его не поднимают
-(при отсутствии `kb.db` возвращается пустой результат / `available: false`).
+Своего класса исключения у модуля нет: при отсутствии/недоступности `kb.db` каждая функция
+возвращает пустой результат (`available: false`, `[]`, `None`), наружу ничего не поднимается.
 
 ## Публичный интерфейс
 
@@ -43,11 +43,6 @@
 Ожидаемые ключи `mitre_meta`: `attack_version`, `built_at`, `source`, `tactic_count`,
 `technique_count`, `mitigation_count`, `detection_strategy_count`, `analytic_count`,
 `procedure_count`.
-
-### `list_tactics() -> list[dict]`
-
-`[{tactic_id, shortname, name, description, url, sort_order}]`, `ORDER BY sort_order, tactic_id`.
-Нет файла → `[]`.
 
 ### `matrix() -> dict`
 

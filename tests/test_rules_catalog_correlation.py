@@ -152,11 +152,33 @@ def test_load_correlation_rules_resolves_reference_to_another_correlation():
     ]
 
 
-def test_load_correlation_rules_skips_rule_with_unresolved_reference():
+def test_load_correlation_rules_skips_rule_with_unresolved_reference(_isolate_custom_root):
+    """Защитный пропуск в рантайме остаётся - но добраться до него теперь можно только правкой
+    файла мимо API (через save_* неразрешимая ссылка отклоняется, см. тест ниже), поэтому
+    correlation-файл кладём на диск руками."""
     ruleset_path = rules_catalog.create_custom_ruleset("test-ruleset")
+    ruleset_dir = _isolate_custom_root / ruleset_path.split("/")[-1]
     # Только корреляция, БЕЗ базового правила failed_auth - ссылка не резолвится.
-    _save(ruleset_path, _CORR_BY_NAME)
+    (ruleset_dir / f"orphan{rules_catalog.CORRELATION_EXT}").write_text(_CORR_BY_NAME, encoding="utf-8")
     assert rules_catalog.load_correlation_rules(ruleset_path) == []
+
+
+def test_save_rejects_correlation_with_unresolved_reference():
+    """RUL-2: раньше такое правило сохранялось с 201 и молча исчезало из load_correlation_rules -
+    корреляция никогда не срабатывала, а в UI выглядела как обычное сохранённое правило."""
+    ruleset_path = rules_catalog.create_custom_ruleset("test-ruleset")
+    with pytest.raises(RuleValidationError) as exc:
+        rules_catalog.save_custom_rule(_CORR_BY_NAME, ruleset=ruleset_path)
+    assert "failed_auth" in str(exc.value)
+
+    # То же самое при загрузке пака целиком.
+    with pytest.raises(RuleValidationError):
+        rules_catalog.save_ruleset_yaml(_CORR_BY_NAME, ruleset=ruleset_path)
+
+    # А вместе с базовым правилом в ОДНОМ multi-document файле - проходит: ссылки резолвятся
+    # и по документам самого файла, не только по уже лежащим в рулсете.
+    _save(ruleset_path, _BASE_RULE_A + "\n---\n" + _CORR_BY_NAME)
+    assert [r["title"] for r in rules_catalog.load_correlation_rules(ruleset_path)] == ["Bruteforce By Name"]
 
 
 def test_load_correlation_rules_cache_reflects_new_file(tmp_path):
@@ -330,3 +352,87 @@ def test_validate_allows_long_timespan_when_retention_disabled(monkeypatch):
     }})
     compiled = rules_catalog.compile_custom_rule(doc)
     assert compiled["correlation"] is True
+
+
+# ------------------------------------------------------------------ Ошибки компиляции/сохранения
+
+
+def test_broken_yaml_reports_real_parser_error():
+    """RUL-1: раньше любая синтаксическая ошибка YAML маскировалась общим "YAML должен
+    содержать title, logsource и detection" - ветка с реальной позицией ошибки парсера была
+    недостижима, потому что структурная пре-проверка сама глотала yaml.YAMLError."""
+    broken = """\
+title: Broken
+logsource:
+  product: windows
+detection:
+  selection:
+     - EventID: 4625
+    - bad indent
+  condition: selection
+"""
+    with pytest.raises(RuleValidationError) as exc:
+        rules_catalog.compile_custom_rule(broken)
+    message = str(exc.value)
+    assert "Некорректный YAML" in message
+    assert "line" in message  # позиция ошибки от pyyaml доезжает до пользователя
+
+
+def test_fully_collided_pack_does_not_leave_empty_ruleset(_isolate_custom_root):
+    """RUL-3: пак, все правила которого столкнулись по id с уже существующими, не должен
+    оставлять в каталоге пустую директорию рулсета."""
+    first = rules_catalog.create_custom_ruleset("first")
+    _save(first, _BASE_RULE_A)
+    before = {e["path"] for e in rules_catalog.list_rulesets()}
+
+    summary, path, collisions, _imported = rules_catalog.save_ruleset_yaml(
+        _BASE_RULE_A, new_ruleset_name="second"
+    )
+    assert summary is None and path is None
+    assert [c["id"] for c in collisions] == ["11111111-1111-1111-1111-111111111111"]
+    assert {e["path"] for e in rules_catalog.list_rulesets()} == before
+    assert sorted(p.name for p in _isolate_custom_root.iterdir()) == [first.split("/")[-1]]
+
+
+def test_failed_single_rule_does_not_leave_empty_ruleset(_isolate_custom_root):
+    """RUL-3, тот же дефект на пути ОДИНОЧНОГО правила (POST /rules/custom): рулсет создавался
+    ДО компиляции, поэтому любая ошибка (битый YAML, неразрешимая ссылка, занятый id)
+    оставляла в каталоге пустую директорию с rule_count: 0."""
+    broken = """\
+title: Broken
+logsource:
+  product: windows
+detection:
+  selection:
+     - EventID: 4625
+    - bad
+  condition: selection
+"""
+    with pytest.raises(RuleValidationError):
+        rules_catalog.save_custom_rule(broken, new_ruleset_name="from-broken-yaml")
+    with pytest.raises(RuleValidationError):
+        rules_catalog.save_custom_rule(_CORR_BY_NAME, new_ruleset_name="from-bad-ref")
+
+    first = rules_catalog.create_custom_ruleset("first")
+    _save(first, _BASE_RULE_A)
+    with pytest.raises(RuleValidationError):  # id занят правилом другого рулсета
+        rules_catalog.save_custom_rule(_BASE_RULE_A, new_ruleset_name="from-collision")
+
+    assert sorted(p.name for p in _isolate_custom_root.iterdir()) == [first.split("/")[-1]]
+
+
+def test_correlation_rule_without_explicit_id_gets_id_from_filename(_isolate_custom_root):
+    """Sigma не требует поля 'id:', и в файл мы его не дописываем - но по id correlation-запись
+    сопоставляется с .manifest.json в correlation._active_correlation_rules для «основного
+    рулсета». С id=None правило молча выпадало из main: сохранено, видно в UI, никогда не
+    срабатывает. Фолбэк - имя файла, оно же rule_id манифеста."""
+    ruleset_path = rules_catalog.create_custom_ruleset("test-ruleset")
+    _save(ruleset_path, _BASE_RULE_A)
+
+    no_id = "\n".join(line for line in _CORR_BY_NAME.splitlines() if not line.startswith("id:"))
+    compiled, _target = rules_catalog.save_custom_rule(no_id, ruleset=ruleset_path)
+    manifest_id = compiled["id"]
+
+    rules = rules_catalog.load_correlation_rules(ruleset_path)
+    assert len(rules) == 1
+    assert rules[0]["id"] == manifest_id  # то же значение, что в манифесте -> правило видно в main

@@ -83,7 +83,7 @@ Aware-форма дала бы суффикс `+00:00` и сломала бы с
 | Поле | Тип | По умолчанию | Примечание |
 |---|---|---|---|
 | `incident_id` | `str` | `str(uuid4())` | PK |
-| `dedup_key` | `str` | — | `sha256(incident_type:group_values:window_bucket)[:16]` |
+| `dedup_key` | `str` | — | `sha256(source_batch:incident_type:group_values:window_bucket)[:16]` |
 | `incident_type` | `str` | — | slug из `incident.type` |
 | `title` | `str` | — | `incident.title` или title правила |
 | `severity` | `Severity` | — | явная / `level` правила / `medium`; далее roll-up member-алертов |
@@ -124,7 +124,7 @@ Aware-форма дала бы суффикс `+00:00` и сломала бы с
 | `IngestFileRequest` | `POST /ingest/file` | `events_path: str`; `input_type: str = "json"`; `ruleset: str \| None = None`; `source_label: str \| None = None` |
 | `IngestEventsRequest` | `POST /ingest/events` | `events: list[dict]`; `source_label: str = "live-queue"` (игнорируется, метку задаёт источник) |
 | `IngestResponse` | ответ `/ingest/*` | `source_batch: str`; `events_processed: int`; `rules_matched: int`; `alerts_created: int`; `duration_seconds: float` |
-| `IncidentStatusUpdate` | `PATCH /incidents/{id}/status` | `status: str` |
+| `IncidentStatusUpdate` | `PATCH /incidents/{id}/status` | `status: IncidentStatus` = `Literal["new", "investigating", "closed"]` — любое другое значение отбивает FastAPI (422). Набор значений живёт в `INCIDENT_STATUSES` и переиспользуется `store.update_incident_status`/`store._migrate` |
 | `CustomRuleSubmit` | `POST /rules/custom` | `yaml_text: str`; `ruleset: str \| None = None`; `new_ruleset_name: str \| None = None` (ровно один из двух) |
 | `CustomRuleUpdate` | `PUT /rules/custom/{rule_id}` | `yaml_text: str` |
 | `MainRulesetRuleToggle` | `POST /main-ruleset/rules` | `ruleset: str`; `rule_id: str`; `include: bool` |

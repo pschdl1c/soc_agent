@@ -28,6 +28,7 @@
 | `DEFAULT_RULESET_PATH` | `SIEM_DEFAULT_RULESET_PATH` | `str` | `<BASE_DIR>/Zircolite/rules/rules_windows_merged.json` |
 | `UPLOADS_DIR` | `SIEM_UPLOADS_DIR` | `Path` | `<BASE_DIR>/data/uploads` |
 | `KB_DB_PATH` | `SIEM_KB_DB_PATH` | `str` | `<BASE_DIR>/kb/kb.db` |
+| `LOG_LEVEL` | `SIEM_LOG_LEVEL` | `str` | `INFO` |
 | `HOST` | `SIEM_HOST` | `str` | `127.0.0.1` |
 | `PORT` | `SIEM_PORT` | `int` | `8000` |
 | `INGEST_BATCH_SIZE` | `SIEM_INGEST_BATCH_SIZE` | `int` | `500` |
@@ -47,6 +48,7 @@
 
 - `DB_PATH` — файл рабочей БД (`siem.db`); БД открывается в режиме WAL, рядом появляются
   `-wal` и `-shm`.
+- `LOG_LEVEL` — уровень логгера приложения (`app/logging_setup.py`, см. `docs/spec/logging.md`).
 - `KB_DB_PATH` — read-only база знаний MITRE ATT&CK. Файл может отсутствовать; в этом случае
   зависимые компоненты деградируют без исключений.
 - `UPLOADS_DIR` — каталог для файлов, загруженных через HTTP; создаётся вызывающим кодом

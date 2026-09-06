@@ -129,9 +129,27 @@ def test_expand_unknown_placeholder_raises():
         value_lists.expand_placeholders(_LIST_FORM)  # 'bins' не создан
 
 
-def test_expand_empty_list_raises():
+def test_create_and_update_reject_empty_values():
+    """RUL-4: пустой список создавался с 201, а правило с его плейсхолдером потом не
+    компилировалось - создать можно, пользоваться нельзя. Теперь отказ на записи."""
+    with pytest.raises(ValueListError, match="пуст"):
+        value_lists.create_list("bins", "", [])
+    with pytest.raises(ValueListError, match="пуст"):
+        value_lists.create_list("bins", "", ["   "])  # после trim не остаётся ничего
+    assert value_lists.get_list("bins") is None
+
     value_lists.create_list("bins", "", ["x"])
-    value_lists.update_list("bins", "", [])
+    with pytest.raises(ValueListError, match="пуст"):
+        value_lists.update_list("bins", "", [])
+    assert value_lists.get_list("bins")["values"] == ["x"]  # старые значения на месте
+
+
+def test_expand_empty_list_raises():
+    """Страховка в рантайме остаётся - файл списка могли опустошить мимо API."""
+    value_lists.create_list("bins", "", ["x"])
+    (value_lists.VALUE_LISTS_ROOT / "bins.yml").write_text(
+        "name: bins\ndescription: ''\nvalues: []\n", encoding="utf-8"
+    )
     with pytest.raises(ValueListError):
         value_lists.expand_placeholders(_LIST_FORM)
 

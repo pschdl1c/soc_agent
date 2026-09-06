@@ -8,6 +8,7 @@ ZircoliteEngine - обёртка над библиотечным API Zircolite.
 """
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,8 @@ sys.path.insert(0, str(ZIRCOLITE_REPO_PATH))
 from zircolite.config import ProcessingConfig, RulesetConfig  # noqa: E402
 from zircolite.rules import RulesetHandler  # noqa: E402
 from zircolite.core import ZircoliteCore  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 class ZircoliteEngine:
@@ -45,8 +48,10 @@ class ZircoliteEngine:
             handler = RulesetHandler(ruleset_config)
             elapsed = time.time() - t0
             self._rulesets_cache[ruleset_path] = handler
-            print(f"[engine] Ruleset '{ruleset_path}' загружен за {elapsed:.2f}s "
-                  f"({len(handler.rulesets)} правил)")
+            logger.info(
+                "ruleset '%s' загружен за %.2fs (%s правил)",
+                ruleset_path, elapsed, len(handler.rulesets),
+            )
         return self._rulesets_cache[ruleset_path]
 
     def _run_core(

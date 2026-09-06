@@ -181,7 +181,8 @@ def _poll_alerts(url: str, source_batch: str, run: str, timeout: float = 30.0) -
     прошлых прогонов."""
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
-        alerts = _get_json(f"{url}/alerts?{urllib.parse.urlencode({'source_batch': source_batch})}")
+        # /alerts отдаёт обёртку {alerts, total, limit, offset}
+        alerts = _get_json(f"{url}/alerts?{urllib.parse.urlencode({'source_batch': source_batch})}")["alerts"]
         mine = [a for a in alerts if run in (a.get("host") or "")]
         if mine:
             return mine  # type: ignore[return-value]

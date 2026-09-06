@@ -168,7 +168,8 @@ def _wait_for_flush(url: str, timeout: float = 15.0) -> None:
 def _poll_alerts(url: str, source_batch: str, timeout: float = 30.0) -> list[dict]:
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
-        alerts = _get_json(f"{url}/alerts?{urllib.parse.urlencode({'source_batch': source_batch})}")
+        # /alerts отдаёт обёртку {alerts, total, limit, offset}
+        alerts = _get_json(f"{url}/alerts?{urllib.parse.urlencode({'source_batch': source_batch})}")["alerts"]
         if alerts:
             return alerts
         time.sleep(1.5)

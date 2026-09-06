@@ -29,7 +29,9 @@
 идёт как bound-параметр sqlite3. JSON-путь поля тоже bound-параметр (через
 json_extract(raw_json, ?)) для подавляющего большинства полей - ЗА ИСКЛЮЧЕНИЕМ узкого whitelist
 "горячих" полей из INDEXED_JSON_FIELDS (сейчас только EventID), где путь - литерал в тексте SQL
-(нужно для expression-индекса, см. resolve_json_path). Это не ослабляет безопасность: литерал
+(нужно для expression-индекса, см. resolve_field). Отдельный вид полей - ECS-lite колонки
+события (ENTITY_COLUMNS: user_name/src_ip/dst_ip/process/event_code): это настоящие колонки
+events, единое имя сущности поверх разнобоя имён у источников, и по ним есть индексы. Это не ослабляет безопасность: литерал
 всегда один из фиксированных значений словаря по ключу, никогда не производная от сырого
 пользовательского текста - тот же паттерн, что и у whitelisted sort-колонок в store.py.
 Пользовательский текст сам по себе никогда не подставляется в SQL-строку - инъекция
@@ -238,15 +240,51 @@ INDEXED_JSON_FIELDS: dict[str, str] = {
     "eventid": '$."EventID"',
 }
 
+# ECS-lite колонки events (store.py: user_name/src_ip/dst_ip/process/event_code) - НАСТОЯЩИЕ
+# колонки таблицы, заполняемые на записи через кандидатов имён из app/fields.py (TargetUserName/
+# SubjectUserName/... -> user_name, IpAddress/SourceAddress/... -> src_ip и т.д.). Здесь они
+# становятся именами полей фильтра: `src_ip = "10.0.0.1"` бьёт по колонке с индексом
+# idx_events_src_ip вместо full-scan json_extract по raw_json, и, что важнее для разнородных
+# источников, ОДНО имя фильтра покрывает все варианты названия поля у источника (EVTX Security,
+# Sysmon и auditd называют пользователя/адрес по-разному - аналитику не нужно знать, как именно).
+# До этого колонки писались на каждое событие и не читались НИКЕМ - чистый оверхед на записи.
+#
+# Имена подобраны так, чтобы не пересекаться с реальными именами полей Windows-событий
+# (TargetUserName/IpAddress/DestinationIp/Image/EventID) - иначе алиас перехватывал бы фильтр
+# по сырому полю. Матчинг регистронезависимый: если у источника окажется СВОЁ поле с таким же
+# именем, фильтр по нему уйдёт в ECS-lite колонку - осознанный компромисс в пользу одного
+# имени сущности на все источники (сырое значение при этом видно в карточке события).
+ENTITY_COLUMNS: dict[str, str] = {
+    "user_name": "user_name",
+    "src_ip": "src_ip",
+    "dst_ip": "dst_ip",
+    "process": "process",
+    "event_code": "event_code",
+}
+
+
+def resolve_field(field: str) -> tuple[str, list[Any], bool]:
+    """(SQL-выражение поля, доп.bound-параметры, это_текстовая_колонка).
+
+    Три вида полей: ECS-lite колонка events (ENTITY_COLUMNS - настоящая колонка, TEXT, с
+    индексом), "горячее" поле raw_json (INDEXED_JSON_FIELDS - путь ЛИТЕРАЛОМ в тексте SQL,
+    иначе expression-индекс не подхватится) и любое другое поле raw_json (путь bound-
+    параметром). Третий элемент - признак "значение уже TEXT", чтобы вызывающий не оборачивал
+    колонку в CAST: CAST(user_name AS TEXT) = ? планировщик по idx_events_user уже не ищет,
+    и весь смысл колонки терялся бы."""
+    key = str(field).strip().lower()
+    if key in ENTITY_COLUMNS:
+        return ENTITY_COLUMNS[key], [], True
+    if key in INDEXED_JSON_FIELDS:
+        return f"json_extract(raw_json, '{INDEXED_JSON_FIELDS[key]}')", [], False
+    return "json_extract(raw_json, ?)", [_json_path(field)], False
+
 
 def resolve_json_path(field: str) -> tuple[str, list[Any]]:
-    """Возвращает (SQL-выражение json_extract(...), доп.bound-параметры для него) - для полей
-    из INDEXED_JSON_FIELDS путь литерал в тексте (чтобы сработал expression index), для всех
-    остальных - как раньше, обычный bound-параметр (медленнее, но без индекса и не нужно)."""
-    key = str(field).strip().lower()
-    if key in INDEXED_JSON_FIELDS:
-        return f"json_extract(raw_json, '{INDEXED_JSON_FIELDS[key]}')", []
-    return "json_extract(raw_json, ?)", [_json_path(field)]
+    """resolve_field без признака текстовой колонки - для мест, где CAST не нужен вовсе
+    (ORDER BY, кастом-колонки выдачи, группировка): см. store.py."""
+    expr, params, _is_column = resolve_field(field)
+    return expr, params
 
 
 def _like_escape(v: Any) -> str:
@@ -366,8 +404,10 @@ def compile_condition(field: str, op: str, value: Any) -> tuple[str, list[Any]]:
     if key == RULE_FIELD:
         return _compile_rule(op, value)
 
-    col, path_params = resolve_json_path(field)
-    text_col = f"CAST({col} AS TEXT)"
+    col, path_params, is_text_column = resolve_field(field)
+    # Для настоящей TEXT-колонки CAST не нужен и вреден (убивает индекс), для json_extract -
+    # обязателен: там значение может прийти INTEGER/REAL, а сравниваем мы со строкой.
+    text_col = col if is_text_column else f"CAST({col} AS TEXT)"
     if op == "isnull":
         return f"{col} IS NULL", [*path_params]
     if op == "notnull":

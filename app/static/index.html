@@ -418,6 +418,12 @@
   .badge-running { background: #1a2230; color: var(--accent); }
   .badge-done { background: #1c2622; color: var(--muted); }
   .badge-error { background: #2a1520; color: var(--crit); }
+  /* Бейджи типа правила в списке Sigma-правил: обычное правило -> алерт, correlation ->
+     скользящее окно, incident -> заводит инцидент вместо алерта. Поля correlation/incident
+     приходят в /rulesets/rules, но раньше нигде не показывались - понять, какое правило что
+     делает, можно было только открыв каждое. */
+  .badge-correlation { background: #1a2230; color: var(--accent); }
+  .badge-incident { background: #3a2e0c; color: var(--med); }
   .badge-tp { background: #2a1520; color: var(--crit); }
   .badge-fp { background: #16281f; color: var(--accent); }
   .badge-needs-review { background: #3a2e0c; color: var(--med); }
@@ -752,6 +758,13 @@
             <tbody id="alerts-tbody"></tbody>
           </table>
           <div id="alerts-empty" class="empty-state" style="display:none;">Нет алертов для выбранных фильтров</div>
+          <div class="pagination">
+            <span id="alerts-page-info"></span>
+            <div>
+              <button type="button" class="ghost" id="alerts-prev" onclick="alertsPrev()">&larr; назад</button>
+              <button type="button" class="ghost" id="alerts-next" onclick="alertsNext()">вперёд &rarr;</button>
+            </div>
+          </div>
         </div>
         <div id="alert-detail" class="detail-panel">
           <div class="resize-handle" id="alert-detail-handle"></div>
@@ -811,6 +824,13 @@
             <tbody id="incidents-tbody"></tbody>
           </table>
           <div id="incidents-empty" class="empty-state" style="display:none;">Нет инцидентов для выбранных фильтров</div>
+          <div class="pagination">
+            <span id="incidents-page-info"></span>
+            <div>
+              <button type="button" class="ghost" id="incidents-prev" onclick="incidentsPrev()">&larr; назад</button>
+              <button type="button" class="ghost" id="incidents-next" onclick="incidentsNext()">вперёд &rarr;</button>
+            </div>
+          </div>
         </div>
         <div id="incident-detail" class="detail-panel">
           <div class="resize-handle" id="incident-detail-handle"></div>
@@ -897,6 +917,16 @@
               <code>Hostname</code>, <code>Computer</code>, <code>host</code>...). Регистр важен. Если не уверен,
               как называется поле — открой сырое событие (клик по строке) и посмотри ключи.</p>
 
+            <h5>Поля сущности (единые для всех источников)</h5>
+            <p>Источники называют одно и то же по-разному, поэтому у пользователя/адресов/процесса/кода
+              события есть единые имена — они бьют по отдельным колонкам события (быстро, по индексу):</p>
+            <ul>
+              <li><code>user_name</code> — пользователь (<code>TargetUserName</code>, <code>SubjectUserName</code>, <code>User</code>, <code>AccountName</code>)</li>
+              <li><code>src_ip</code> / <code>dst_ip</code> — адреса (<code>IpAddress</code>, <code>SourceAddress</code>, <code>DestinationIp</code>...)</li>
+              <li><code>process</code> — процесс (<code>Image</code>, <code>NewProcessName</code>, <code>CommandLine</code>, <code>exe</code>)</li>
+              <li><code>event_code</code> — код события (<code>EventID</code>, <code>EventCode</code>)</li>
+            </ul>
+
             <h5>Поля результата детекта (не из raw_json)</h5>
             <ul>
               <li><code>rule</code> — название сработавшего Sigma-правила: <code>=</code> <code>!=</code> <code>contains</code> <code>in(...)</code> <code>is null</code> (ничего не сработало) <code>is not null</code> (сработало хоть что-то). А <code>&gt;</code> <code>&lt;</code> <code>&gt;=</code> <code>&lt;=</code> у этого же поля — сравнение не имени, а <b>количества</b> сработавших правил: <code>rule &gt; 1</code> — сработало больше одного правила</li>
@@ -916,6 +946,7 @@
               <li><code>is_matched = false and Hostname contains "WORKSTATION"</code></li>
               <li><code>rule contains "HackTool" and not Hostname contains "DC"</code></li>
               <li><code>rule &gt; 1</code> — сработало больше одного правила</li>
+              <li><code>user_name = "admin" and src_ip is not null</code> — по единым полям сущности</li>
             </ul>
             <h5>Ошибки</h5>
             <p>При неверном синтаксисе запрос не выполняется — под строкой фильтра появится точное описание
@@ -1297,6 +1328,15 @@ const API = "";
 let activeTab = "alerts";
 let eventsOffset = 0;
 const eventsLimit = 50;
+// Пейджеры Алертов/Инцидентов - тот же приём, что и у Событий (offset/total + кнопки).
+// Раньше обе вкладки молча показывали серверный дефолт (первые 100 строк) и игнорировали
+// total из ответа: на 394 алертах в списке было ровно 100 без единого признака отсечки.
+const alertsLimit = 50;
+let alertsOffset = 0;
+let alertsTotal = 0;
+const incidentsLimit = 50;
+let incidentsOffset = 0;
+let incidentsTotal = 0;
 let eventsTotal = 0;
 
 // loadEvents() и loadGroups() шлют запросы параллельно (loadGroups не await-ится) и без
@@ -1508,6 +1548,10 @@ const INCIDENT_COLUMNS = [
   { key: "severity", label: "" },
   { key: null, label: "Инцидент" },
   { key: null, label: "Описание" },
+  // Сущность (group_key correlation-правила) - без неё полсотни инцидентов одного типа в
+  // списке отличались только тем, какой это хост/пользователь, а увидеть это можно было
+  // только раскрыв "Контекст расследования" у каждого.
+  { key: null, label: "Сущность" },
   { key: "alert_count", label: "Алертов" },
   { key: "status", label: "Статус" },
   { key: null, label: "Расследование" },
@@ -1533,7 +1577,7 @@ function currentBatch() {
 // таблицу (было только alerts/events, стало +sigma). Новая сортируемая таблица - это одна
 // строка в обоих объектах, без изменений в sortBy/thHtml.
 const SORT_STATES = { alerts: alertsSort, incidents: incidentsSort, events: eventsSort, sigma: sigmaSort };
-const RELOAD_FNS = { alerts: loadAlerts, incidents: loadIncidents, events: () => loadEvents(0), sigma: () => loadSigmaRules(0), "value-lists": loadValueLists };
+const RELOAD_FNS = { alerts: () => loadAlerts(0), incidents: () => loadIncidents(0), events: () => loadEvents(0), sigma: () => loadSigmaRules(0), "value-lists": loadValueLists };
 
 function sortBy(tab, key) {
   if (!key) return;
@@ -2612,7 +2656,8 @@ async function runValueListUpload() {
 
 function sevBar(level) { return `<span class="sev-bar sev-${level}"></span>`; }
 
-async function loadAlerts() {
+async function loadAlerts(offset = 0) {
+  alertsOffset = offset;
   const tbody = document.getElementById("alerts-tbody");
   const emptyEl = document.getElementById("alerts-empty");
   document.getElementById("alerts-head-row").innerHTML = ALERT_COLUMNS.map(c => thHtml("alerts", c)).join("");
@@ -2623,9 +2668,14 @@ async function loadAlerts() {
   if (level) params.set("rule_level", level);
   applyTimeParams("alert", params);
   sortParams(alertsSort, params);
+  params.set("limit", alertsLimit);
+  params.set("offset", offset);
 
   try {
-    const alerts = await api("/alerts?" + params.toString());
+    const res = await api("/alerts?" + params.toString());
+    const alerts = res.alerts || [];
+    alertsTotal = res.total || 0;
+    renderPager("alerts", offset, alertsLimit, alertsTotal);
     if (alerts.length === 0) {
       // className/textContent сбрасываем явно - иначе тут остаётся "error-state"/текст ошибки
       // от ПРЕДЫДУЩЕГО неудачного запроса (catch ниже их выставляет, а тут никто не возвращал
@@ -2651,7 +2701,23 @@ async function loadAlerts() {
     emptyEl.style.display = "block";
     emptyEl.className = "error-state";
     emptyEl.textContent = "Ошибка загрузки: " + e.message;
+    renderPager("alerts", 0, alertsLimit, 0);
   }
+}
+
+function alertsPrev() { if (alertsOffset - alertsLimit >= 0) loadAlerts(alertsOffset - alertsLimit); }
+function alertsNext() { if (alertsOffset + alertsLimit < alertsTotal) loadAlerts(alertsOffset + alertsLimit); }
+
+// Один пейджер на все вкладки со списками: "N-M из T" + доступность кнопок. Элементы
+// ожидаются с id <prefix>-page-info/<prefix>-prev/<prefix>-next (см. разметку).
+function renderPager(prefix, offset, limit, total) {
+  const info = document.getElementById(prefix + "-page-info");
+  if (!info) return;
+  const from = total === 0 ? 0 : offset + 1;
+  const to = Math.min(offset + limit, total);
+  info.textContent = `${from}-${to} из ${total}`;
+  document.getElementById(prefix + "-prev").disabled = offset === 0;
+  document.getElementById(prefix + "-next").disabled = offset + limit >= total;
 }
 
 // Чипы MITRE в карточке алерта. enriched - гибрид от GET /alerts/{id} (см. app/kb.py): у
@@ -2732,7 +2798,8 @@ function verdictBadge(v) {
   return `<span class="badge badge-${v.toLowerCase()}">${escapeHtml(v)}</span>`;
 }
 
-async function loadIncidents() {
+async function loadIncidents(offset = 0) {
+  incidentsOffset = offset;
   const tbody = document.getElementById("incidents-tbody");
   const emptyEl = document.getElementById("incidents-empty");
   document.getElementById("incidents-head-row").innerHTML = INCIDENT_COLUMNS.map(c => thHtml("incidents", c)).join("");
@@ -2749,10 +2816,14 @@ async function loadIncidents() {
   if (q) params.set("q", q);
   applyTimeParams("incident", params);
   sortParams(incidentsSort, params);
+  params.set("limit", incidentsLimit);
+  params.set("offset", offset);
 
   try {
     const resp = await api("/incidents?" + params.toString());
     const incidents = resp.incidents || [];
+    incidentsTotal = resp.total || 0;
+    renderPager("incidents", offset, incidentsLimit, incidentsTotal);
     if (incidents.length === 0) {
       tbody.innerHTML = "";
       emptyEl.className = "empty-state";
@@ -2766,6 +2837,7 @@ async function loadIncidents() {
         <td>${sevBar(i.severity)}</td>
         <td>${escapeHtml(i.correlation_rule_title)}</td>
         <td>${escapeHtml(i.title)}</td>
+        <td title="${attr(groupKeyText(i.group_key))}">${escapeHtml(groupKeyText(i.group_key)) || '<span class="muted">—</span>'}</td>
         <td>${i.alert_count}</td>
         <td><span class="badge badge-${i.status}">${i.status}</span></td>
         <td>${i.investigation_status ? `<span class="badge badge-${i.investigation_status}">${i.investigation_status}</span>` : '<span class="muted">—</span>'}</td>
@@ -2777,7 +2849,19 @@ async function loadIncidents() {
     emptyEl.style.display = "block";
     emptyEl.className = "error-state";
     emptyEl.textContent = "Ошибка загрузки: " + e.message;
+    renderPager("incidents", 0, incidentsLimit, 0);
   }
+}
+
+function incidentsPrev() { if (incidentsOffset - incidentsLimit >= 0) loadIncidents(incidentsOffset - incidentsLimit); }
+function incidentsNext() { if (incidentsOffset + incidentsLimit < incidentsTotal) loadIncidents(incidentsOffset + incidentsLimit); }
+
+// group_key инцидента ({поле: значение} - ключ группировки correlation-правила) одной строкой:
+// "IpAddress=10.0.0.5", несколько полей через запятую. Пустой ключ - пустая строка (вызывающий
+// покажет прочерк).
+function groupKeyText(groupKey) {
+  if (!groupKey || typeof groupKey !== "object") return "";
+  return Object.entries(groupKey).map(([k, v]) => `${k}=${v}`).join(", ");
 }
 
 // incident_id, чей контекст (GET /incidents/{id}/context) уже подгружен в ТЕКУЩЕЙ открытой
@@ -2811,6 +2895,7 @@ async function selectIncident(id) {
       ${mitre.tacticsHtml ? `<div style="margin:8px 0 2px 0;">${mitre.tacticsHtml}</div>` : ""}
       <div style="margin:4px 0 10px 0;">${mitre.techniquesHtml}</div>
       <div class="kv"><span>ID</span><span>${escapeHtml(inc.incident_id)}</span></div>
+      <div class="kv"><span>Сущность</span><span>${escapeHtml(groupKeyText(inc.group_key)) || '<span class="muted">—</span>'}</span></div>
       <div class="kv"><span>Уровень</span><span>${sevBar(inc.severity)}${inc.severity}</span></div>
       <div class="kv"><span>Статус</span><span><span class="badge badge-${inc.status}">${inc.status}</span></span></div>
       <div class="kv"><span>Источник</span><span>${escapeHtml(inc.source_batch)}</span></div>
@@ -2939,8 +3024,16 @@ function renderIncidentContext(ctx) {
     parts.push('<p class="muted">нет (events вычищены ретеншном или сущность не заполнена)</p>');
   }
 
-  const hist = (ctx.entity_history || {}).alerts || [];
-  parts.push(`<p class="panel-title" style="margin-top:10px;">История алертов источника (${hist.length})</p>`);
+  // scope приходит из /incidents/{id}/context: "entity" - алерты, где реально встречаются
+  // значения group_key инцидента; "source" - фолбэк на последние алерты источника (у инцидента
+  // пустой group_key). Заголовок обязан различать эти два случая: раньше секция всегда
+  // называлась историей сущности, а показывала последние алерты источника целиком.
+  const histBlock = ctx.entity_history || {};
+  const hist = histBlock.alerts || [];
+  const histTitle = histBlock.scope === "source"
+    ? `История алертов источника (${hist.length})`
+    : `История алертов сущности ${escapeHtml((histBlock.values || []).join(", "))} (${hist.length})`;
+  parts.push(`<p class="panel-title" style="margin-top:10px;">${histTitle}</p>`);
   parts.push(hist.length
     ? '<div class="ctx-table-scroll"><table class="ctx-table"><tbody>' + hist.slice(0, 20).map(a => `
         <tr class="data-row" onclick="jumpToAlert('${a.alert_id}')">
@@ -3277,6 +3370,16 @@ document.addEventListener("click", (e) => {
   }
 });
 
+// "корреляция"/"инцидент" рядом с названием правила - оба поля уже есть в ответе
+// /rulesets/rules (см. rules_catalog: correlation - псевдо-скомпилированная запись .sigmacorr,
+// incident - булев бейдж наличия блока correlation.incident).
+function ruleKindBadges(r) {
+  let out = "";
+  if (r.correlation) out += ' <span class="badge badge-correlation" title="Correlation-правило: считает скользящее окно по срабатываниям других правил">корреляция</span>';
+  if (r.incident) out += ' <span class="badge badge-incident" title="При срабатывании заводит инцидент вместо обычного алерта">инцидент</span>';
+  return out;
+}
+
 async function loadSigmaRules(offset) {
   sigmaOffset = offset;
   const mySeq = ++sigmaRequestSeq;
@@ -3330,7 +3433,7 @@ async function loadSigmaRules(offset) {
         <tr class="data-row" data-id="${attr(r.id || "")}" onclick="selectSigmaRule('${escapeAttr(r.id || "")}', '${escapeAttr(rowRuleset)}')">
           <td><button type="button" class="in-main-btn${r.in_main ? " active" : ""}" title="${r.in_main ? "Убрать из основного рулсета" : "Добавить в основной рулсет"}" onclick="event.stopPropagation(); toggleRuleInMain('${escapeAttr(rowRuleset)}','${escapeAttr(r.id || "")}', ${r.in_main ? "false" : "true"})">${r.in_main ? "✓" : "+"}</button></td>
           <td>${sevBar(r.level)}</td>
-          <td>${escapeHtml(r.title || "")}</td>
+          <td>${escapeHtml(r.title || "")}${ruleKindBadges(r)}</td>
           <td>${escapeHtml(r.level || "")}</td>
           <td>${escapeHtml(r.status || "")}</td>
           <td>${escapeHtml(r.author || "")}</td>
@@ -3639,7 +3742,9 @@ async function saveRuleEditor() {
       });
       resultEl.innerHTML = `<span style="color:var(--accent)">Сохранено:</span> "${escapeHtml(res.title)}"`;
       await refreshRulesetOptions();
-      loadSigmaRules(sigmaOffset);
+      // await - иначе выделение строки бьётся о ещё не отрисованный список (панель бы
+      // показала правильное правило, а подсветка строки терялась).
+      await loadSigmaRules(sigmaOffset);
       selectSigmaRule(res.id, ruleEditorTarget.ruleset);
     } else {
       const target = readSigmaTarget("rule-editor", resultEl);
@@ -3652,7 +3757,11 @@ async function saveRuleEditor() {
       document.getElementById("rule-editor-target-new").value = "";
       await refreshRulesetOptions();
       document.getElementById("sigma-ruleset-select").value = res.ruleset_path;
-      loadSigmaRules(0);
+      // Список переключился на целевой рулсет - в детейл-панели справа при этом оставалось
+      // правило из ПРЕДЫДУЩЕГО рулсета, которого в показанном списке уже нет (выглядело как
+      // рассинхрон). Сразу выделяем только что сохранённое правило.
+      await loadSigmaRules(0);
+      selectSigmaRule(res.id, res.ruleset_path);
     }
     setTimeout(closeRuleEditor, 700);   // короткая пауза, чтобы пользователь увидел "Сохранено"/"Готово"
   } catch (e) {

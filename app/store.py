@@ -30,8 +30,24 @@ from app.fields import (
     USER_FIELDS,
     first_present,
 )
-from app.filter_lang import FILTER_OPS, IS_MATCHED_FIELD, RULE_FIELD, compile_condition, resolve_json_path
-from app.models import SOURCE_DESCRIPTION_MAX, Alert, Incident, Investigation, Severity, utcnow_naive
+from app.filter_lang import (
+    FILTER_OPS,
+    IS_MATCHED_FIELD,
+    RULE_FIELD,
+    FilterSyntaxError,
+    compile_condition,
+    resolve_json_path,
+)
+from app.models import (
+    INCIDENT_STATUSES,
+    SOURCE_DESCRIPTION_MAX,
+    Alert,
+    Incident,
+    Investigation,
+    Severity,
+    utcnow_naive,
+)
+from app.timeutil import normalize_event_time, normalize_time_bound
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS alerts (
@@ -62,6 +78,13 @@ CREATE TABLE IF NOT EXISTS events (
     event_id TEXT PRIMARY KEY,
     source_batch TEXT NOT NULL,
     host TEXT NOT NULL,
+    -- event_time КАНОНИЗИРОВАН на записи (app/timeutil.py:normalize_event_time): наивный ISO
+    -- по UTC "YYYY-MM-DDTHH:MM:SS[.ffffff]" - тот же формат, что у alerts.created_at и у границ
+    -- диапазона из UI. Сырое значение источника (пробел вместо 'T', суффикс 'Z', смещение
+    -- '+03:00') остаётся в raw_json, а сравнимая форма - здесь: только так строковое сравнение
+    -- совпадает с хронологическим, а SQL может сравнивать колонку НАПРЯМУЮ (без обёртки
+    -- replace(...), которая не давала планировщику использовать idx_events_time). Строки,
+    -- записанные до этого изменения, канонизирует одноразовый бэкфилл в _migrate.
     event_time TEXT,
     ingested_at TEXT NOT NULL,
     is_matched INTEGER NOT NULL DEFAULT 0,
@@ -95,10 +118,10 @@ CREATE INDEX IF NOT EXISTS idx_events_json_eventid ON events(json_extract(raw_js
 -- активной correlation-записи (см. hit_spec у store_events) - иначе таблица росла бы
 -- на каждое срабатывание любого из тысяч built-in-правил. event_id логически ссылается на
 -- events.event_id (без FOREIGN KEY - проект их нигде не использует), raw_json НЕ дублируется -
--- достаётся через JOIN. event_time здесь уже НОРМАЛИЗОВАННЫЙ (см. _normalize_event_time) вид,
--- не сырой формат источника - тогда evaluate_correlation_window может делать простой BETWEEN
--- без обёртки replace(...) в SQL и реально использовать индекс как range-scan (колонка,
--- обёрнутая в функцию, индекс так не использует).
+-- достаётся через JOIN. event_time здесь - ТА ЖЕ каноническая форма, что и в events.event_time
+-- (app/timeutil.py: одно значение пишется в обе таблицы, см. store_events): окно корреляции
+-- сравнивает строки леджера с границами, посчитанными из них же, поэтому расходиться форматам
+-- нельзя, а BETWEEN остаётся простым и использует idx_rule_hits_lookup как range-scan.
 CREATE TABLE IF NOT EXISTS rule_hits (
     event_id TEXT NOT NULL,
     rule_title TEXT NOT NULL,
@@ -141,9 +164,12 @@ CREATE INDEX IF NOT EXISTS idx_sources_token ON sources(token_sha256);
 -- Заводится ТОЛЬКО при срабатывании correlation-правила, помеченного блоком correlation.incident
 -- (см. app/detection/correlation.py:evaluate_batch, app/rules/rules_catalog.py). Обычные алерты
 -- в инциденты сами не собираются - catch-all прохода по alerts НЕТ (осознанное ограничение
--- этапа, см. docs/spec/incidents.md). dedup_key - фиксированный бакет по timespan правила
--- (incident_type:group_values:window_bucket): повтор в том же бакете -> UPDATE строки
--- (store.upsert_incidents), разрыв > timespan -> новый бакет -> новый инцидент. Инцидент
+-- этапа, см. docs/spec/incidents.md). dedup_key - ИСТОЧНИК + фиксированный бакет по timespan
+-- правила (source_batch:incident_type:group_values:window_bucket): повтор в том же бакете ->
+-- UPDATE строки (store.upsert_incidents), разрыв > timespan -> новый бакет -> новый инцидент.
+-- source_batch в ключе обязателен: инцидент привязан к ОДНОМУ источнику (колонка ниже, счёт
+-- корреляции, delete_batch), без него два источника с одной сущностью в одном бакете
+-- схлопывались в одну строку с меткой первого и содержимым второго. Инцидент
 -- ПЕРЕЖИВАЕТ свои events (ретеншн чистит events, не alerts/incidents) - GET /incidents/{id}/context
 -- обязан работать при пустом related_events. Привязан к ОДНОМУ source_batch (как и корреляция) -
 -- поэтому чистится в delete_batch вместе с events/alerts/rule_hits.
@@ -195,6 +221,15 @@ CREATE TABLE IF NOT EXISTS investigations (
 );
 CREATE INDEX IF NOT EXISTS idx_investigations_incident ON investigations(incident_id);
 CREATE INDEX IF NOT EXISTS idx_investigations_status   ON investigations(status);
+
+-- Служебные отметки о разовых операциях над данными (НЕ версия схемы - схема по-прежнему
+-- поддерживается только идемпотентными операциями _migrate). Нужна одна вещь: понять, что
+-- одноразовый бэкфилл уже отрабатывал на этом файле, и не перечитывать при каждом старте
+-- всю таблицу events заново (см. _backfill_event_time).
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Имя источника: 1..64 символов, буквы (в т.ч. кириллица - re.UNICODE у \w), цифры, пробел, . _ -
@@ -205,6 +240,12 @@ _SOURCE_NAME_RE = re.compile(r"^[\w.\- ]{1,64}$", re.UNICODE)
 # Порог троттлинга записи last_seen_at на горячем ingest-пути (см. authenticate_source).
 _SOURCE_LAST_SEEN_THROTTLE_S = 60.0
 
+# Плейсхолдеры под INCIDENT_STATUSES (app/models.py) - жизненный цикл статуса инцидента
+# проверяется в ДВУХ местах: моделью на входе HTTP (IncidentStatusUpdate -> 422 от FastAPI) и
+# здесь, в единственном методе, который эту колонку пишет (update_incident_status -> ValueError).
+# Второе - не дублирование ради дублирования: Store зовут и джобы (app/incidents.py), мимо HTTP.
+_STATUS_PLACEHOLDERS = ",".join("?" * len(INCIDENT_STATUSES))
+
 
 def _new_source_token() -> str:
     """Криптостойкий токен источника (~43 символа, URL-safe base64). В БД не хранится - только
@@ -214,16 +255,6 @@ def _new_source_token() -> str:
 
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _normalize_event_time(event_time: str | None) -> str | None:
-    """Нормализует event_time в вид "YYYY-MM-DDTHH:MM:SS[...]" (без пробела и без 'Z') -
-    та же логика, что сейчас инлайнится в SQL в _events_where на КАЖДОЕ чтение (replace/replace);
-    для rule_hits нормализуем один раз на запись, чтобы запрос к нему был простым BETWEEN и
-    реально использовал idx_rule_hits_lookup как range-scan (см. докстринг схемы выше)."""
-    if event_time is None:
-        return None
-    return event_time.replace(" ", "T").replace("Z", "")
 
 
 def _group_json_path(field: str) -> str:
@@ -285,6 +316,63 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "alert_id" not in events_cols:
         conn.execute("ALTER TABLE events ADD COLUMN alert_id TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_alert ON events(alert_id)")
+
+    # Мусорные статусы инцидентов, записанные до того, как PATCH /incidents/{id}/status начал
+    # проверять значение (модель принимала любую строку): такой инцидент не находится ни одним
+    # фильтром /incidents?status=... и фактически выпадает из триажа. Возвращаем его в 'new' -
+    # единственное безопасное значение (потерять "closed" было бы хуже, чем показать лишнее).
+    conn.execute(
+        f"UPDATE incidents SET status = 'new' WHERE status NOT IN ({_STATUS_PLACEHOLDERS})",
+        INCIDENT_STATUSES,
+    )
+
+    _backfill_event_time(conn)
+
+
+def _backfill_event_time(conn: sqlite3.Connection, chunk: int = 5000) -> int:
+    """Разовая канонизация уже накопленных event_time (см. app/timeutil.py и докстринг колонки
+    в _SCHEMA): до этого изменения на диск ложилось сырое значение источника, а нормализация
+    (только пробел/'Z', без смещений) делалась в SQL на каждое чтение. Смешивать два формата в
+    одной колонке нельзя - строковое сравнение диапазона перестало бы быть хронологическим.
+
+    Идемпотентна дважды: отметка в schema_meta (второй старт не читает таблицу вообще) и сам
+    пересчёт (канонизация канонического значения ничего не меняет - строка просто не попадает
+    в UPDATE). Порциями по chunk строк, чтобы не держать всю таблицу в памяти. rule_hits
+    обрабатывается той же процедурой - его event_time обязан совпадать с events.event_time
+    ДО символа (окно корреляции считается сравнением этих строк, см. app/detection/correlation.py).
+    """
+    row = conn.execute("SELECT value FROM schema_meta WHERE key = 'event_time_canonical'").fetchone()
+    if row is not None:
+        return 0
+
+    updated = 0
+    for table, pk in (("events", "event_id"), ("rule_hits", "rowid")):
+        last: Any = None
+        while True:
+            if last is None:
+                rows = conn.execute(
+                    f"SELECT {pk} AS pk, event_time FROM {table} ORDER BY {pk} LIMIT ?", (chunk,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT {pk} AS pk, event_time FROM {table} WHERE {pk} > ? ORDER BY {pk} LIMIT ?",
+                    (last, chunk),
+                ).fetchall()
+            if not rows:
+                break
+            last = rows[-1]["pk"]
+            changes = [
+                (canonical, r["pk"])
+                for r in rows
+                if (canonical := normalize_event_time(r["event_time"])) != r["event_time"]
+            ]
+            if changes:
+                conn.executemany(f"UPDATE {table} SET event_time = ? WHERE {pk} = ?", changes)
+                updated += len(changes)
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('event_time_canonical', '1')"
+    )
+    return updated
 
 # Ранг severity для сортировки колонки "Правило" (critical - самый высокий).
 _SEVERITY_RANK_SQL = (
@@ -377,7 +465,12 @@ def _build_extra_filter_clause(filters: list[dict] | None) -> tuple[str, list[An
 
     Компиляция каждого условия делегирована filter_lang.compile_condition - тот же движок,
     что и у текстового языка фильтра, поэтому оба пути (свободный текст и drill-in по группе)
-    гарантированно ведут себя одинаково. Путь поля и значение уходят как bound-параметры.
+    гарантированно ведут себя одинаково. Путь поля и значение уходят как bound-параметрами.
+
+    Нераспознанное условие (пустое поле, неизвестный оператор) - FilterSyntaxError, а НЕ
+    пропуск: раньше такое условие молча выбрасывалось, и drill-in вместо сужения отдавал всю
+    выборку целиком - fail-open там, где фильтр обязан только сужать. Транслируется в 400
+    (app/main.py:_parse_filters), как и ошибка синтаксиса текстового фильтра.
     """
     if not filters:
         return "", []
@@ -387,8 +480,10 @@ def _build_extra_filter_clause(filters: list[dict] | None) -> tuple[str, list[An
         field = str(f.get("field") or "").strip()
         op = str(f.get("op") or "eq").lower()
         value = f.get("value")
-        if not field or op not in FILTER_OPS:
-            continue
+        if not field:
+            raise FilterSyntaxError("условие фильтра без поля")
+        if op not in FILTER_OPS:
+            raise FilterSyntaxError(f"неизвестный оператор условия: {op}")
         sql, p = compile_condition(field, op, value)
         parts.append(sql)
         params += p
@@ -529,6 +624,79 @@ class Store:
             row.pop("sample_events", None)
         return rows
 
+    def count_alerts(
+        self,
+        source_batch: str | None = None,
+        rule_level: str | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+    ) -> int:
+        """Сколько всего алертов подходит под фильтры - для пейджера вкладки "Алерты"
+        (те же фильтры, что и у list_alerts, но без сортировки/лимита)."""
+        query = "SELECT COUNT(*) AS c FROM alerts WHERE 1=1"
+        params: list[Any] = []
+        if source_batch:
+            query += " AND source_batch = ?"
+            params.append(source_batch)
+        if rule_level:
+            query += " AND rule_level = ?"
+            params.append(rule_level)
+        if time_from:
+            query += " AND created_at >= ?"
+            params.append(time_from)
+        if time_to:
+            query += " AND created_at <= ?"
+            params.append(time_to)
+        with self._read_lock:
+            return int(self._read_conn.execute(query, params).fetchone()["c"])
+
+    def list_alerts_by_entity(
+        self,
+        values: list[str],
+        source_batch: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Алерты, в которых встречается хотя бы одно из значений `values` - история КОНКРЕТНОЙ
+        сущности (хост/пользователь/IP/процесс/произвольное значение group-by инцидента), а не
+        просто последние алерты источника.
+
+        Совпадение ищется в двух местах: колонка host и любое значение внутри entities
+        (json_tree обходит все списки Entities разом - users/hosts/src_ips/dst_ips/processes,
+        не требуя знать, к какой категории относится значение; именно поэтому подходит и для
+        group-by, который вообще не про "сущность" в смысле app/fields.py - напр. DNS QueryName
+        или путь ключа реестра, там просто не будет совпадений, и это честный пустой результат).
+        Сравнение регистронезависимое - имена хостов/пользователей от разных источников
+        приходят в разном регистре.
+
+        Это ПОКАЗАНИЯ ДЛЯ ЧЕЛОВЕКА/АГЕНТА (карточка инцидента), а не привязка member-алертов:
+        та идёт цепочкой event -> alert -> incident по event_id (см. link_alerts_to_incident) и
+        сопоставлением по значению не занимается принципиально."""
+        clean = [str(v).strip() for v in (values or []) if str(v or "").strip()]
+        if not clean:
+            return []
+        lowered = [v.lower() for v in clean]
+        placeholders = ",".join("?" * len(lowered))
+        query = (
+            f"SELECT * FROM alerts WHERE (lower(host) IN ({placeholders}) OR EXISTS ("
+            f"  SELECT 1 FROM json_tree(alerts.entities) t"
+            f"  WHERE t.atom IS NOT NULL AND lower(t.value) IN ({placeholders})"
+            f"))"
+        )
+        params: list[Any] = [*lowered, *lowered]
+        if source_batch:
+            query += " AND source_batch = ?"
+            params.append(source_batch)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        with self._read_lock:
+            rows = [dict(r) for r in self._read_conn.execute(query, params).fetchall()]
+        for row in rows:
+            row["mitre_techniques"] = json.loads(row["mitre_techniques"])
+            row["entities"] = json.loads(row["entities"])
+            row.pop("sample_events", None)
+        return rows
+
     def get_alert(self, alert_id: str) -> dict[str, Any] | None:
         with self._read_lock:
             row = self._read_conn.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,)).fetchone()
@@ -583,7 +751,10 @@ class Store:
             row_id = event.get("row_id")
             matched = matched_row_to_rules.get(row_id, [])
             host = first_present(event, HOST_FIELDS) or "unknown-host"
-            event_time = first_present(event, TIME_FIELDS)
+            # Каноническая форма ложится и в events.event_time, и в rule_hits.event_time - это
+            # ОДНО И ТО ЖЕ значение (см. app/timeutil.py): окно корреляции сравнивает строки
+            # леджера, диапазон в UI - строки events, и разъезжаться им нельзя.
+            event_time = normalize_event_time(first_present(event, TIME_FIELDS))
             event_id = str(uuid4())
             row_id_to_event_id[row_id] = event_id
             rows.append((
@@ -602,7 +773,7 @@ class Store:
                 first_present(event, EVENT_CODE_FIELDS),
             ))
             if hit_spec:
-                normalized_time = _normalize_event_time(event_time)
+                normalized_time = event_time  # уже канонизирован выше, повторно не трогаем
                 for title in matched:
                     fields = hit_spec.get(title)
                     if fields is None:
@@ -681,18 +852,21 @@ class Store:
         if only_matched is not None:
             sql += " AND is_matched = ?"
             params.append(1 if only_matched else 0)
-        # event_time хранится как есть, форматы у источников разные: EVTX даёт
-        # "YYYY-MM-DD HH:MM:SS" (пробел, без TZ), другие источники - ISO с "T" и суффиксом
-        # "Z" (напр. "...T04:13:05.650Z"). Границы из UI приходят как "наивная" ISO-строка
-        # без суффикса (см. timeParams() в index.html - специально без Z, чтобы совпадать
-        # с этим же наивным форматом и с alerts.created_at). Нормализуем event_time к тому
-        # же виду перед сравнением, иначе строковое сравнение ломается на разнице форматов.
-        if time_from:
-            sql += " AND replace(replace(event_time, ' ', 'T'), 'Z', '') >= ?"
-            params.append(time_from)
-        if time_to:
-            sql += " AND replace(replace(event_time, ' ', 'T'), 'Z', '') <= ?"
-            params.append(time_to)
+        # event_time в колонке уже КАНОНИЗИРОВАН на записи (app/timeutil.py), поэтому граница
+        # приводится к той же форме - и сравнение идёт с голой колонкой, без обёртки
+        # replace(replace(...)), которая не давала планировщику взять idx_events_time. Границу
+        # нормализуем ЗДЕСЬ, в единственной точке сбора WHERE для событий: раньше она уходила
+        # в SQL как есть, и "2026-09-05 09:00:00" (формат, который показывает сама колонка
+        # «Время») молча не находил ничего. Верхняя граница - включающая (сентинель в
+        # normalize_time_bound), иначе событие ровно на time_to с дробной частью выпадало.
+        lo = normalize_time_bound(time_from)
+        hi = normalize_time_bound(time_to, upper=True)
+        if lo:
+            sql += " AND event_time >= ?"
+            params.append(lo)
+        if hi:
+            sql += " AND event_time <= ?"
+            params.append(hi)
         if query_filter and query_filter[0]:
             sql += " AND " + query_filter[0]
             params += query_filter[1]
@@ -836,11 +1010,11 @@ class Store:
     ) -> dict[str, Any]:
         """
         Точная оценка ОДНОГО (correlation-правило, group-by-ключ) сочетания в пределах окна
-        [time_from, time_to] (нормализованные строки, см. _normalize_event_time - сравниваются
+        [time_from, time_to] (канонические строки, см. app/timeutil.py - сравниваются
         простым BETWEEN, использует idx_rule_hits_lookup как range-scan) и одного source_batch
-        (корреляция считается "в рамках одного источника", см. CLAUDE.md). Вызывается ФАЗОЙ 2
-        двухфазного счёта (app/detection/correlation.py) - точная перепроверка кандидатов,
-        прошедших грубый порог evaluate_correlation_windows (фаза 1).
+        (корреляция считается "в рамках одного источника", см. CLAUDE.md). Вызывается
+        app/detection/correlation.py как АВТОРИТЕТНЫЙ счёт по окну, которое до этого нашёл
+        проход скользящим окном в памяти (A3, см. _best_anchor / docs/spec/correlation.md).
 
         Счёт - ИСКЛЮЧИТЕЛЬНО по rule_hits.group_json, БЕЗ JOIN к events: group_json уже несёт
         денормализованные значения нужных полей (group-by ∪ condition.field, см.
@@ -848,7 +1022,10 @@ class Store:
         попаданий в окне, а НЕ размером events/БД в целом (обязательное требование, см.
         CLAUDE.md/docs/spec/correlation.md). JOIN к events нужен ТОЛЬКО для sample_events
         (реальный контент события для карточки алерта) - отдельный маленький запрос
-        (LIMIT sample_limit), не влияющий на стоимость счёта.
+        (LIMIT sample_limit), не влияющий на стоимость счёта. Синтетическим попаданиям цепочек
+        (event_id "corr:...") в events не соответствует ничего, и в sample_events они не
+        попадают - разворачивает их в реальные события правила-предка вызывающая сторона
+        (app/detection/correlation.py:_expand_synthetic_samples).
 
         mode: "events" (по умолчанию) - COUNT(*) (event_count); "distinct_values" - COUNT(DISTINCT
         json_extract(group_json, distinct_field)) (value_count, mode подставляется автоматически,
@@ -915,75 +1092,6 @@ class Store:
                 continue
         return {"count": count, "sample_events": sample_events, "event_ids": event_ids}
 
-    def evaluate_correlation_windows(
-        self,
-        rule_titles: list[str],
-        source_batch: str,
-        time_from: str,
-        time_to: str,
-        group_by: list[str],
-        mode: str,
-        distinct_field: str | None = None,
-    ) -> dict[tuple[Any, ...], int]:
-        """
-        ФАЗА 1 двухфазного счёта (app/detection/correlation.py): ОДИН GROUP BY-запрос по ВСЕМ
-        group-by-ключам сразу вместо запроса на каждый ключ (было O(K*H) с JOIN к events на
-        каждый ключ - см. CLAUDE.md/docs/spec/correlation.md) - без JOIN к events, читает
-        только rule_hits (индекс idx_rule_hits_lookup даёт узкий диапазон строк по (rule_title,
-        source_batch, event_time), GROUP BY дальше работает над этим маленьким набором в
-        памяти). Стоимость определяется плотностью попаданий в окне, НЕ размером БД.
-
-        Окно [time_from, time_to] здесь - ОБЪЕДИНЁННОЕ окно нескольких ключей сразу (могло бы
-        завысить счёт отдельных ключей с более ранним anchor, чем у самого позднего в группе) -
-        это ГРУБАЯ оценка для короткого замыкания: ключи, прошедшие здесь порог, перепроверяются
-        ТОЧНО (evaluate_correlation_window) в СВОЁМ индивидуальном окне.
-
-        mode: "events" - COUNT(*); "distinct_values" - COUNT(DISTINCT json_extract(group_json,
-        distinct_field)); "distinct_rules" - COUNT(DISTINCT rule_title). Возвращает
-        {tuple(значения group_by): count} - ключи с хотя бы одним None-полем (group_json не
-        содержал нужного поля) пропускаются, они не образуют валидный ключ группировки.
-        """
-        if not rule_titles or not group_by:
-            return {}
-        if mode == "distinct_values" and not distinct_field:
-            return {}
-
-        rule_placeholders = ",".join("?" * len(rule_titles))
-        key_params: list[Any] = []
-        key_cols = []
-        for i, field in enumerate(group_by):
-            key_cols.append(f"json_extract(group_json, ?) AS k{i}")
-            key_params.append(_group_json_path(field))
-        key_cols_sql = ", ".join(key_cols)
-        group_cols_sql = ", ".join(f"k{i}" for i in range(len(group_by)))
-
-        if mode == "distinct_values":
-            agg_sql = "COUNT(DISTINCT json_extract(group_json, ?)) AS c"
-            agg_params = [_group_json_path(distinct_field)]
-        elif mode == "distinct_rules":
-            agg_sql = "COUNT(DISTINCT rule_title) AS c"
-            agg_params = []
-        else:
-            agg_sql = "COUNT(*) AS c"
-            agg_params = []
-
-        query = (
-            f"SELECT {key_cols_sql}, {agg_sql} FROM rule_hits "
-            f"WHERE rule_title IN ({rule_placeholders}) AND source_batch = ? "
-            f"AND event_time BETWEEN ? AND ? "
-            f"GROUP BY {group_cols_sql}"
-        )
-        params = [*key_params, *agg_params, *rule_titles, source_batch, time_from, time_to]
-        with self._read_lock:
-            rows = self._read_conn.execute(query, params).fetchall()
-        result: dict[tuple[Any, ...], int] = {}
-        for row in rows:
-            key = tuple(row[f"k{i}"] for i in range(len(group_by)))
-            if any(v is None for v in key):
-                continue
-            result[key] = row["c"]
-        return result
-
     def fetch_correlation_hit_sequence(
         self,
         rule_titles: list[str],
@@ -995,8 +1103,8 @@ class Store:
         limit: int = 500,
     ) -> list[tuple[str, str]]:
         """(rule_title, event_time) для ОДНОГО group-by-ключа, по возрастанию времени - только
-        для temporal_ordered: после того как evaluate_correlation_windows(mode="distinct_rules")
-        уже отобрал кандидатов с числом уникальных rule_title >= числа ссылок, здесь -
+        для temporal_ordered: после того как счёт по окну (evaluate_correlation_window,
+        mode="distinct_rules") показал число уникальных rule_title >= числа ссылок, здесь -
         РЕАЛЬНЫЙ порядок появления (жадное сопоставление подпоследовательности делает вызывающая
         сторона, app/detection/correlation.py: SQL не выражает "порядок Sigma-ссылок" напрямую,
         а строк на выходе и так немного - окно уже узкое, limit подстраховка от аномалий)."""
@@ -1031,7 +1139,7 @@ class Store:
         [(ключ-кортеж, event_time, rule_title, значение distinct_field|None)], по возрастанию
         event_time. Один индексный range-scan по idx_rule_hits_lookup + OR-фильтр по ключам -
         стоимость от плотности попаданий В ОКНЕ для ЭТИХ ключей, не от размера БД (тот же
-        принцип, что у evaluate_correlation_windows). Строки с None в любом компоненте ключа
+        принцип, что у evaluate_correlation_window). Строки с None в любом компоненте ключа
         отбрасываются (group_json не содержал поля).
 
         Используется A3-оценкой (app/detection/correlation.py): вместо SQL-счёта на каждое
@@ -1088,6 +1196,28 @@ class Store:
                 row["dval"] if distinct_field else None,
             ))
         return out
+
+    def fetch_hit_group_values(self, event_id: str, rule_title: str) -> dict[str, str] | None:
+        """group_json одного попадания леджера, разобранный в {поле: значение}. None, если
+        строки нет или в ней пустой group_json.
+
+        Нужен разворачиванию СИНТЕТИЧЕСКИХ попаданий (event_id вида "corr:{dedup}:{title}:
+        {anchor}", которые пишет сама корреляция для цепочек, см. insert_correlation_hits):
+        чтобы достать реальные события правила-предка, надо знать, по какому group-by-ключу
+        оно тогда сработало - а ключ лежит ровно здесь (см. app/detection/correlation.py:
+        _expand_synthetic_samples). Поиск по первичному ключу, к events не ходит."""
+        with self._read_lock:
+            row = self._read_conn.execute(
+                "SELECT group_json FROM rule_hits WHERE event_id = ? AND rule_title = ?",
+                (event_id, rule_title),
+            ).fetchone()
+        if row is None or not row["group_json"]:
+            return None
+        try:
+            parsed = json.loads(row["group_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def insert_correlation_hits(self, rows: list[tuple[str, str, str, str, str | None]]) -> None:
         """Записывает сработавшую корреляцию как обычное попадание в rule_hits: (синтетический
@@ -1490,14 +1620,20 @@ class Store:
                     (incident_id,),
                 ).fetchall()
             ]
-            inv = self._read_conn.execute(
-                "SELECT * FROM investigations WHERE incident_id = ? ORDER BY created_at DESC LIMIT 1",
-                (incident_id,),
-            ).fetchone()
-        result["investigation"] = self._investigation_row(inv) if inv is not None else None
+        # Расследование берём отдельным вызовом (уже вне _read_lock - он не реентрантный):
+        # тот же запрос, что и в get_investigation, дублировать его тут незачем.
+        result["investigation"] = self.get_investigation(incident_id)
         return result
 
     def update_incident_status(self, incident_id: str, status: str) -> bool:
+        """Смена триаж-статуса инцидента. Неизвестный статус - ValueError, а не запись в БД:
+        такой инцидент потом не находится ни одним фильтром /incidents?status=... и молча
+        выпадает из работы. HTTP-слой до этой проверки обычно не доходит (модель
+        IncidentStatusUpdate отбивает 422), но Store зовут и мимо HTTP - из джоб."""
+        if status not in INCIDENT_STATUSES:
+            raise ValueError(
+                f"Недопустимый статус инцидента: {status!r} (ожидается один из {', '.join(INCIDENT_STATUSES)})"
+            )
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE incidents SET status = ?, updated_at = ? WHERE incident_id = ?",
@@ -1527,6 +1663,8 @@ class Store:
             ]
 
     def get_investigation(self, incident_id: str) -> dict[str, Any] | None:
+        """Последнее расследование инцидента (или None). Используется get_incident (карточка
+        инцидента) и тестами; настоящий агент Этапа 5 читает статус через тот же метод."""
         with self._read_lock:
             row = self._read_conn.execute(
                 "SELECT * FROM investigations WHERE incident_id = ? ORDER BY created_at DESC LIMIT 1",

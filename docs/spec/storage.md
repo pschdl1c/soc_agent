@@ -75,7 +75,7 @@
 | `event_id` | TEXT | PRIMARY KEY (`uuid4`) |
 | `source_batch` | TEXT | NOT NULL |
 | `host` | TEXT | NOT NULL (`first_present(event, HOST_FIELDS)` или `"unknown-host"`) |
-| `event_time` | TEXT | NULL; сырой формат источника |
+| `event_time` | TEXT | NULL; **каноническая** форма (`app/timeutil.py:normalize_event_time`): наивный ISO по UTC `YYYY-MM-DDTHH:MM:SS[.ffffff]`. Сырой формат источника остаётся в `raw_json` |
 | `ingested_at` | TEXT | NOT NULL, ISO UTC |
 | `is_matched` | INTEGER | NOT NULL DEFAULT 0 |
 | `matched_rules` | TEXT | NOT NULL DEFAULT `'[]'`, JSON-массив названий правил |
@@ -119,13 +119,13 @@ correlation-правил (для цепочек, см. `insert_correlation_hits`
 | `event_id` | TEXT | NOT NULL; логическая ссылка на `events.event_id` (без FOREIGN KEY) для обычных попаданий, либо синтетический `corr:<title>:<dedup_key>:<anchor_time>` для попаданий correlation-правила |
 | `rule_title` | TEXT | NOT NULL |
 | `source_batch` | TEXT | NOT NULL |
-| `event_time` | TEXT | NULL; **нормализованный** вид (`" "` → `"T"`, удалён `"Z"`) |
+| `event_time` | TEXT | NULL; та же **каноническая** форма, что и `events.event_time` — оба поля пишутся ОДНИМ значением в `store_events` |
 | `group_json` | TEXT | NULL, JSON-объект `{поле: str(значение)}` — денормализованные значения group-by (∪ `condition.field` у value_count) ЭТОГО попадания |
 
 PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_title, source_batch, event_time)`.
 
 Строка добавляется только если название правила входит в `hit_spec`, переданный в
-`store_events` (см. ниже). `event_time` нормализуется на запись, чтобы запрос окна использовал
+`store_events` (см. ниже). `event_time` канонизируется на запись, чтобы запрос окна использовал
 простой `BETWEEN` как range-scan по индексу. **Счёт корреляции (Этап A) читает ИСКЛЮЧИТЕЛЬНО
 `group_json`, без JOIN к `events`** — стоимость определяется плотностью попаданий в окне, а не
 размером `events`/БД в целом (обязательное требование, см. `docs/spec/correlation.md`). `NULL`
@@ -195,7 +195,8 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 - `raw_events` — события батча из `ZircoliteCore` (содержат `row_id`).
 - `matched_row_to_rules` — `{row_id: [названия правил]}`.
 - Для каждого события: `host` = `first_present(event, HOST_FIELDS)` или `"unknown-host"`;
-  `event_time` = `first_present(event, TIME_FIELDS)`; `is_matched` = `1`, если список правил
+  `event_time` = `normalize_event_time(first_present(event, TIME_FIELDS))` (каноническая форма,
+  см. `app/timeutil.py`); `is_matched` = `1`, если список правил
   непуст; `matched_rules` = JSON списка; `raw_json` = JSON события; ECS-lite колонки —
   `first_present` по соответствующим спискам `app/fields.py` (см. схему `events` выше).
 - `hit_spec` (Этап A, было `hit_worthy_titles: set[str]`) — `{rule_title: {поля}}` для
@@ -203,7 +204,7 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
   (см. `app/detection/correlation.py:active_hit_spec`). Для события, сматченного таким
   правилом, добавляется строка в `rule_hits` — `group_json` собирается как
   `{поле: str(event[поле])}` по набору полей ИЗ `hit_spec[rule_title]` (пропуская отсутствующие
-  в событии), `event_time` нормализуется.
+  в событии), `event_time` — то же каноническое значение, что и у строки `events`.
 - Вставка через `executemany`, один `commit`. Возвращает число событий.
 
 ### `list_events(source_batch=None, only_matched=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, fields=None, query_filter=None, extra_filters=None, limit=100, offset=0) -> list[dict]`
@@ -213,7 +214,11 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 - `query_filter` — готовый `(sql, params)` из `app/filter_lang.py:compile_filter_query`.
 - `extra_filters` — список условий `{field, op, value}` drill-in по группе; всегда добавляются
   по AND (`compile_condition` из `app/filter_lang.py`).
-- `time_from`/`time_to` сравниваются с `replace(replace(event_time, ' ', 'T'), 'Z', '')`.
+- `time_from`/`time_to` приводятся к канонической форме (`normalize_time_bound`) и сравниваются
+  с голой колонкой `event_time` — планировщик использует `idx_events_time` как range-scan.
+  Верхняя граница ВКЛЮЧАЮЩАЯ: `time_to=…T21:01:30` накрывает и `…T21:01:30.113000`.
+- `extra_filters` с неизвестным оператором/пустым полем → `FilterSyntaxError` (400), а не
+  молчаливый пропуск условия: drill-in обязан только сужать выборку.
 - `sort_by` ∈ {`event_time`, `host`, `is_matched`} или произвольный путь `raw_json`
   (`json_extract`); без `sort_by` → `ORDER BY ingested_at DESC`.
 - В строках `matched_rules` десериализуется, `is_matched` приводится к `bool`.
@@ -259,17 +264,6 @@ A3-оценка (см. `docs/spec/correlation.md` за подробным раз
 отбрасываются. Один индексный range-scan по `idx_rule_hits_lookup` — стоимость от плотности
 попаданий этих ключей в диапазоне, не от размера БД.
 
-### `evaluate_correlation_windows(rule_titles, source_batch, time_from, time_to, group_by, mode, distinct_field=None) -> dict[tuple, int]`
-
-Один `GROUP BY`-запрос по `rule_hits` сразу по ВСЕМ ключам group-by в `[time_from, time_to]`.
-`mode`: `"events"` — `COUNT(*)`; `"distinct_values"` —
-`COUNT(DISTINCT json_extract(group_json, distinct_field))` (`value_count`); `"distinct_rules"` —
-`COUNT(DISTINCT rule_title)` (`temporal`/`temporal_ordered`). Возвращает
-`{tuple(значения group_by): count}` — ключи с хотя бы одним `None`-полем пропускаются.
-**Движком (`app/detection/correlation.py`) с переходом на A3 больше не вызывается** — оставлен
-как самостоятельный метод `Store` (свои тесты в `tests/test_store.py`); A3 делает грубый гейт
-Python-стороной по строкам из `fetch_correlation_hits`, без второго прохода по `rule_hits`.
-
 ### `evaluate_correlation_window(base_rule_titles, group_by, key_values, source_batch, time_from, time_to, mode=None, distinct_field=None, sample_limit=10) -> dict`
 
 Точная оценка ОДНОГО (correlation-правило, group-by-ключ) сочетания в конкретном окне
@@ -279,7 +273,9 @@ Python-стороной по строкам из `fetch_correlation_hits`, бе�
 - Условия: `rule_title IN (base_rule_titles)`, `source_batch = ?`,
   `event_time BETWEEN time_from AND time_to` (нормализованные строки), и по одному условию
   `json_extract(group_json, <group_by[i]>) = str(key_values[i])`.
-- `mode` (как у `evaluate_correlation_windows`, дефолт `"events"`, автоматически
+- `mode`: `"events"` — `COUNT(*)`; `"distinct_values"` —
+  `COUNT(DISTINCT json_extract(group_json, distinct_field))` (`value_count`); `"distinct_rules"` —
+  `COUNT(DISTINCT rule_title)` (`temporal`/`temporal_ordered`). Дефолт `"events"`, автоматически
   `"distinct_values"` при заданном `distinct_field` без явного `mode`).
 - `sample_events` — до `sample_limit` `e.raw_json` (`JOIN rule_hits h ON events e`), отсортированных
   по `h.event_time ASC`.

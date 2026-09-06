@@ -297,7 +297,6 @@ def test_degrades_without_db(kb_missing):
     assert kb.available() is False
     assert kb.meta() == {"available": False}
     assert kb.matrix() == {"available": False, "tactics": []}
-    assert kb.list_tactics() == []
     assert kb.get_technique("T1059") is None
 
     out = kb.enrich_techniques(["attack.t1059", "attack.t1078"])

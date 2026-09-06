@@ -99,7 +99,8 @@ delete_events_older_than`, см. `app/main.py:_run_retention`), зовётся �
 
 ## Обработка ошибок flush (`_flush`) и periodic-задач (`_run_periodic`)
 
-`process_fn(buffer)` в `try/except Exception` — исключение логируется (`print`), поток
+`process_fn(buffer)` в `try/except Exception` — исключение логируется
+(`logger.exception`, см. `docs/spec/logging.md`), поток
 не падает. Форвардер получает `202` независимо от исхода обработки батча. Аналогично каждая
 periodic-задача (`retention_fn`, заглушка вердиктов инцидентов) вызывается через `_run_periodic`
 (`try/except Exception`, логирование) — ошибка одной задачи не должна ронять ingest.

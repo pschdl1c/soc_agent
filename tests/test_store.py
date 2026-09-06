@@ -181,9 +181,17 @@ def _corr_alert(dedup_key: str, source_batch: str = "b1", event_count: int = 1) 
     )
 
 
-def test_evaluate_correlation_windows_counts_multiple_keys_at_once(store):
-    """Фаза 1 двухфазного счёта - один запрос должен вернуть счётчики СРАЗУ по нескольким
-    group-by-ключам, без отдельного запроса на каждый (см. app/detection/correlation.py)."""
+def _window_count(store, title: str, key: str, time_from: str, time_to: str) -> int:
+    """Счёт попаданий одного (правило, ключ group-by) в окне - см. evaluate_correlation_window.
+    Помощник для тестов ниже: раньше они звали evaluate_correlation_windows ("фаза 1" старого
+    двухфазного счёта), но её удалили вместе с самой фазой (A3 считает окно в памяти)."""
+    return store.evaluate_correlation_window(
+        base_rule_titles=[title], group_by=["IpAddress"], key_values=(key,),
+        source_batch="b1", time_from=time_from, time_to=time_to,
+    )["count"]
+
+
+def test_evaluate_correlation_window_counts_hits_per_key(store):
     events = [
         {"row_id": 1, "IpAddress": "10.0.0.1", "SystemTime": "2024-01-01T00:00:00"},
         {"row_id": 2, "IpAddress": "10.0.0.1", "SystemTime": "2024-01-01T00:00:01"},
@@ -194,15 +202,11 @@ def test_evaluate_correlation_windows_counts_multiple_keys_at_once(store):
         matched_row_to_rules={1: ["Failed Auth"], 2: ["Failed Auth"], 3: ["Failed Auth"]},
         hit_spec={"Failed Auth": {"IpAddress"}},
     )
-    counts = store.evaluate_correlation_windows(
-        rule_titles=["Failed Auth"], source_batch="b1",
-        time_from="0000-01-01T00:00:00", time_to="9999-12-31T23:59:59",
-        group_by=["IpAddress"], mode="events",
-    )
-    assert counts == {("10.0.0.1",): 2, ("10.0.0.2",): 1}
+    assert _window_count(store, "Failed Auth", "10.0.0.1", "0000-01-01T00:00:00", "9999-12-31T23:59:59") == 2
+    assert _window_count(store, "Failed Auth", "10.0.0.2", "0000-01-01T00:00:00", "9999-12-31T23:59:59") == 1
 
 
-def test_evaluate_correlation_windows_respects_time_bounds(store):
+def test_evaluate_correlation_window_respects_time_bounds(store):
     old = [{"row_id": 1, "IpAddress": "10.0.0.1", "SystemTime": "2024-01-01T00:00:00"}]
     new = [{"row_id": 2, "IpAddress": "10.0.0.1", "SystemTime": "2024-01-01T00:10:00"}]
     # store_events сам не нормализует event_time для rule_hits кроме как через hit_spec -
@@ -215,12 +219,8 @@ def test_evaluate_correlation_windows_respects_time_bounds(store):
         new, source_batch="b1", matched_row_to_rules={2: ["Failed Auth"]},
         hit_spec={"Failed Auth": {"IpAddress"}},
     )
-    counts = store.evaluate_correlation_windows(
-        rule_titles=["Failed Auth"], source_batch="b1",
-        time_from="2024-01-01T00:05:00", time_to="2024-01-01T00:10:00",
-        group_by=["IpAddress"], mode="events",
-    )
-    assert counts == {("10.0.0.1",): 1}  # только "новое" событие внутри окна
+    # только "новое" событие внутри окна
+    assert _window_count(store, "Failed Auth", "10.0.0.1", "2024-01-01T00:05:00", "2024-01-01T00:10:00") == 1
 
 
 def test_insert_correlation_hits_is_idempotent(store):
@@ -228,12 +228,8 @@ def test_insert_correlation_hits_is_idempotent(store):
     store.insert_correlation_hits([row])
     store.insert_correlation_hits([row])  # повторная запись того же (event_id, rule_title)
 
-    counts = store.evaluate_correlation_windows(
-        rule_titles=["Bruteforce"], source_batch="b1",
-        time_from="0000-01-01T00:00:00", time_to="9999-12-31T23:59:59",
-        group_by=["IpAddress"], mode="events",
-    )
-    assert counts == {("10.0.0.1",): 1}  # не задвоилось
+    count = _window_count(store, "Bruteforce", "10.0.0.1", "0000-01-01T00:00:00", "9999-12-31T23:59:59")
+    assert count == 1  # не задвоилось
 
 
 def test_upsert_correlation_alerts_overwrites_not_increments(store):
@@ -271,12 +267,8 @@ def test_delete_events_older_than_removes_old_events_and_orphaned_hits(store):
 
     # Осиротевший rule_hits (для удалённого старого события) должен быть вычищен тоже -
     # иначе счёт корреляции видел бы 2 попадания вместо 1.
-    counts = store.evaluate_correlation_windows(
-        rule_titles=["Failed Auth"], source_batch="b1",
-        time_from="0000-01-01T00:00:00", time_to="9999-12-31T23:59:59",
-        group_by=["IpAddress"], mode="events",
-    )
-    assert counts == {("10.0.0.1",): 1}
+    count = _window_count(store, "Failed Auth", "10.0.0.1", "0000-01-01T00:00:00", "9999-12-31T23:59:59")
+    assert count == 1
 
 
 def test_delete_events_older_than_keeps_recent_events(store):
@@ -350,3 +342,185 @@ def test_migrate_adds_missing_columns_to_pre_existing_db(tmp_path):
         assert s.count_events(source_batch="b1") == 1
     finally:
         s.close()
+
+
+# ---------------------------------------------------------------- Время: канонизация и границы
+# Регрессия: event_time хранился в сыром формате источника и нормализовался в SQL на каждое
+# чтение, а граница из параметра не нормализовалась вообще (см. app/timeutil.py).
+
+def test_event_time_is_canonical_on_disk(store):
+    store.store_events(
+        [
+            {"row_id": 1, "Hostname": "HOST-A", "SystemTime": "2026-09-05 21:01:30.113"},
+            {"row_id": 2, "Hostname": "HOST-A", "SystemTime": "2026-09-05T21:00:00+03:00"},
+        ],
+        source_batch="b1",
+        matched_row_to_rules={},
+    )
+    times = sorted(r["event_time"] for r in store.list_events(source_batch="b1"))
+    assert times == ["2026-09-05T18:00:00", "2026-09-05T21:01:30.113000"]
+
+
+def test_time_from_accepts_space_separated_bound(store):
+    store.store_events(
+        [{"row_id": 1, "Hostname": "HOST-A", "SystemTime": "2026-09-05T09:30:00"}],
+        source_batch="b1", matched_row_to_rules={},
+    )
+    # Ровно тот формат, который показывает колонка «Время» в UI - раньше отдавал 0 строк.
+    assert len(store.list_events(source_batch="b1", time_from="2026-09-05 09:00:00")) == 1
+
+
+def test_time_to_includes_event_with_fraction_on_the_boundary(store):
+    store.store_events(
+        [{"row_id": 1, "Hostname": "HOST-A", "SystemTime": "2026-09-05T21:01:30.113"}],
+        source_batch="b1", matched_row_to_rules={},
+    )
+    assert store.count_events(source_batch="b1", time_to="2026-09-05T21:01:30") == 1
+    assert store.count_events(source_batch="b1", time_to="2026-09-05T21:01:29") == 0
+
+
+def test_time_range_compares_offsets_as_one_moment(store):
+    """Событие с '+03:00' попадает в диапазон, заданный в UTC - это один и тот же момент."""
+    store.store_events(
+        [{"row_id": 1, "Hostname": "HOST-A", "SystemTime": "2026-09-05T21:00:00+03:00"}],
+        source_batch="b1", matched_row_to_rules={},
+    )
+    assert store.count_events(
+        source_batch="b1", time_from="2026-09-05T17:59:00", time_to="2026-09-05T18:01:00"
+    ) == 1
+    assert store.count_events(source_batch="b1", time_from="2026-09-05T20:59:00") == 0
+
+
+def test_rule_hits_time_matches_events_time(store):
+    """Окно корреляции сравнивает строки rule_hits с границами, посчитанными из тех же строк -
+    расхождение формата между таблицами сделало бы счёт неверным."""
+    store.store_events(
+        [{"row_id": 1, "IpAddress": "10.0.0.1", "SystemTime": "2026-09-05 21:01:30.113"}],
+        source_batch="b1", matched_row_to_rules={1: ["Failed Auth"]},
+        hit_spec={"Failed Auth": {"IpAddress"}},
+    )
+    event_time = store.list_events(source_batch="b1")[0]["event_time"]
+    hit_time = store._read_conn.execute("SELECT event_time FROM rule_hits").fetchone()["event_time"]
+    assert hit_time == event_time == "2026-09-05T21:01:30.113000"
+
+
+def test_migrate_backfills_legacy_event_time(tmp_path):
+    """БД, накопленная ДО канонизации, приводится к одному формату разовым бэкфиллом - иначе в
+    одной колонке смешались бы два формата и строковое сравнение перестало бы быть хронологическим."""
+    import sqlite3
+
+    from app.store import Store
+
+    db_path = str(tmp_path / "legacy.db")
+    s = Store(db_path=db_path)
+    s.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO events (event_id, source_batch, host, event_time, ingested_at, is_matched,"
+        " matched_rules, raw_json) VALUES ('e1', 'b1', 'HOST-A', '2026-09-05 21:01:30.113',"
+        " '2026-09-05T00:00:00', 0, '[]', '{}')"
+    )
+    conn.execute(
+        "INSERT INTO rule_hits (event_id, rule_title, source_batch, event_time, group_json)"
+        " VALUES ('e1', 'Failed Auth', 'b1', '2026-09-05T21:01:30.113', '{}')"
+    )
+    conn.execute("DELETE FROM schema_meta WHERE key = 'event_time_canonical'")
+    conn.commit()
+    conn.close()
+
+    s = Store(db_path=db_path)
+    try:
+        assert s.list_events(source_batch="b1")[0]["event_time"] == "2026-09-05T21:01:30.113000"
+        hit = s._read_conn.execute("SELECT event_time FROM rule_hits").fetchone()["event_time"]
+        assert hit == "2026-09-05T21:01:30.113000"
+        # Отметка проставлена - второй старт таблицу уже не перечитывает.
+        marker = s._read_conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'event_time_canonical'"
+        ).fetchone()
+        assert marker is not None
+    finally:
+        s.close()
+
+
+# ---------------------------------------------------------------- Drill-in по группе (fail-closed)
+
+def test_group_cond_with_unknown_operator_raises(store):
+    """Нераспознанное условие обязано быть ошибкой: молча пропустив его, drill-in вместо
+    сужения отдавал бы всю выборку целиком."""
+    import pytest
+
+    from app.filter_lang import FilterSyntaxError
+
+    store.store_events(
+        [{"row_id": 1, "Hostname": "HOST-A", "EventID": 1}], source_batch="b1", matched_row_to_rules={}
+    )
+    with pytest.raises(FilterSyntaxError):
+        store.list_events(source_batch="b1", extra_filters=[{"field": "EventID", "op": "regex", "value": 1}])
+    with pytest.raises(FilterSyntaxError):
+        store.list_events(source_batch="b1", extra_filters=[{"field": "", "op": "eq", "value": 1}])
+
+
+# ---------------------------------------------------------------- История сущности
+
+def test_list_alerts_by_entity_matches_host_and_entities(store):
+    store.upsert_alerts([
+        _alert("d1", host="HOST-A"),
+        _alert("d2", host="HOST-B"),
+    ])
+    alert = _alert("d3", host="HOST-C")
+    alert.entities = Entities(users=["alice"], hosts=["HOST-C"])
+    store.upsert_alerts([alert])
+
+    by_host = store.list_alerts_by_entity(["host-a"])  # регистр не важен
+    assert [a["host"] for a in by_host] == ["HOST-A"]
+
+    by_user = store.list_alerts_by_entity(["alice"])
+    assert [a["host"] for a in by_user] == ["HOST-C"]
+
+    assert store.list_alerts_by_entity(["10.10.10.10"]) == []
+    assert store.list_alerts_by_entity([]) == []
+
+
+# ------------------------------------------------------------------ ECS-lite колонки события
+
+
+def test_entity_columns_are_filterable_and_indexed(store):
+    """DEAD-1: колонки user_name/src_ip/dst_ip/process/event_code раньше писались на каждое
+    событие и не читались нигде. Теперь это имена полей фильтра (filter_lang.ENTITY_COLUMNS) -
+    одно имя сущности поверх разнобоя имён у источников, и по ним работает индекс, а не
+    full-scan json_extract."""
+    from app.filter_lang import compile_filter_query
+
+    store.store_events(
+        [
+            {"row_id": 1, "Hostname": "H1", "TargetUserName": "admin", "IpAddress": "10.0.0.5",
+             "Image": "C:\Windows\cmd.exe", "EventID": 4625, "SystemTime": "2024-01-01T00:00:00"},
+            {"row_id": 2, "Hostname": "H2", "SubjectUserName": "guest", "SourceAddress": "10.0.0.9",
+             "NewProcessName": "powershell.exe", "EventCode": 4624, "SystemTime": "2024-01-01T00:00:01"},
+        ],
+        source_batch="b1", matched_row_to_rules={},
+    )
+
+    def _find(query: str) -> list[str]:
+        rows = store.list_events(source_batch="b1", query_filter=compile_filter_query(query))
+        return sorted(r["host"] for r in rows)
+
+    # Разные источники называют пользователя/адрес/процесс по-разному - имя фильтра одно.
+    assert _find('user_name = "admin"') == ["H1"]
+    assert _find('user_name = "guest"') == ["H2"]
+    assert _find('src_ip = "10.0.0.9"') == ["H2"]
+    assert _find('process contains "powershell"') == ["H2"]
+    assert _find('event_code = 4625') == ["H1"]
+    assert _find('dst_ip is null') == ["H1", "H2"]
+
+    # Группировка по тому же имени - тот же путь резолва поля.
+    groups = store.group_events(group_by="user_name", source_batch="b1")["groups"]
+    assert sorted(g["value"] for g in groups) == ["admin", "guest"]
+
+    # И главное - планировщик берёт индекс (ради этого колонки и заводились).
+    sql, params = compile_filter_query('src_ip = "10.0.0.5"')
+    plan = store._read_conn.execute(
+        "EXPLAIN QUERY PLAN SELECT event_id FROM events WHERE " + sql, params
+    ).fetchall()
+    assert any("idx_events_src_ip" in row["detail"] for row in plan), [dict(r) for r in plan]

@@ -91,15 +91,16 @@ micro-batch И независимо от размера БД.
 `rule_hits.group_json`; `EXPLAIN QUERY PLAN` на `fetch_correlation_hits`/
 `evaluate_correlation_window` даёт `SEARCH rule_hits USING INDEX idx_rule_hits_lookup (...)`.
 
-`store.evaluate_correlation_windows` (старая «фаза 1», один `GROUP BY` по объединённому окну)
-движком больше не вызывается — метод оставлен в `Store` (свои тесты), но A3 делает гейт
-Python-стороной по тем же вытащенным строкам, без второго прохода по `rule_hits`.
+Старая «фаза 1» (`store.evaluate_correlation_windows`, один `GROUP BY` по объединённому окну)
+удалена вместе с методом: A3 делает гейт Python-стороной по строкам из
+`fetch_correlation_hits`, без второго прохода по `rule_hits`.
 
 ## Цепочки (correlation → correlation) без отдельной таблицы
 
 Сработавшая correlation-запись пишется в `rule_hits` КАК ОБЫЧНОЕ попадание
-(`store.insert_correlation_hits`): синтетический `event_id` (`corr:<title>:<dedup_key>:
-<anchor_time>`), `rule_title` = title самой корреляции, `event_time` = anchor окна,
+(`store.insert_correlation_hits`): синтетический `event_id` (`corr:<dedup_key>:<title>:
+<anchor_time>` — `dedup_key` ВСЕГДА второй `:`-сегмент, `split(":", 2)`), `rule_title` =
+title самой корреляции, `event_time` = anchor окна,
 `group_json` = ЕЁ СОБСТВЕННЫЕ значения group-by. Родительская корреляция видит потомка ТЕМ ЖЕ
 запросом, что и обычное базовое правило — код `temporal`/`event_count`/etc. не различает
 происхождение попадания.
@@ -113,6 +114,33 @@ Python-стороной по тем же вытащенным строкам, б
 топологическому порядку в ЭТОМ ЖЕ вызове, считает свой count запросом К БД, а не по
 внутрипроцессным данным; если бы запись откладывалась, родитель не увидел бы только что
 сработавшего потомка вообще.
+
+### Разворот синтетических попаданий в события (`_expand_synthetic_samples`)
+
+Синтетическому `event_id` в `events` не соответствует НИЧЕГО, поэтому `JOIN` в
+`store.evaluate_correlation_window` его молча пропускает: у корреляции НАД корреляцией
+`sample_events` приходили пустыми, а вместе с ними пустыми были `entities` (они извлекаются из
+сэмплов) — карточка инцидента и контекст агента для самых интересных сценариев не содержали ни
+одного события.
+
+После того как окно найдено, `_evaluate_correlation_rule` разворачивает синтетические
+`event_ids` в РЕАЛЬНЫЕ события правила-предка:
+
+1. `_split_synthetic_hit(event_id, known_titles)` — из `corr:<dedup>:<title>:<anchor>` достаёт
+   `(title, anchor_time)`. Позиционно надёжны только первые два сегмента (`dedup` — hex без
+   `:`), поэтому `title` не «вырезается», а СОПОСТАВЛЯЕТСЯ с названиями активных
+   correlation-правил (самое длинное совпадение).
+2. `store.fetch_hit_group_values(event_id, title)` — ключ, по которому предок тогда сработал
+   (его `group_json` в леджере).
+3. `store.evaluate_correlation_window(...)` по окну предка `[anchor − timespan_предка, anchor]`
+   — его `sample_events` и его `event_ids`.
+4. Рекурсия по шагам 1–3, если предок сам ссылался на корреляцию (глубина ≤ `_MAX_EXPAND_DEPTH`;
+   цикл невозможен — `_topo_order` отвергает его раньше).
+
+`_merge_samples` сводит сэмплы окна самой корреляции и развёрнутые события предков в один
+хронологический список без повторов, не длиннее `_MAX_SAMPLE_EVENTS`. Стоимость платится ТОЛЬКО
+в момент реального срабатывания цепочки и только на контент событий — счётный путь не
+затрагивается.
 
 ### `_topo_order` — порядок обработки
 
@@ -180,7 +208,8 @@ best-effort в исходном порядке.
 8. Сработавшие ключи → `Alert` (`_build_alert`), либо — если у правила есть блок
    `correlation.incident` (Этап 4) — `Incident` (`_build_incident`) ВМЕСТО `Alert` (обычного
    `engine="correlation"` алерта по такому правилу не будет). Идентичность инцидента —
-   фиксированный бакет по `timespan` (`dedup_key = sha256(incident_type:group_values:window_bucket)`).
+   источник + фиксированный бакет по `timespan`
+   (`dedup_key = sha256(source_batch:incident_type:group_values:window_bucket)`).
    `store.insert_correlation_hits(...)` пишется СРАЗУ в обоих случаях (единообразие/цепочки).
 9. `store.upsert_correlation_alerts(alerts)` + `store.upsert_incidents(incidents)` (с
    `store.enqueue_investigation` на каждый) — один раз в конце по всем правилам батча.
@@ -250,8 +279,10 @@ best-effort в исходном порядке.
 - Якорь окна — `event_time` одного из сохранённых попаданий (A3 перебирает точки-якоря в
   диапазоне `[min(new), max(new) + timespan]`), не `datetime.now()` — корректная работа при
   replay исторических датасетов и при перемешанном порядке прихода.
-- Нормализация времени (`_normalize_event_time`) дублирует `app/store._normalize_event_time`:
-  `" "` → `"T"`, удаление `"Z"`. Форма должна совпадать с `rule_hits.event_time`.
+- Нормализация времени — общий лист-модуль `app/timeutil.py` (`normalize_event_time`): наивный
+  ISO по UTC, смещения (`+03:00`) конвертируются. Та же функция канонизирует `events.event_time`
+  и `rule_hits.event_time` на записи (`store.store_events`) — форма окна и форма леджера
+  совпадают по построению, а не по договорённости двух копий кода.
 - Корреляция считается в пределах одного `source_batch`.
 - Скорость счёта не зависит от размера `events`/БД — только от плотности попаданий внутри
   окна (`docs/spec/storage.md`, `scripts/bench_correlation.py`).

@@ -162,7 +162,8 @@ def main() -> None:
     # source_batch теперь общий для всех прогонов этого источника - изолируем прогон по host
     # (рандомизирован выше), иначе stale-алерт от прошлого позитивного прогона сломал бы --negative.
     while time.monotonic() - t0 < 20.0:
-        alerts = _get_json(url, f"/alerts?{urllib.parse.urlencode({'source_batch': source})}")
+        # /alerts отдаёт обёртку {alerts, total, limit, offset}
+        alerts = _get_json(url, f"/alerts?{urllib.parse.urlencode({'source_batch': source})}")["alerts"]
         if any(a.get("rule_title") == TARGET_RULE_TITLE and a.get("host") == host for a in alerts):
             break
         time.sleep(1.5)

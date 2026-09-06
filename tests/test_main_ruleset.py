@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from app.rules import main_ruleset, rules_catalog
-from app.rules.rules_catalog import CatalogError
+from app.rules.rules_catalog import CatalogError, CatalogNotFound
 
 BUILTIN_RULESET_PATH = "Zircolite/rules/rules_linux.json"
 
@@ -75,3 +75,24 @@ def test_toggle_rule_rejects_builtin():
         main_ruleset.toggle_rule(BUILTIN_RULESET_PATH, "some-rule-id", True)
     state = main_ruleset.load_state()
     assert BUILTIN_RULESET_PATH not in state["included_rules"]
+
+
+# ---------------------------------------------------------------- 404 vs 400 (API-4)
+# Отказ по смыслу ("встроенный рулсет в main нельзя") и отсутствие объекта ("такого рулсета
+# нет") - разные вещи: main.py транслирует первое в 400, второе в 404 (см. _catalog_http).
+
+def test_toggle_ruleset_builtin_is_not_a_not_found():
+    _skip_if_no_builtin_clone()
+    with pytest.raises(CatalogError) as exc:
+        main_ruleset.toggle_ruleset(BUILTIN_RULESET_PATH, True)
+    assert not isinstance(exc.value, CatalogNotFound)  # существует, просто недопустим как цель
+
+
+def test_toggle_ruleset_missing_custom_is_not_found():
+    with pytest.raises(CatalogNotFound):
+        main_ruleset.toggle_ruleset("custom_rulesets/deadbeefdeadbeef", True)
+
+
+def test_toggle_rule_missing_custom_is_not_found():
+    with pytest.raises(CatalogNotFound):
+        main_ruleset.toggle_rule("custom_rulesets/deadbeefdeadbeef", "some-rule-id", True)

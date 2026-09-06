@@ -9,12 +9,14 @@ UI аналитика: http://localhost:8000/
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 try:
@@ -27,12 +29,12 @@ except PackageNotFoundError:  # pragma: no cover
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from app import config, incidents, kb
+from app import config, incidents, kb, logging_setup
 from app.detection import correlation
 from app.detection.engine import ZircoliteEngine
 from app.detection.normalize import zircolite_results_to_alerts
 from app.fields import INGEST_SOURCE_FIELD
-from app.filter_lang import FilterSyntaxError, compile_filter_query
+from app.filter_lang import FILTER_OPS, FilterSyntaxError, compile_filter_query
 from app.ingest_queue import IngestQueueFull, IngestWorker
 from app.models import (
     CustomRuleSubmit,
@@ -49,7 +51,7 @@ from app.models import (
     ValueListUpdate,
 )
 from app.rules import main_ruleset, rules_catalog, value_lists
-from app.rules.rules_catalog import CatalogError, RuleValidationError
+from app.rules.rules_catalog import CatalogError, CatalogNotFound, RuleValidationError
 from app.rules.value_lists import ValueListError
 from app.store import Store
 
@@ -75,6 +77,11 @@ _EXTENSION_TO_INPUT_TYPE = {
 def _guess_input_type(filename: str) -> str:
     suffix = Path(filename).suffix.lower()
     return _EXTENSION_TO_INPUT_TYPE.get(suffix, "json")
+
+# Логирование настраивается ДО создания движка/хранилища - первое же сообщение (загрузка
+# рулсета) должно уйти уже в UTF-8-хендлер, а не в print с кодировкой консоли Windows.
+logging_setup.configure(config.LOG_LEVEL)
+logger = logging.getLogger(__name__)
 
 engine = ZircoliteEngine(config_path=CONFIG_PATH, default_ruleset_path=DEFAULT_RULESET_PATH)
 store = Store(db_path=DB_PATH)
@@ -106,6 +113,17 @@ def _split_events_by_source(events: list[dict], default_label: str) -> dict[str,
     return groups
 
 
+def _catalog_http(exc: CatalogError) -> HTTPException:
+    """Единая трансляция ошибок каталога правил в HTTP: 404 - объекта нет (CatalogNotFound),
+    400 - объект есть, но действие над ним недопустимо (встроенный рулсет как цель записи/
+    удаления/добавления в main, кривой путь, взаимоисключающие параметры).
+
+    Раньше ручки каталога отдавали 404 на любую CatalogError, и отказ по смыслу выглядел как
+    «не найден» на заведомо существующий встроенный рулсет - см. app/rules/rules_catalog.py:
+    CatalogNotFound."""
+    return HTTPException(status_code=404 if isinstance(exc, CatalogNotFound) else 400, detail=str(exc))
+
+
 def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, source_label: str) -> IngestResponse:
     # dedup_by_content выбирает режим дедупа алертов (app/detection/normalize.py): True - хэш
     # содержимого события (custom-рулсеты и "main" - тот теперь СОБИРАЕТСЯ только из custom, см.
@@ -127,7 +145,7 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
         try:
             rules = rules_catalog.load_rules(ruleset_path)
         except CatalogError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise _catalog_http(exc)
         raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
             events_path=events_path, rules=rules, input_type=input_type,
         )
@@ -263,7 +281,7 @@ def _run_retention() -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=config.EVENTS_RETENTION_DAYS)).isoformat()
     deleted = store.delete_events_older_than(cutoff)
     if deleted:
-        print(f"[retention] удалено {deleted} событий старше {config.EVENTS_RETENTION_DAYS}д")
+        logger.info("ретеншн: удалено %s событий старше %sд", deleted, config.EVENTS_RETENTION_DAYS)
 
 
 def _run_incident_verdicts() -> None:
@@ -273,7 +291,7 @@ def _run_incident_verdicts() -> None:
         return
     processed = incidents.run_pending(store)
     if processed:
-        print(f"[incidents] обработано расследований: {processed}")
+        logger.info("обработано расследований: %s", processed)
 
 
 # Потоковый ingest: воркер зовёт _process_events ОДИН РАЗ на весь флаш (может мешать несколько
@@ -552,12 +570,22 @@ def list_alerts(
     sort_dir: str | None = None,
     limit: int = 100,
     offset: int = 0,
-) -> list[dict]:
-    return store.list_alerts(
-        source_batch=source_batch, rule_level=rule_level,
-        time_from=time_from, time_to=time_to, sort_by=sort_by, sort_dir=sort_dir,
-        limit=limit, offset=offset,
-    )
+) -> dict:
+    """Ответ - обёртка {alerts, total, limit, offset} (как у /events и /incidents): без total
+    UI не мог нарисовать пейджер и молча показывал первые 100 алертов из скольких угодно."""
+    return {
+        "alerts": store.list_alerts(
+            source_batch=source_batch, rule_level=rule_level,
+            time_from=time_from, time_to=time_to, sort_by=sort_by, sort_dir=sort_dir,
+            limit=limit, offset=offset,
+        ),
+        "total": store.count_alerts(
+            source_batch=source_batch, rule_level=rule_level,
+            time_from=time_from, time_to=time_to,
+        ),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/alerts/{alert_id}")
@@ -693,13 +721,38 @@ def get_incident_context(incident_id: str) -> dict:
         except FilterSyntaxError as exc:
             notes.append(f"фильтр событий по сущности не собрался: {exc}")
 
+    # История СУЩНОСТИ, а не источника: раньше сюда уходили просто последние 50 алертов
+    # source_batch без всякой привязки к group_key - на живом потоке это шум, который агент
+    # принял бы за релевантный контекст. Теперь ищем алерты, где реально встречаются значения
+    # group-by инцидента (host + любое значение внутри entities, см.
+    # store.list_alerts_by_entity). Если group-by не про "сущность" (напр. DNS QueryName) -
+    # совпадений просто не будет, и это честный пустой результат, а не подмена шумом.
+    entity_values = [
+        str(v).strip() for v in (inc.get("group_key") or {}).values() if str(v or "").strip()
+    ]
+    if entity_values:
+        entity_history = {
+            "scope": "entity",
+            "values": entity_values,
+            "alerts": store.list_alerts_by_entity(
+                entity_values, source_batch=inc["source_batch"], limit=50
+            ),
+        }
+    else:
+        entity_history = {
+            "scope": "source",
+            "values": [],
+            "alerts": store.list_alerts(source_batch=inc["source_batch"], limit=50),
+        }
+        notes.append("у инцидента пустой group_key - в истории последние алерты источника, не сущности")
+
     result = {
         "incident": inc,
         "correlation_rule": correlation_rule,
         "member_rules": member_rules,
         "sample_events": inc.get("sample_events", []),
         "related_events": related,
-        "entity_history": {"alerts": store.list_alerts(source_batch=inc["source_batch"], limit=50)},
+        "entity_history": entity_history,
     }
     if notes:
         result["note"] = "; ".join(notes)
@@ -718,6 +771,23 @@ def _parse_filters(filters: str | None) -> list[dict] | None:
         raise HTTPException(status_code=400, detail=f"filters: невалидный JSON ({exc})")
     if not isinstance(parsed, list):
         raise HTTPException(status_code=400, detail="filters: ожидался JSON-массив условий")
+    # Нераспознанное условие - 400 здесь и сейчас, а не молчаливый пропуск при сборке WHERE:
+    # drill-in по группе обязан только СУЖАТЬ выборку, а условие, которое некуда скомпилировать,
+    # раньше просто выбрасывалось - и запрос отдавал всё подряд (fail-open). Store на этот же
+    # случай бросает FilterSyntaxError (см. store._build_extra_filter_clause) - тут ошибка
+    # ловится раньше и с указанием, какое именно условие не разобрано.
+    for cond in parsed:
+        if not isinstance(cond, dict):
+            raise HTTPException(status_code=400, detail=f"filters: условие должно быть объектом, а не {type(cond).__name__}")
+        field = str(cond.get("field") or "").strip()
+        op = str(cond.get("op") or "eq").lower()
+        if not field:
+            raise HTTPException(status_code=400, detail="filters: условие без поля")
+        if op not in FILTER_OPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"filters: неизвестный оператор '{op}' (допустимы: {', '.join(sorted(FILTER_OPS))})",
+            )
     return parsed
 
 
@@ -854,7 +924,7 @@ def get_ruleset_rules(
             level=level_list, status=status_list,
         )
     except CatalogError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise _catalog_http(exc)
 
 
 @app.get("/rulesets/rule")
@@ -862,7 +932,7 @@ def get_ruleset_rule(ruleset: str, rule_id: str) -> dict:
     try:
         rule = rules_catalog.get_rule(ruleset, rule_id)
     except CatalogError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise _catalog_http(exc)
     if rule is None:
         raise HTTPException(status_code=404, detail="Правило не найдено")
     return rule
@@ -885,7 +955,9 @@ async def upload_ruleset(
         info, _target_path, collisions, imported = rules_catalog.save_ruleset_yaml(
             yaml_text, ruleset, new_ruleset_name,
         )
-    except (CatalogError, RuleValidationError, ValueListError) as exc:
+    except CatalogError as exc:
+        raise _catalog_http(exc)
+    except (RuleValidationError, ValueListError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     # Файл мог нести документы-определения списков (Sigma pipeline value_placeholders и т.п.) -
     # они уже записаны; пересобираем правила ДРУГИХ рулсетов, если те списки изменились.
@@ -899,7 +971,7 @@ def delete_ruleset(ruleset: str) -> dict:
     try:
         rules_catalog.delete_custom_ruleset(ruleset)
     except CatalogError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise _catalog_http(exc)
     engine.invalidate(ruleset)
     main_ruleset.on_ruleset_deleted(ruleset)
     return {"deleted": ruleset}
@@ -909,7 +981,9 @@ def delete_ruleset(ruleset: str) -> dict:
 def create_custom_rule(body: CustomRuleSubmit) -> dict:
     try:
         compiled, target_path = rules_catalog.save_custom_rule(body.yaml_text, body.ruleset, body.new_ruleset_name)
-    except (RuleValidationError, CatalogError) as exc:
+    except CatalogError as exc:
+        raise _catalog_http(exc)
+    except RuleValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     engine.invalidate(target_path)
     return {**compiled, "ruleset_path": target_path}
@@ -922,7 +996,7 @@ def update_custom_rule(rule_id: str, ruleset: str, body: CustomRuleUpdate) -> di
     except RuleValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except CatalogError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise _catalog_http(exc)
     engine.invalidate(ruleset)
     return compiled
 
@@ -932,7 +1006,7 @@ def delete_custom_rule(rule_id: str, ruleset: str) -> dict:
     try:
         rules_catalog.delete_custom_rule(ruleset, rule_id)
     except CatalogError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise _catalog_http(exc)
     engine.invalidate(ruleset)
     return {"deleted": rule_id}
 
@@ -942,7 +1016,7 @@ def toggle_main_ruleset_rule(body: MainRulesetRuleToggle) -> dict:
     try:
         in_main = main_ruleset.toggle_rule(body.ruleset, body.rule_id, body.include)
     except CatalogError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise _catalog_http(exc)
     return {"ruleset": body.ruleset, "rule_id": body.rule_id, "in_main": in_main}
 
 
@@ -951,7 +1025,7 @@ def toggle_main_ruleset_ruleset(body: MainRulesetToggle) -> dict:
     try:
         status = main_ruleset.toggle_ruleset(body.ruleset, body.include)
     except CatalogError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise _catalog_http(exc)
     return {"ruleset": body.ruleset, "main_status": status}
 
 

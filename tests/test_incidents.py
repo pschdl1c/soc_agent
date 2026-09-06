@@ -125,6 +125,36 @@ def test_same_bucket_refire_updates_single_incident(store, monkeypatch):
     assert incs[0]["window_end"] >= "2024-01-01T00:20"
 
 
+def test_same_entity_in_two_sources_creates_two_incidents(store, monkeypatch):
+    """source_batch входит в dedup_key. Без него два источника, увидевшие одну сущность в одном
+    бакете (один IP по двум серверам, у каждого свой форвардер), схлопывались в ОДНУ строку:
+    UPDATE перезаписывал окно/сэмплы/сущности данными второго, а метка source_batch оставалась
+    от первого - карточка показывала события B под ярлыком A, member-алерты приезжали из обоих,
+    а /incidents/{id}/context собирал related_events по источнику A."""
+    corr = _corr("BF", ["Failed Auth"], "event_count", ["IpAddress"], "1h", {"gte": 10}, incident=_INC)
+    _active(monkeypatch, [corr])
+
+    # Один и тот же IP, одно и то же время - различается ТОЛЬКО источник.
+    from_a = _events("Failed Auth", 10, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:00:00")
+    _ingest(store, from_a, "forwarder-a", "Failed Auth", {"IpAddress"})
+    correlation.evaluate_batch(store, "rs", "forwarder-a", {"Failed Auth": from_a})
+
+    from_b = _events("Failed Auth", 10, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:00:00")
+    _ingest(store, from_b, "forwarder-b", "Failed Auth", {"IpAddress"})
+    correlation.evaluate_batch(store, "rs", "forwarder-b", {"Failed Auth": from_b})
+
+    a = store.list_incidents(source_batch="forwarder-a")
+    b = store.list_incidents(source_batch="forwarder-b")
+    assert len(a) == 1 and len(b) == 1
+    assert a[0]["incident_id"] != b[0]["incident_id"]
+    assert a[0]["dedup_key"] != b[0]["dedup_key"]
+
+    # Удаление одного источника не трогает инцидент другого.
+    store.delete_batch("forwarder-a")
+    assert store.list_incidents(source_batch="forwarder-a") == []
+    assert len(store.list_incidents(source_batch="forwarder-b")) == 1
+
+
 def test_gap_beyond_timespan_creates_second_incident(store, monkeypatch):
     corr = _corr("BF", ["Failed Auth"], "event_count", ["IpAddress"], "5m", {"gte": 10}, incident=_INC)
     _active(monkeypatch, [corr])
@@ -464,3 +494,82 @@ def test_run_pending_error_path(store, monkeypatch):
     monkeypatch.setattr(store, "update_investigation", flaky)
     incidents_mod.run_pending(store)
     assert store.get_investigation(inc_id)["status"] == "error"
+
+
+def test_chain_incident_carries_events_of_the_child_correlation(store, monkeypatch):
+    """AGT-1: у корреляции НАД корреляцией sample_events/entities приходили пустыми - попадание
+    правила-предка живёт в rule_hits с синтетическим event_id ("corr:..."), которому в events
+    не соответствует ничего, и JOIN его молча пропускал. Для агента Этапа 5 это означало
+    инцидент вообще без входных данных."""
+    child = _corr("Failures By Account", ["Failed Auth"], "event_count",
+                  ["TargetDomainName", "TargetUserName"], "1d", {"gte": 10}, level="medium")
+    parent = _corr(
+        "Account Compromised", ["Failures By Account", "Success Auth"], "temporal_ordered",
+        ["TargetDomainName", "TargetUserName"], "1d", level="high",
+        base_refs=[
+            {"title": "Failures By Account", "kind": "correlation"},
+            {"title": "Success Auth", "kind": "base"},
+        ],
+        incident={"type": "account_compromise"},
+    )
+    _active(monkeypatch, [child, parent])
+
+    key = {"TargetDomainName": "CORP", "TargetUserName": "bob"}
+    failed = _events("Failed Auth", 10, key, "2024-01-01T00:00:00")
+    _ingest(store, failed, "b1", "Failed Auth", {"TargetDomainName", "TargetUserName"})
+    success = _events("Success Auth", 1, key, "2024-01-01T00:20:00")
+    _ingest(store, success, "b1", "Success Auth", {"TargetDomainName", "TargetUserName"})
+
+    correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": failed, "Success Auth": success})
+
+    inc = store.get_incident(store.list_incidents(source_batch="b1")[0]["incident_id"])
+    samples = inc["sample_events"]
+    # И успешный вход (окно самой корреляции), и предшествующие неудачи (окно предка).
+    assert len(samples) > 1
+    row_ids = {s.get("row_id", "") for s in samples}
+    assert any(str(r).startswith("Failed Auth-") for r in row_ids)
+    assert any(str(r).startswith("Success Auth-") for r in row_ids)
+    # Сэмплы идут по времени, а не "успешный вход первым".
+    times = [s["SystemTime"] for s in samples]
+    assert times == sorted(times)
+    # entities извлекаются из сэмплов - раньше они были пустыми вместе с ними.
+    assert inc["entities"]["users"] == ["bob"]
+
+
+def test_update_incident_status_rejects_unknown_value(store):
+    """API-1: раньше {"status": "bogus"} доезжал до БД, после чего инцидент не находился
+    ни одним фильтром /incidents?status=..."""
+    import pytest
+
+    store.upsert_incidents([_incident("d-status")])
+    incident_id = store.list_incidents(source_batch="b1")[0]["incident_id"]
+
+    assert store.update_incident_status(incident_id, "investigating") is True
+    with pytest.raises(ValueError):
+        store.update_incident_status(incident_id, "bogus")
+    assert store.get_incident(incident_id)["status"] == "investigating"
+
+
+def test_migrate_repairs_garbage_incident_status(tmp_path):
+    """Мусор, записанный до появления проверки, возвращается в 'new' - иначе инцидент навсегда
+    выпадает из триажа (ни один фильтр по статусу его не находит)."""
+    import sqlite3
+
+    from app.store import Store
+
+    db_path = str(tmp_path / "garbage.db")
+    s = Store(db_path=db_path)
+    s.upsert_incidents([_incident("d-garbage")])
+    incident_id = s.list_incidents(source_batch="b1")[0]["incident_id"]
+    s.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE incidents SET status = 'bogus' WHERE incident_id = ?", (incident_id,))
+    conn.commit()
+    conn.close()
+
+    s = Store(db_path=db_path)
+    try:
+        assert s.get_incident(incident_id)["status"] == "new"
+    finally:
+        s.close()

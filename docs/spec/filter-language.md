@@ -46,17 +46,28 @@ value      = STRING | WORD
 drill-in по группе. Правила приведения типов:
 
 - `eq`/`neq`/`contains`/`in` — обе стороны приводятся к TEXT (`CAST(... AS TEXT)`), сравнение
-  по отображаемому значению независимо от JSON-типа.
+  по отображаемому значению независимо от JSON-типа. ИСКЛЮЧЕНИЕ — поля из `ENTITY_COLUMNS`:
+  это настоящие TEXT-колонки, `CAST` для них не добавляется (с ним планировщик не берёт
+  индекс колонки).
 - `gt`/`lt`/`gte`/`lte` — если значение похоже на число, `CAST(... AS REAL)`, иначе TEXT.
 - `neq` для обычного поля: `(<col> IS NULL OR <col> <> ?)` — событие без поля проходит `!=`.
 
-### `resolve_json_path(field: str) -> tuple[str, list[Any]]`
+### `resolve_field(field: str) -> tuple[str, list[Any], bool]`
 
-- Поле из `INDEXED_JSON_FIELDS` (ключ в нижнем регистре) → `("json_extract(raw_json, '<литерал>')", [])`.
-- Иначе → `("json_extract(raw_json, ?)", ['$."<field без кавычек>"'])`.
+Возвращает `(SQL-выражение поля, доп. bound-параметры, признак «это настоящая TEXT-колонка»)`.
+Ключ поля приводится к нижнему регистру.
+
+- Поле из `ENTITY_COLUMNS` → `("<имя колонки events>", [], True)`.
+- Поле из `INDEXED_JSON_FIELDS` → `("json_extract(raw_json, '<литерал>')", [], False)`.
+- Иначе → `("json_extract(raw_json, ?)", ['$."<field без кавычек>"'], False)`.
 
 Литеральный путь для индексируемых полей нужен, чтобы SQLite применил индекс на выражении
 (`app/store.py:idx_events_json_eventid`) — bound-параметр для этого не подходит.
+
+### `resolve_json_path(field: str) -> tuple[str, list[Any]]`
+
+`resolve_field` без третьего элемента — для мест, где `CAST` не применяется вовсе: `ORDER BY`,
+кастом-колонки выдачи, выражение группировки (`app/store.py`).
 
 ## Константы
 
@@ -64,8 +75,23 @@ drill-in по группе. Правила приведения типов:
 |---|---|
 | `FILTER_OPS` | `{eq, neq, contains, in, gt, lt, gte, lte, isnull, notnull}` |
 | `INDEXED_JSON_FIELDS` | `{"eventid": '$."EventID"'}` |
+| `ENTITY_COLUMNS` | `{"user_name", "src_ip", "dst_ip", "process", "event_code"} → одноимённые колонки `events`` |
 | `RULE_FIELD` | `"rule"` |
 | `IS_MATCHED_FIELD` | `"is_matched"` |
+
+## Поля сущности (`ENTITY_COLUMNS`)
+
+`user_name`, `src_ip`, `dst_ip`, `process`, `event_code` — не поля `raw_json`, а ECS-lite
+колонки `events`, заполняемые на записи по спискам кандидатов из `app/fields.py`
+(`TargetUserName`/`SubjectUserName`/... → `user_name`, `IpAddress`/`SourceAddress`/... →
+`src_ip`, `Image`/`NewProcessName`/... → `process`, `EventID`/`EventCode` → `event_code`).
+
+Смысл: одно имя поля фильтра поверх разнобоя имён у источников (EVTX Security, Sysmon,
+auditd) плюс индексы `idx_events_user`/`idx_events_src_ip` вместо full-scan `json_extract`.
+Работают везде, где резолвится поле: условие фильтра, `group_by`, `sort_by`, кастом-колонка.
+
+Совпадение имени регистронезависимое: если у источника есть СВОЁ поле `process`, фильтр по
+нему уйдёт в ECS-lite колонку (сырое значение остаётся видно в карточке события).
 
 ## Псевдополе `is_matched`
 
@@ -100,6 +126,8 @@ drill-in по группе. Правила приведения типов:
 - AST — кортежи (`("and", …)`, `("cond", field, op, value)`), не исполняемый код; `eval` не
   используется.
 - Значение условия всегда bound-параметр.
+- Имя колонки для `ENTITY_COLUMNS` — литерал из фиксированного словаря по ключу, не производная
+  от пользовательского текста.
 - Путь поля — bound-параметр, кроме `INDEXED_JSON_FIELDS`, где путь — литерал из фиксированного
   словаря по ключу, не производная от сырого текста.
 

@@ -13,6 +13,8 @@
 | [`fields.md`](fields.md) | `app/fields.py` | Кандидаты имён полей, маркер источника |
 | [`storage.md`](storage.md) | `app/store.py` | SQLite-хранилище `siem.db`, схема, API `Store` |
 | [`filter-language.md`](filter-language.md) | `app/filter_lang.py` | Мини-язык фильтра событий → SQL |
+| [`time.md`](time.md) | `app/timeutil.py` | Каноническая форма метки времени, границы диапазона |
+| [`logging.md`](logging.md) | `app/logging_setup.py` | Настройка логирования (UTF-8-вывод) |
 | [`detection-engine.md`](detection-engine.md) | `app/detection/engine.py` | Обёртка Zircolite, прогон батча |
 | [`normalization.md`](normalization.md) | `app/detection/normalize.py` | Результат Zircolite → список `Alert` |
 | [`correlation.md`](correlation.md) | `app/detection/correlation.py` | Стейтфул-корреляция `event_count` / `value_count` |

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional, get_args
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -33,6 +33,13 @@ _SEVERITY_RANK: dict[str, int] = {
     "high": 4,
     "critical": 5,
 }
+
+
+# Жизненный цикл триаж-статуса инцидента - ЕДИНСТВЕННОЕ определение на проект: им типизировано
+# тело PATCH /incidents/{id}/status (422 на всё остальное), им же проверяет запись Store
+# (update_incident_status) и чинит мусор, записанный до появления проверки (store._migrate).
+IncidentStatus = Literal["new", "investigating", "closed"]
+INCIDENT_STATUSES: tuple[str, ...] = get_args(IncidentStatus)
 
 
 class Severity(str, Enum):
@@ -125,7 +132,7 @@ class Incident(BaseModel):
     incident_type: str  # slug из correlation.incident.type
     title: str
     severity: Severity
-    status: str = "new"  # new -> investigating -> closed (зеркалит Alert.status)
+    status: IncidentStatus = "new"  # см. IncidentStatus - единственный источник правды
     source_batch: str
     ruleset_path: str = ""
     correlation_rule_id: str = ""
@@ -183,8 +190,13 @@ class IngestResponse(BaseModel):
 
 
 class IncidentStatusUpdate(BaseModel):
-    """Тело PATCH /incidents/{id}/status - new -> investigating -> closed."""
-    status: str
+    """Тело PATCH /incidents/{id}/status - жизненный цикл new -> investigating -> closed.
+
+    Именно Literal, а не str: раньше сюда проходило любое значение ({"status": "bogus"} -> 200
+    и запись в БД), после чего инцидент не находился ни одним фильтром /incidents?status=... .
+    С Literal FastAPI сам отвечает 422 со списком допустимых значений, до Store дело не доходит
+    (там на этот же случай остался ValueError - Store зовут и мимо HTTP)."""
+    status: IncidentStatus
 
 
 class CustomRuleSubmit(BaseModel):

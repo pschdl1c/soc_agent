@@ -73,11 +73,24 @@ from app.fields import (
 from app.models import Alert, Entities, Incident, Severity, SigmaRuleRef
 from app.store import Store
 from app.timespan import parse_timespan
+from app.timeutil import normalize_event_time
 
 # Типы, которые этот модуль реально эвалуирует - "расширенные" условия (temporal_extended/
 # temporal_ordered_extended) сюда не входят и не могут попасть валидацией на сохранении
 # (rules_catalog._validate_correlation_doc), но лишняя защита здесь дешёвая.
 _EVAL_TYPES = {"event_count", "value_count", "temporal", "temporal_ordered"}
+
+# Префикс синтетического event_id, под которым сработавшая корреляция пишет своё попадание в
+# rule_hits (цепочки, см. evaluate_batch/_split_synthetic_hit). Настоящие events.event_id -
+# uuid4, двоеточий не содержат вовсе, так что пересечения быть не может.
+_SYNTHETIC_HIT_PREFIX = "corr:"
+# Предел рекурсии разворота цепочки в реальные события (_expand_synthetic_samples). Цикл
+# невозможен (_topo_order отвергает его раньше), это защита от аномально длинной цепочки.
+_MAX_EXPAND_DEPTH = 4
+# Потолок sample_events у корреляции/инцидента. Больше дефолтного sample_limit=10 у
+# store.evaluate_correlation_window: у цепочки в список идут и сэмплы её собственного окна,
+# и развёрнутые события предков (напр. успешный вход ПЛЮС предшествующие неудачи).
+_MAX_SAMPLE_EVENTS = 20
 
 _COND_OPS: dict[str, Any] = {
     "gte": lambda c, n: c >= n,
@@ -119,24 +132,125 @@ def _temporal_required_met(condition: dict[str, Any], count: int, n_refs: int) -
     return count >= n_refs
 
 
-def _normalize_event_time(event_time: str | None) -> str | None:
-    """Дублирует store._normalize_event_time (та же 1-строчная трансформация) - окно, которое
-    здесь считается, должно быть в ТОЙ ЖЕ нормализованной форме, что и rule_hits.event_time
-    (см. app/store.py), иначе BETWEEN в store.evaluate_correlation_window(s) сравнивал бы
-    разные форматы. Не импортируется напрямую из store.py (private-имя, отдельный модуль) -
-    сознательно небольшое дублирование вместо кросс-модульной завязки на чужую приватную
-    функцию (тот же принцип, что уже был здесь до этого изменения)."""
-    if event_time is None:
-        return None
-    return event_time.replace(" ", "T").replace("Z", "")
-
-
 def _shift_iso(normalized_time: str, delta_seconds: int) -> str | None:
     try:
         dt = datetime.fromisoformat(normalized_time)
     except ValueError:
         return None
     return (dt + timedelta(seconds=delta_seconds)).isoformat()
+
+
+def _split_synthetic_hit(event_id: str, known_titles: list[str]) -> tuple[str, str] | None:
+    """Разбирает синтетический event_id попадания корреляции "corr:{dedup}:{title}:{anchor}"
+    (формат задаётся в evaluate_batch) в (title, anchor_time). None - если это обычный
+    event_id настоящего события или title не принадлежит ни одному известному правилу.
+
+    Позиционно надёжны только первые два сегмента (dedup - hex без ':'), а title и anchor_time
+    оба могут содержать ':' - поэтому title не "вырезается", а СОПОСТАВЛЯЕТСЯ с реальными
+    названиями активных correlation-правил (самое длинное совпадение - на случай, когда одно
+    название является префиксом другого)."""
+    if not event_id.startswith(_SYNTHETIC_HIT_PREFIX):
+        return None
+    parts = event_id.split(":", 2)
+    if len(parts) < 3:
+        return None
+    rest = parts[2]
+    for title in sorted(known_titles, key=len, reverse=True):
+        if rest.startswith(title + ":"):
+            return title, rest[len(title) + 1:]
+    return None
+
+
+def _expand_synthetic_samples(
+    store: Store,
+    corr_index: dict[str, dict[str, Any]],
+    source_batch: str,
+    event_ids: list[str],
+    limit: int,
+    depth: int = 0,
+) -> list[dict[str, Any]]:
+    """Разворачивает синтетические попадания ЦЕПОЧКИ в РЕАЛЬНЫЕ события правила-предка.
+
+    Зачем: попадание сработавшей корреляции живёт в rule_hits с синтетическим event_id, которому
+    в events не соответствует ничего - JOIN в store.evaluate_correlation_window его молча
+    пропускает. Из-за этого у корреляции НАД корреляцией sample_events приходили пустыми, а
+    вместе с ними пустыми были и entities (они извлекаются из сэмплов) - то есть карточка
+    инцидента и контекст агента для самых интересных сценариев (brute-force -> успешный вход,
+    повторяющиеся всплески разведки) не содержали ни одного события. Для агента Этапа 5 это
+    отсутствие входных данных, а не косметика.
+
+    Как: по синтетическому id узнаём title предка и anchor его окна, по rule_hits.group_json -
+    ключ, по которому он тогда сработал (store.fetch_hit_group_values), дальше берём сэмплы
+    ЕГО собственного окна [anchor - timespan, anchor] тем же store.evaluate_correlation_window.
+    Если предок сам ссылался на корреляцию - рекурсия (ограничена _MAX_EXPAND_DEPTH, хотя цикл
+    невозможен: _topo_order отвергает циклы ещё на этапе построения порядка).
+
+    Стоимость платится ТОЛЬКО в момент реального срабатывания цепочки и только на контент
+    событий - счётный путь (см. докстринг модуля) не затрагивается вообще."""
+    if depth >= _MAX_EXPAND_DEPTH or limit <= 0 or not corr_index:
+        return []
+    collected: list[dict[str, Any]] = []
+    for event_id in event_ids:
+        if len(collected) >= limit:
+            break
+        parsed = _split_synthetic_hit(event_id, list(corr_index))
+        if parsed is None:
+            continue
+        title, anchor_time = parsed
+        child = corr_index.get(title)
+        if child is None:
+            continue
+        group_by = child.get("group_by") or []
+        base_titles = child.get("base_rule_titles") or []
+        timespan_seconds = parse_timespan(child.get("timespan"))
+        if not group_by or not base_titles or timespan_seconds is None:
+            continue
+        group_values = store.fetch_hit_group_values(event_id, title)
+        if not group_values or any(f not in group_values for f in group_by):
+            continue
+        window_start = _shift_iso(anchor_time, -timespan_seconds)
+        if not window_start:
+            continue
+        child_type = child.get("type")
+        inner = store.evaluate_correlation_window(
+            base_rule_titles=base_titles,
+            group_by=group_by,
+            key_values=tuple(group_values[f] for f in group_by),
+            source_batch=source_batch,
+            time_from=window_start,
+            time_to=anchor_time,
+            mode=("distinct_rules" if child_type in ("temporal", "temporal_ordered") else None),
+            distinct_field=(child.get("condition") or {}).get("field") if child_type == "value_count" else None,
+            sample_limit=limit - len(collected),
+        )
+        collected += inner["sample_events"]
+        if len(collected) < limit:
+            collected += _expand_synthetic_samples(
+                store, corr_index, source_batch, inner["event_ids"], limit - len(collected), depth + 1,
+            )
+    return collected[:limit]
+
+
+def _merge_samples(
+    direct: list[dict[str, Any]], expanded: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    """Сводит сэмплы окна самой корреляции и развёрнутые события предков в один хронологический
+    список без повторов (одно и то же событие может прийти обоими путями, если его зацепили и
+    базовое правило родителя, и базовое правило потомка). Порядок - по нормализованному времени
+    события; событий без распознаваемого времени немного, они уходят в конец."""
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for event in direct + expanded:
+        try:
+            fingerprint = json.dumps(event, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            fingerprint = repr(event)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        merged.append(event)
+    merged.sort(key=lambda e: normalize_event_time(first_present(e, TIME_FIELDS)) or "9999")
+    return merged[:limit]
 
 
 def _extract_entities(events: list[dict[str, Any]]) -> Entities:
@@ -323,10 +437,22 @@ def _build_incident(
     source_batch: str,
 ) -> Incident | None:
     """Строит Incident для сработавшего инцидентного correlation-правила (см. evaluate_batch).
-    Идентичность - фиксированный бакет по timespan: window_bucket = anchor, округлённый вниз до
-    кратности timespan в секундах; dedup_key = sha256(type:group_values:window_bucket)[:16].
+    Идентичность - ИСТОЧНИК + фиксированный бакет по timespan: window_bucket = anchor,
+    округлённый вниз до кратности timespan в секундах;
+    dedup_key = sha256(source_batch:type:group_values:window_bucket)[:16].
     Повтор в том же бакете -> UPDATE строки (store.upsert_incidents). None, если anchor_time не
-    парсится (бакет не посчитать) - ключ пропускается."""
+    парсится (бакет не посчитать) - ключ пропускается.
+
+    source_batch в ключе ОБЯЗАТЕЛЕН: всё остальное в инциденте живёт в рамках одного источника -
+    счёт корреляции сужен по source_batch (store.fetch_correlation_hits), колонка incidents.
+    source_batch одна, DELETE /batches/{источник} чистит инциденты по ней. Без источника в
+    ключе два разных источника, увидевшие ту же сущность в том же бакете (обычное дело: один
+    IP атакует два сервера, у каждого свой форвардер), схлопывались в ОДНУ строку: UPDATE
+    перезаписывал окно/sample_events/entities данными второго источника, а метка source_batch
+    оставалась от первого - карточка показывала события B под ярлыком A, member-алерты
+    приезжали из обоих (link_alerts_to_incident фильтрует по ТЕКУЩЕМУ батчу, не по батчу
+    инцидента), а /incidents/{id}/context собирал related_events по источнику A, где сэмплов
+    из B нет вовсе. Удаление батча довершало расхождение с обеих сторон."""
     try:
         epoch = int(datetime.fromisoformat(anchor_time).timestamp())
     except ValueError:
@@ -334,7 +460,11 @@ def _build_incident(
     bucket_start = datetime.fromtimestamp((epoch // timespan_seconds) * timespan_seconds)
     window_bucket = bucket_start.isoformat()
 
-    raw = f'{incident_spec["type"]}:' + ":".join(str(v) for v in key) + f":{window_bucket}"
+    raw = (
+        f"{source_batch}:{incident_spec['type']}:"
+        + ":".join(str(v) for v in key)
+        + f":{window_bucket}"
+    )
     dedup_key = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     window_start = _shift_iso(anchor_time, -timespan_seconds) or anchor_time
     sev = incident_spec.get("severity") or corr.get("level") or "medium"
@@ -439,6 +569,7 @@ def _evaluate_correlation_rule(
     new_spans: dict[tuple[Any, ...], tuple[str, str]],
     timespan_seconds: int,
     distinct_field: str | None,
+    corr_index: dict[str, dict[str, Any]],
 ) -> dict[tuple[Any, ...], tuple[int, list[dict[str, Any]], str, list[str]]]:
     """A3-оценка одного correlation-правила по всем кандидатным ключам сразу (см. докстринг
     модуля / _best_anchor). new_spans - {group-by-ключ: (min, max нормализованного event_time
@@ -519,7 +650,18 @@ def _evaluate_correlation_rule(
             if not _sequence_matches_order(sequence, base_titles):
                 continue
 
-        result[key] = (count, precise["sample_events"], anchor_time, precise["event_ids"])
+        # Синтетические попадания предков (цепочка) не джойнятся к events - разворачиваем их в
+        # реальные события, иначе sample_events (а с ними и entities) у корреляции НАД
+        # корреляцией остались бы пустыми, см. _expand_synthetic_samples.
+        sample_events = precise["sample_events"]
+        expanded = _expand_synthetic_samples(
+            store, corr_index, source_batch, precise["event_ids"],
+            limit=_MAX_SAMPLE_EVENTS - len(sample_events),
+        )
+        if expanded:
+            sample_events = _merge_samples(sample_events, expanded, _MAX_SAMPLE_EVENTS)
+
+        result[key] = (count, sample_events, anchor_time, precise["event_ids"])
     return result
 
 
@@ -551,6 +693,9 @@ def evaluate_batch(
     if not corr_rules:
         return 0
     corr_rules = _topo_order(corr_rules)
+    # Индекс по названию - им _expand_synthetic_samples узнаёт окно/ключ правила-предка по
+    # синтетическому попаданию цепочки (title в rule_hits - это именно title correlation-правила).
+    corr_index = {c["title"]: c for c in corr_rules if c.get("title")}
 
     # Копия входного словаря - пополняется синтетическими "попаданиями" срабатывающих
     # correlation-правил ЭТОГО ЖЕ прохода (см. докстринг модуля про цепочки), не мутируем
@@ -610,7 +755,7 @@ def evaluate_batch(
             # (4625,) (int), который никогда не совпал бы со строковым ("4625",) - корреляция
             # молча не срабатывала бы.
             key = tuple(str(v) for v in raw_key)
-            normalized = _normalize_event_time(first_present(event, TIME_FIELDS))
+            normalized = normalize_event_time(first_present(event, TIME_FIELDS))
             if not normalized:
                 continue
             if key not in new_spans:
@@ -623,7 +768,7 @@ def evaluate_batch(
 
         fired = _evaluate_correlation_rule(
             store, corr, corr_type, group_by, base_titles, source_batch,
-            new_spans, timespan_seconds, distinct_field,
+            new_spans, timespan_seconds, distinct_field, corr_index,
         )
         if not fired:
             continue

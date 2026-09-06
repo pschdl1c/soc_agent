@@ -27,6 +27,10 @@ UPLOADS_DIR = Path(os.getenv("SIEM_UPLOADS_DIR", str(BASE_DIR / "data" / "upload
 # не быть вовсе (KB тогда деградирует до "недоступна", алерты матчатся по сырым тегам).
 KB_DB_PATH = os.getenv("SIEM_KB_DB_PATH", str(BASE_DIR / "kb" / "kb.db"))
 
+# Уровень логирования приложения (app/logging_setup.py). Вывод всегда в UTF-8, независимо от
+# кодировки консоли Windows - иначе русские сообщения в перенаправленном в файл логе нечитаемы.
+LOG_LEVEL = os.getenv("SIEM_LOG_LEVEL", "INFO")
+
 HOST = os.getenv("SIEM_HOST", "127.0.0.1")
 PORT = int(os.getenv("SIEM_PORT", "8000"))
 
