@@ -96,3 +96,44 @@ def test_toggle_ruleset_missing_custom_is_not_found():
 def test_toggle_rule_missing_custom_is_not_found():
     with pytest.raises(CatalogNotFound):
         main_ruleset.toggle_rule("custom_rulesets/deadbeefdeadbeef", "some-rule-id", True)
+
+
+# ---------------------------------------------------------------- on_rule_deleted
+# Удаление ОДНОГО правила (DELETE /rules/custom/{id}) обязано чистить точечные ссылки на него
+# в составе main - парно к on_ruleset_deleted у удаления рулсета целиком. Раньше такой чистки
+# не было: resolve() осиротевший id молча пропускал (детект не ломался), но main_ruleset.json
+# копил мусор, а удалённое правило продолжало числиться включённым в main.
+
+def test_on_rule_deleted_drops_pointwise_inclusion(custom_ruleset_path):
+    main_ruleset.toggle_rule(custom_ruleset_path, "rule-a", True)
+    main_ruleset.toggle_rule(custom_ruleset_path, "rule-b", True)
+
+    main_ruleset.on_rule_deleted(custom_ruleset_path, "rule-a")
+
+    state = main_ruleset.load_state()
+    assert state["included_rules"][custom_ruleset_path] == ["rule-b"]
+    assert main_ruleset.is_rule_included(state, custom_ruleset_path, "rule-a") is False
+
+
+def test_on_rule_deleted_drops_exclusion_inside_included_ruleset(custom_ruleset_path):
+    """Правило, ИСКЛЮЧЁННОЕ из целиком добавленного рулсета, после удаления с диска тоже
+    незачем держать в state - привязывать исключение больше не к чему."""
+    main_ruleset.toggle_ruleset(custom_ruleset_path, True)
+    main_ruleset.toggle_rule(custom_ruleset_path, "rule-x", False)
+    assert main_ruleset.load_state()["excluded_rules"][custom_ruleset_path] == ["rule-x"]
+
+    main_ruleset.on_rule_deleted(custom_ruleset_path, "rule-x")
+
+    state = main_ruleset.load_state()
+    assert custom_ruleset_path not in state["excluded_rules"]  # опустевший список убран целиком
+    assert custom_ruleset_path in state["included_rulesets"]   # сам рулсет в main остаётся
+
+
+def test_on_rule_deleted_is_noop_for_unknown_rule(custom_ruleset_path):
+    main_ruleset.toggle_rule(custom_ruleset_path, "rule-a", True)
+    before = main_ruleset.load_state()
+
+    main_ruleset.on_rule_deleted(custom_ruleset_path, "no-such-rule")
+    main_ruleset.on_rule_deleted("custom_rulesets/deadbeefdeadbeef", "rule-a")
+
+    assert main_ruleset.load_state() == before

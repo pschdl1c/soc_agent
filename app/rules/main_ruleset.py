@@ -185,6 +185,30 @@ def toggle_ruleset(ruleset_path: str, include: bool) -> str:
         return ruleset_status(state, ruleset_path)
 
 
+def on_rule_deleted(ruleset_path: str, rule_id: str) -> None:
+    """Чистит точечные ссылки на ОДНО удалённое правило (DELETE /rules/custom/{id}) - парная
+    к on_ruleset_deleted, но на уровне правила. Без неё state копил осиротевшие id: resolve()
+    их молча пропускает (детект не ломается), но в main_ruleset.json удалённое правило
+    продолжает числиться включённым, и файл растёт с каждым удалением.
+
+    Чистим ОБА словаря: included_rules (правило добавлено точечно) и excluded_rules (правило
+    было исключено из целиком добавленного рулсета - его id тоже больше не к чему привязать)."""
+    with _lock:
+        state = load_state()
+        changed = False
+        for bucket in ("included_rules", "excluded_rules"):
+            ids = state[bucket].get(ruleset_path)
+            if ids and rule_id in ids:
+                rest = [r for r in ids if r != rule_id]
+                if rest:
+                    state[bucket][ruleset_path] = rest
+                else:
+                    state[bucket].pop(ruleset_path, None)
+                changed = True
+        if changed:
+            _save_state(state)
+
+
 def on_ruleset_deleted(ruleset_path: str) -> None:
     """Чистит ссылки на рулсет, который был удалён из каталога (DELETE /rulesets) - иначе
     resolve() продолжал бы молча его пропускать, но state бы копил осиротевшие записи."""

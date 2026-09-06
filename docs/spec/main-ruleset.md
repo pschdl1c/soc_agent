@@ -88,6 +88,14 @@
 Добавляет/удаляет `ruleset_path` в `included_rulesets`; сбрасывает `excluded_rules[ruleset_path]`
 и `included_rules[ruleset_path]`. Возвращает `ruleset_status`.
 
+### `on_rule_deleted(ruleset_path, rule_id) -> None`
+
+Убирает `rule_id` из `included_rules[ruleset_path]` И `excluded_rules[ruleset_path]` (правила
+больше нет — привязывать точечную ссылку не к чему); опустевший список удаляется из словаря.
+Зовётся из `DELETE /rules/custom/{rule_id}`. Без неё state копил осиротевшие id: `resolve()`
+их молча пропускает (детект не ломается), но удалённое правило продолжало числиться
+включённым в main, а файл рос с каждым удалением.
+
 ### `on_ruleset_deleted(ruleset_path) -> None`
 
 Удаляет `ruleset_path` из `included_rulesets`, `excluded_rules`, `included_rules`. Файл

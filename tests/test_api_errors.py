@@ -231,3 +231,46 @@ def test_alerts_response_is_paged_envelope(api):
     # total считается по тем же фильтрам, что и выдача
     other = client.get("/alerts", params={"source_batch": "нет-такого"}).json()
     assert other["total"] == 0 and other["alerts"] == []
+
+
+# ------------------------------------------------------------------ границы пагинации (API-5)
+# Раньше валидация была разной у соседних ручек: /events и /rulesets/rules отдавали 400,
+# /incidents молча зажимал значение, а /alerts и /events/group не проверяли НИЧЕГО - limit=0
+# возвращал пустой список при total>0 (UI рисовал пустую страницу с непустым пейджером), а
+# limit без верхней границы вытягивал таблицу целиком. Теперь одна точка - main._check_paging.
+
+@pytest.mark.parametrize("path", ["/alerts", "/incidents", "/events", "/rulesets/rules",
+                                  "/kb/mitre/techniques", "/events/group"])
+@pytest.mark.parametrize("limit", [0, -1, 501, 1000000])
+def test_paging_limit_out_of_range_is_400(api, path, limit):
+    client, _main = api
+    params = {"limit": limit}
+    if path == "/events/group":
+        params["group_by"] = "EventID"
+    if path == "/rulesets/rules":
+        params["ruleset"] = "main"
+    res = client.get(path, params=params)
+    assert res.status_code == 400, (path, limit, res.text[:200])
+    assert "limit" in res.json()["detail"]
+
+
+@pytest.mark.parametrize("path", ["/alerts", "/incidents", "/events", "/rulesets/rules",
+                                  "/kb/mitre/techniques"])
+def test_paging_negative_offset_is_400(api, path):
+    """SQLite молча трактует отрицательный OFFSET как 0 - опечатка выглядела бы как успех."""
+    client, _main = api
+    params = {"offset": -1}
+    if path == "/rulesets/rules":
+        params["ruleset"] = "main"
+    res = client.get(path, params=params)
+    assert res.status_code == 400, (path, res.text[:200])
+    assert "offset" in res.json()["detail"]
+
+
+@pytest.mark.parametrize("path", ["/alerts", "/incidents", "/events", "/kb/mitre/techniques"])
+def test_paging_boundary_values_are_accepted(api, path):
+    """Границы диапазона (limit=1 и limit=500, offset=0) остаются валидными."""
+    client, _main = api
+    for params in ({"limit": 1, "offset": 0}, {"limit": 500, "offset": 0}):
+        res = client.get(path, params=params)
+        assert res.status_code == 200, (path, params, res.text[:200])

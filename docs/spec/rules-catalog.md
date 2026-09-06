@@ -193,6 +193,14 @@ SQL); `base_rule_refs` — параллельный список с `kind`, ну
    `RuleValidationError("Некорректный YAML: ...")` с позицией ошибки от парсера.
 3. Структурная пре-проверка разобранных документов `_docs_look_like_sigma_rule`
    (title+logsource+detection ЛИБО title+correlation) → иначе `RuleValidationError`.
+3a. `_validate_rule_id` по КАЖДОМУ документу: если `id:` задан, он обязан парситься как `UUID`
+   (та же проверка, что у pySigma в `sigma/rule/base.py`; принимаются обе формы — с дефисами и
+   32 hex; отсутствующий или пустой `id:` — не ошибка). Проверяем САМИ и до компиляции, потому
+   что внятное `SigmaIdentifierError` от pySigma наружу не выходит: Zircolite отсеивает
+   невалидные правила в `RulesetHandler` (`is_valid_sigma_rule`) молча и отдаёт пустой рулсет,
+   после чего п.8 печатал бы догадку «проверь detection/logsource» при исправных detection и
+   logsource. Нестроковое значение (`id: 12345`) отклоняется тем же сообщением — `UUID(int)`
+   бросает `TypeError`, который pySigma не ловит вовсе.
 4. Если первый документ — correlation (`_looks_like_correlation_doc`): `_validate_correlation_doc`
    (с `ref_index=build_ref_index(target_dir, exclude_filename=...)`, если `target_dir` задан)
    + возврат `_compile_correlation_doc` (без обращения к pySigma).
@@ -206,7 +214,9 @@ SQL); `base_rule_refs` — параллельный список с `kind`, ну
 
 ### `compile_ruleset_yaml(yaml_text, *, target_dir=None) -> list[dict]`
 
-Компиляция всех документов multi-document YAML. Correlation-документы валидируются отдельно
+Компиляция всех документов multi-document YAML. Формат `id` каждого документа проверяется
+`_validate_rule_id` (как в `compile_custom_rule`) — иначе документ с кривым `id` молча выпадал
+из компиляции и пак сохранялся неполным. Correlation-документы валидируются отдельно
 (`_validate_correlation_doc` с `ref_index` = правила `target_dir` (если задан) плюс документы
 самого файла + `_compile_correlation_doc`), обычные — разворачиваются
 (`expand_placeholders`) и компилируются одним файлом **без** correlation-документов. Пустой

@@ -66,7 +66,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import yaml
 
@@ -870,6 +870,39 @@ def _safe_rule_id(candidate: str | None) -> str:
     return uuid4().hex
 
 
+def _validate_rule_id(doc: dict[str, Any]) -> None:
+    """Sigma требует, чтобы 'id:' (если он вообще указан) был UUID. Проверяем ЭТО САМИ и ДО
+    компиляции, ровно тем же способом, что и pySigma (`UUID(value)`, см. sigma/rule/base.py) -
+    иначе пользователь получает сообщение не про ту строку файла.
+
+    Почему нельзя положиться на ошибку снизу: pySigma действительно бросает внятное
+    `SigmaIdentifierError: Sigma rule identifier must be an UUID`, но до нас оно не доходит -
+    Zircolite (внешний клон, не правим) заранее отсеивает невалидные правила в
+    `RulesetHandler` (`is_valid_sigma_rule`, rules.py) и МОЛЧА их выбрасывает, отдавая пустой
+    рулсет. Наверх остаётся только факт «правил не получилось», и compile_custom_rule
+    вынужденно печатает догадку «проверь detection/logsource» - при формально безупречных
+    detection и logsource. Ловили вживую на 'id' с лишними символами в последней группе.
+
+    Нестроковое значение (YAML отдаёт int/float/bool для `id: 12345`) отклоняем тем же
+    сообщением: pySigma ловит только ValueError, а `UUID(12345)` бросает TypeError - он ушёл
+    бы наружу как ещё менее внятная ошибка компиляции.
+
+    Отсутствующий 'id:' (или `id:` с пустым значением - YAML разбирает его в None) - НЕ
+    ошибка: поле необязательное, id сгенерируется автоматически (см. _safe_rule_id)."""
+    if "id" not in doc:
+        return
+    raw = doc.get("id")
+    if raw is None:
+        return
+    try:
+        UUID(raw)
+    except (ValueError, AttributeError, TypeError):
+        raise RuleValidationError(
+            f"Поле 'id' должно быть UUID (сейчас: '{raw}'). Исправь его или убери строку "
+            "'id:' вовсе - тогда id сгенерируется автоматически."
+        )
+
+
 def _find_rule_id_owner(rule_id: str) -> tuple[str, str] | None:
     """Ищет rule_id среди ВСЕХ рулсетов (builtin + все custom). Возвращает (ruleset_path,
     title) владельца или None, если id свободен. Нужно для save_custom_rule/save_ruleset_yaml:
@@ -949,6 +982,10 @@ def compile_custom_rule(
         raise RuleValidationError(
             "YAML должен содержать title, logsource и detection (или title и correlation)."
         )
+    # Формат 'id' проверяем ДО компиляции: ошибку про него Zircolite глушит, и до пользователя
+    # доезжало сообщение про detection/logsource (см. _validate_rule_id).
+    for doc in docs:
+        _validate_rule_id(doc)
 
     first_doc = docs[0] if docs else None
     if first_doc is not None and _looks_like_correlation_doc(first_doc):
@@ -1058,6 +1095,9 @@ def compile_ruleset_yaml(yaml_text: str, *, target_dir: Path | None = None) -> l
             continue
         if not isinstance(parsed, dict):
             continue
+        # Как и в compile_custom_rule: формат 'id' проверяем сами, иначе один документ пака с
+        # кривым id молча выпадет из компиляции, а сообщение уведёт к detection/logsource.
+        _validate_rule_id(parsed)
         if _looks_like_correlation_doc(parsed):
             _validate_correlation_doc(parsed, ref_index=ref_index)
             corr_results.append(_compile_correlation_doc(parsed))

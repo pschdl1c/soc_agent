@@ -8,6 +8,8 @@ data/custom_rulesets проекта не трогается.
 """
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 
 from app.rules import rules_catalog
@@ -436,3 +438,88 @@ def test_correlation_rule_without_explicit_id_gets_id_from_filename(_isolate_cus
     rules = rules_catalog.load_correlation_rules(ruleset_path)
     assert len(rules) == 1
     assert rules[0]["id"] == manifest_id  # то же значение, что в манифесте -> правило видно в main
+
+
+# ---------------------------------------------------------------- формат 'id' (диагностика)
+# Sigma требует UUID в 'id:'. pySigma это проверяет и бросает внятное
+# "Sigma rule identifier must be an UUID", но наружу оно не выходит: Zircolite отсеивает
+# невалидные правила в RulesetHandler (is_valid_sigma_rule) МОЛЧА и отдаёт пустой рулсет,
+# после чего compile_custom_rule печатал догадку "проверь detection/logsource" - при
+# безупречных detection и logsource. Проверяем формат сами, ДО компиляции.
+
+_PLAIN_RULE_TMPL = """\
+title: Id Format Check
+name: id_format_check
+%s
+status: test
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4625
+  condition: selection
+level: medium
+"""
+
+
+@pytest.mark.parametrize("bad_id", [
+    "77777777-0001-4000-8000-00000000abcdef",  # лишние символы в последней группе
+    "not-a-uuid",
+    "12345",
+    "",                                        # явная пустая строка (pySigma её тоже отвергает)
+])
+def test_compile_rejects_non_uuid_id_with_message_about_id(bad_id):
+    with pytest.raises(RuleValidationError) as exc:
+        rules_catalog.compile_custom_rule(_PLAIN_RULE_TMPL % f"id: '{bad_id}'")
+    text = str(exc.value)
+    assert "id" in text and "UUID" in text
+    assert "detection" not in text and "logsource" not in text  # больше не уводим не туда
+
+
+def test_compile_rejects_non_string_id():
+    """YAML отдаёт int для `id: 12345` - pySigma ловит только ValueError, а UUID(int) бросает
+    TypeError, то есть ошибка была бы ещё менее внятной."""
+    with pytest.raises(RuleValidationError, match="UUID"):
+        rules_catalog.compile_custom_rule(_PLAIN_RULE_TMPL % "id: 12345")
+
+
+@pytest.mark.parametrize("good_id", [
+    "77777777-0001-4000-8000-000000000001",     # канонический вид с дефисами
+    "c3cce47451254da0a37c010e12690400",         # 32 hex без дефисов - так их генерируем сами
+])
+def test_compile_accepts_valid_uuid_forms(good_id):
+    """Обе формы, которые принимает UUID(), проходят проверку. Сам id в скомпилированной
+    записи приводится pySigma к каноническому виду с дефисами - это его поведение, не наше,
+    поэтому сравниваем через UUID, а не по строке."""
+    compiled = rules_catalog.compile_custom_rule(_PLAIN_RULE_TMPL % f"id: {good_id}")
+    assert UUID(compiled["id"]) == UUID(good_id)
+
+
+def test_compile_accepts_rule_without_id():
+    """Поле необязательное: без него id генерируется автоматически (_safe_rule_id)."""
+    compiled = rules_catalog.compile_custom_rule(_PLAIN_RULE_TMPL % "")
+    assert compiled.get("rule")  # правило реально скомпилировалось в SQL
+
+
+def test_compile_accepts_empty_id_line():
+    """`id:` без значения YAML разбирает в None - это "поле не задано", не ошибка."""
+    compiled = rules_catalog.compile_custom_rule(_PLAIN_RULE_TMPL % "id:")
+    assert compiled.get("rule")
+
+
+def test_correlation_rule_with_non_uuid_id_is_rejected():
+    """У correlation-правил свой путь компиляции (без pySigma), но требование к id то же -
+    иначе кривой id молча заменялся сгенерированным, и правило сохранялось не под тем id."""
+    with pytest.raises(RuleValidationError, match="UUID"):
+        rules_catalog.compile_custom_rule(_corr_doc({"id": "corr-rule-1"}))
+
+
+def test_ruleset_pack_rejects_document_with_bad_id():
+    """В multi-document паке кривой id одного документа раньше просто выкидывал его из
+    компиляции - пак сохранялся неполным, без единого сообщения."""
+    pack = _PLAIN_RULE_TMPL % "id: 77777777-0001-4000-8000-000000000001" + "\n---\n" + (
+        _PLAIN_RULE_TMPL % "id: nope"
+    ).replace("Id Format Check", "Second Rule").replace("id_format_check", "second_rule")
+    with pytest.raises(RuleValidationError, match="UUID"):
+        rules_catalog.compile_ruleset_yaml(pack)

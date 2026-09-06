@@ -124,6 +124,23 @@ def _catalog_http(exc: CatalogError) -> HTTPException:
     return HTTPException(status_code=404 if isinstance(exc, CatalogNotFound) else 400, detail=str(exc))
 
 
+MAX_PAGE_LIMIT = 500
+
+
+def _check_paging(limit: int, offset: int = 0, max_limit: int = MAX_PAGE_LIMIT) -> None:
+    """Единая проверка пагинации для ВСЕХ листинговых ручек: limit в 1..max_limit, offset >= 0.
+
+    Одна точка вместо разнобоя по ручкам: раньше /events и /rulesets/rules отдавали 400,
+    /incidents молча зажимал значение, а /alerts и /events/group не проверяли ничего - limit=0
+    возвращал пустой список при total>0 (UI рисовал пустую страницу с непустым пейджером), а
+    limit без верхней границы вытягивал таблицу целиком одним запросом. Отрицательный offset
+    SQLite молча трактует как 0 - тоже отклоняем, чтобы опечатка не выглядела как успех."""
+    if not (1 <= limit <= max_limit):
+        raise HTTPException(status_code=400, detail=f"limit: 1..{max_limit}")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset: >= 0")
+
+
 def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, source_label: str) -> IngestResponse:
     # dedup_by_content выбирает режим дедупа алертов (app/detection/normalize.py): True - хэш
     # содержимого события (custom-рулсеты и "main" - тот теперь СОБИРАЕТСЯ только из custom, см.
@@ -573,6 +590,7 @@ def list_alerts(
 ) -> dict:
     """Ответ - обёртка {alerts, total, limit, offset} (как у /events и /incidents): без total
     UI не мог нарисовать пейджер и молча показывал первые 100 алертов из скольких угодно."""
+    _check_paging(limit, offset)
     return {
         "alerts": store.list_alerts(
             source_batch=source_batch, rule_level=rule_level,
@@ -629,7 +647,7 @@ def list_incidents(
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    limit = max(1, min(limit, 500))
+    _check_paging(limit, offset)
     filters = dict(
         status=status, incident_type=incident_type, source_batch=source_batch,
         severity=severity, time_from=time_from, time_to=time_to, q=q,
@@ -817,8 +835,7 @@ def list_events(
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    if not (1 <= limit <= 500):
-        raise HTTPException(status_code=400, detail="limit: 1..500")
+    _check_paging(limit, offset)
     field_list = [f.strip() for f in fields.split(",") if f.strip()] if fields else None
     query_filter = _parse_query_filter(query)
     # group_cond - одиночное условие drill-in по выбранной группе; всегда сужает (AND).
@@ -849,6 +866,7 @@ def group_events(
 ) -> dict:
     """Агрегаторы для панели группировки: значения выбранного поля + счётчики (фильтр применён до),
     плюс total_groups - общее число уникальных значений (может быть больше limit)."""
+    _check_paging(limit)  # offset у группировки нет - выдача всегда с начала, топ-N по счётчику
     query_filter = _parse_query_filter(query)
     result = store.group_events(
         group_by=group_by, source_batch=source_batch, only_matched=only_matched,
@@ -896,8 +914,7 @@ def get_ruleset_rules(
     level: str | None = None,
     status: str | None = None,
 ) -> dict:
-    if not (1 <= limit <= 500):
-        raise HTTPException(status_code=400, detail="limit: 1..500")
+    _check_paging(limit, offset)
     # Мультиселект фильтра приезжает как CSV в одном query-параметре (level=critical,high),
     # а не повторяющимся ключом - проще на фронте собирать из чекбоксов в поповере.
     level_list = [v for v in level.split(",") if v] if level else None
@@ -1008,6 +1025,10 @@ def delete_custom_rule(rule_id: str, ruleset: str) -> dict:
     except CatalogError as exc:
         raise _catalog_http(exc)
     engine.invalidate(ruleset)
+    # Ссылку на удалённое правило в составе основного рулсета убираем ТУТ же (как это делает
+    # on_ruleset_deleted для удаления рулсета целиком) - иначе main_ruleset.json копит
+    # осиротевшие id, а удалённое правило продолжает числиться включённым в main.
+    main_ruleset.on_rule_deleted(ruleset, rule_id)
     return {"deleted": rule_id}
 
 
@@ -1149,8 +1170,7 @@ def kb_mitre_techniques(
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    if not (1 <= limit <= 500):
-        raise HTTPException(status_code=400, detail="limit: 1..500")
+    _check_paging(limit, offset)
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset: >= 0")
     return kb.list_techniques(tactic=tactic, q=q, limit=limit, offset=offset)

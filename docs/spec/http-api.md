@@ -124,7 +124,7 @@ JSON-**объект**: голая строка/число/массив отбр�
 
 | Метод | Путь | Параметры | Поведение |
 |---|---|---|---|
-| `GET` | `/alerts` | `source_batch`, `rule_level`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `{"alerts": store.list_alerts(...), "total": store.count_alerts(...), "limit", "offset"}`. Элементы списка без ключа `mitre` |
+| `GET` | `/alerts` | `source_batch`, `rule_level`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400. `{"alerts": store.list_alerts(...), "total": store.count_alerts(...), "limit", "offset"}`. Элементы списка без ключа `mitre` |
 | `GET` | `/alerts/{alert_id}` | — | `store.get_alert(...)`; 404, если нет. Добавляет `alert["mitre"] = kb.enrich_techniques(alert["mitre_techniques"])` |
 
 У алерта нет статуса и нет ручки на его смену (`PATCH /alerts/{id}/status` убран вместе с
@@ -138,7 +138,7 @@ JSON-**объект**: голая строка/число/массив отбр�
 
 | Метод | Путь | Параметры | Поведение |
 |---|---|---|---|
-| `GET` | `/incidents` | `status`, `incident_type`, `source_batch`, `severity`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100` (1..500), `offset=0` | `{incidents, total, limit, offset}`; каждая строка несёт `investigation_status` |
+| `GET` | `/incidents` | `status`, `incident_type`, `source_batch`, `severity`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400 (раньше значение молча зажималось). `{incidents, total, limit, offset}`; каждая строка несёт `investigation_status` |
 | `GET` | `/incidents/{incident_id}` | — | `store.get_incident(...)`; 404, если нет. Добавляет `member_alerts`, `investigation`, `mitre` (обогащение тегов правила + member-алертов) |
 | `GET` | `/incidents/{incident_id}/context` | — | `correlation_rule` + `member_rules` (SQL/YAML) + `sample_events` + `related_events` (события по сущности через `compile_filter_query(_incident_entity_filter(group_key))`) + `entity_history` (алерты по значениям `group_key`, `scope: "entity"`; при пустом `group_key` — `scope: "source"` + `note`). Удалённое правило / вычищенные `events` → пустые секции + `note` |
 | `PATCH` | `/incidents/{incident_id}/status` | `IncidentStatusUpdate` | `store.update_incident_status(...)`; 404, если не найден. `status` типизирован `Literal["new", "investigating", "closed"]` — любое другое значение отбивает FastAPI (422), до Store и БД не доходит |
@@ -147,8 +147,8 @@ JSON-**объект**: голая строка/число/массив отбр�
 
 | Метод | Путь | Параметры | Поведение |
 |---|---|---|---|
-| `GET` | `/events` | `source_batch`, `only_matched`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `fields` (CSV), `query`, `group_cond`, `limit=100`, `offset=0` | `limit` вне `[1, 500]` → 400. `query` компилируется `_parse_query_filter` (`FilterSyntaxError` → 400). `group_cond` — одиночное условие drill-in (`_parse_filters(f"[{group_cond}]")`); неизвестный оператор/пустое поле → 400 (не молчаливый пропуск условия). `time_from`/`time_to` приводятся к канонической форме (`app/timeutil.py`), верхняя граница включающая. Ответ `{events, total, limit, offset}` |
-| `GET` | `/events/group` | `group_by` (обяз.), `source_batch`, `only_matched`, `time_from`, `time_to`, `query`, `limit=200` | `store.group_events(...)` → `{group_by, groups, total_groups}` |
+| `GET` | `/events` | `source_batch`, `only_matched`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `fields` (CSV), `query`, `group_cond`, `limit=100`, `offset=0` | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400. `query` компилируется `_parse_query_filter` (`FilterSyntaxError` → 400). `group_cond` — одиночное условие drill-in (`_parse_filters(f"[{group_cond}]")`); неизвестный оператор/пустое поле → 400 (не молчаливый пропуск условия). `time_from`/`time_to` приводятся к канонической форме (`app/timeutil.py`), верхняя граница включающая. Ответ `{events, total, limit, offset}` |
+| `GET` | `/events/group` | `group_by` (обяз.), `source_batch`, `only_matched`, `time_from`, `time_to`, `query`, `limit=200` | `_check_paging`: `limit` вне `[1, 500]` → 400 (`offset` у группировки нет — всегда топ-N с начала). `store.group_events(...)` → `{group_by, groups, total_groups}` |
 | `GET` | `/events/{event_id}` | — | `store.get_event(...)`; 404, если нет |
 
 `_parse_query_filter(query)` — `compile_filter_query(query)`; `FilterSyntaxError` → HTTP 400 с
@@ -159,7 +159,7 @@ JSON-**объект**: голая строка/число/массив отбр�
 | Метод | Путь | Параметры / тело | Поведение |
 |---|---|---|---|
 | `GET` | `/rulesets` | — | `rules_catalog.list_rulesets()` + `main_status` каждому + виртуальная запись `main` |
-| `GET` | `/rulesets/rules` | `ruleset` (обяз.), `q`, `sort_by`, `sort_dir="asc"`, `limit=50`, `offset=0`, `only_main=false`, `level` (CSV), `status` (CSV) | `limit` вне `[1, 500]` → 400. `ruleset == "main"` → виртуальный список из `main_ruleset.resolve_with_sources()` (каждая строка несёт `source_ruleset`, `in_main`). Иначе `rules_catalog.search_rules(...)` с `in_main_fn`/`only_ids`. `_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400 |
+| `GET` | `/rulesets/rules` | `ruleset` (обяз.), `q`, `sort_by`, `sort_dir="asc"`, `limit=50`, `offset=0`, `only_main=false`, `level` (CSV), `status` (CSV) | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400. `ruleset == "main"` → виртуальный список из `main_ruleset.resolve_with_sources()` (каждая строка несёт `source_ruleset`, `in_main`). Иначе `rules_catalog.search_rules(...)` с `in_main_fn`/`only_ids`. `_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400 |
 | `GET` | `/rulesets/rule` | `ruleset`, `rule_id` | `rules_catalog.get_rule(...)`; 404, если нет |
 | `POST` | `/rulesets/upload` | multipart: `file` (.yml/.yaml), `ruleset` \| `new_ruleset_name` | `rules_catalog.save_ruleset_yaml(...)`; `CatalogError`/`RuleValidationError`/`ValueListError` → 400. Пересборка зависимых правил (`_recompile_for_value_lists`). Ответ несёт `collisions`, `value_lists_imported`, `recompiled`, `errors` |
 | `DELETE` | `/rulesets` | `ruleset` | `rules_catalog.delete_custom_ruleset(...)` (`_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` + `main_ruleset.on_ruleset_deleted(ruleset)` |
@@ -170,7 +170,7 @@ JSON-**объект**: голая строка/число/массив отбр�
 |---|---|---|---|
 | `POST` | `/rules/custom` | `CustomRuleSubmit` | `201`; `rules_catalog.save_custom_rule(...)` (`RuleValidationError`/`CatalogError` → 400) + `engine.invalidate(target_path)`. Ответ несёт `ruleset_path` |
 | `PUT` | `/rules/custom/{rule_id}` | query `ruleset` (обяз.), тело `CustomRuleUpdate` | `rules_catalog.update_custom_rule(...)` (`RuleValidationError` → 400, `_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` |
-| `DELETE` | `/rules/custom/{rule_id}` | query `ruleset` (обяз.) | `rules_catalog.delete_custom_rule(...)` (`_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` |
+| `DELETE` | `/rules/custom/{rule_id}` | query `ruleset` (обяз.) | `rules_catalog.delete_custom_rule(...)` (`_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` + `main_ruleset.on_rule_deleted(ruleset, rule_id)` |
 
 ### Основной рулсет
 
@@ -199,7 +199,7 @@ JSON-**объект**: голая строка/число/массив отбр�
 |---|---|---|---|
 | `GET` | `/kb/mitre/meta` | — | `kb.meta()` (при отсутствии `kb.db` — `{"available": false}`, не 5xx) |
 | `GET` | `/kb/mitre/matrix` | — | `kb.matrix()` |
-| `GET` | `/kb/mitre/techniques` | `tactic`, `q`, `limit=100`, `offset=0` | `limit` вне `[1, 500]` → 400; `offset < 0` → 400. `kb.list_techniques(...)` |
+| `GET` | `/kb/mitre/techniques` | `tactic`, `q`, `limit=100`, `offset=0` | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400. `kb.list_techniques(...)` |
 | `GET` | `/kb/mitre/techniques/{technique_id}` | — | `kb.get_technique(technique_id.upper())`; 404, если техники нет |
 
 ## Соответствие исключений и HTTP-кодов
