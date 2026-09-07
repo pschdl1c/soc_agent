@@ -13,6 +13,7 @@ app/ingest_queue.py:IngestWorker), а не отдельным - LLM Этапа 5
 """
 from __future__ import annotations
 
+from app import updates
 from app.models import utcnow_naive
 from app.store import Store
 
@@ -44,4 +45,9 @@ def run_pending(store: Store, batch: int = 20) -> int:
                 iid, status="error", error=str(exc), finished_at=utcnow_naive().isoformat()
             )
         processed += 1
+    # Вердикт/статус расследования виден в списке инцидентов (колонка investigation_status) и в
+    # карточке - для открытого UI это изменение списка, хотя новых инцидентов не появилось
+    # (app/updates.py, created не трогаем).
+    if processed:
+        updates.bump("incidents")
     return processed

@@ -60,6 +60,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
+from app import updates
 from app.rules import main_ruleset, rules_catalog
 from app.fields import (
     DST_IP_FIELDS,
@@ -827,8 +828,17 @@ def evaluate_batch(
     n = 0
     if alerts:
         n += store.upsert_correlation_alerts(alerts)
+        # Автообновление списков в UI (app/updates.py) - бампим тут, а не в main.py: запись
+        # correlation-алертов/инцидентов идёт отсюда напрямую, и возвращаемое наружу число (n)
+        # смешивает алерты с инцидентами - по нему вызывающий не восстановит, какой список
+        # реально поменялся. created=0 намеренно: upsert_correlation_alerts возвращает ВСЕ
+        # обработанные строки, а не только созданные, и пока окно живо, одна и та же корреляция
+        # переписывается на каждом flush - "N новых алертов" в бейдже росло бы на ровном месте.
+        # Список всё равно перечитается (version бампнулась), просто без числа.
+        updates.bump("alerts")
     if incidents:
         upserted = store.upsert_incidents(incidents)
+        updates.bump("incidents", created=sum(1 for _, was_new in upserted if was_new))
         for (incident_id, was_new), inc in zip(upserted, incidents):
             # Повтор в том же бакете (was_new=False) с уже завершённым расследованием -> ре-энкью
             # в queued (новый контекст для агента); queued/running не трогается (store.enqueue_*).

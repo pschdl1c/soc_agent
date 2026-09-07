@@ -52,7 +52,10 @@ lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` п
 5. Для каждой группы: `store.store_events(events, source_batch=label, matched_row_to_rules=..., hit_spec=hit_spec)`,
    затем `correlation.evaluate_batch(store, ruleset_path, source_batch=label, matched_events_by_title=...)`.
 6. `alerts = zircolite_results_to_alerts(raw_results, default_source_batch=source_label)`;
-   `created = store.upsert_alerts(alerts)`.
+   `known_before = store.get_alert_ids_by_dedup_keys([...])` (какие `dedup_key` уже были — только
+   ради счётчика «новых» в `updates.bump`, см. `docs/spec/updates.md`); `created =
+   store.upsert_alerts(alerts)`; при непустом `alerts` — `updates.bump("alerts",
+   created=<число новых dedup_key>)`.
 7. Ответ `IngestResponse(source_batch=source_label, events_processed=total_events,
    rules_matched=len(raw_results), alerts_created=created + correlation_created,
    duration_seconds=round(elapsed, 2))`.
@@ -82,6 +85,7 @@ lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` п
 | Метод | Путь | Ответ / поведение |
 |---|---|---|
 | `GET` | `/health` | `{"status": "ok"|"degraded", "checks": {"db", "zircolite", "ingest_queue"}}`. `?detailed=true` добавляет счётчики строк и размер БД |
+| `GET` | `/updates` | `{"epoch", "alerts": {"version", "created"}, "incidents": {...}}` — счётчики изменений списков для автообновления UI (`app/updates.py`), полностью в памяти, без обращения к БД |
 | `GET` | `/` | `text/html` — `app/static/index.html`, заголовок `Cache-Control: no-store`; 404, если файла нет |
 
 ### Ingest
@@ -227,5 +231,6 @@ if __name__ == "__main__":
 - Импортирует: `fastapi`, `json`, `tempfile`, `pathlib`, `uuid`, `importlib.metadata`;
   `app/config.py`, `app/detection/{engine, normalize, correlation}`, `app/fields.py`,
   `app/filter_lang.py`, `app/ingest_queue.py`, `app/models.py`,
-  `app/rules/{rules_catalog, main_ruleset, value_lists}`, `app/kb.py`, `app/store.py`.
+  `app/rules/{rules_catalog, main_ruleset, value_lists}`, `app/kb.py`, `app/store.py`,
+  `app/updates.py`.
 - Импортируется: точка входа ASGI (`uvicorn app.main:app`).

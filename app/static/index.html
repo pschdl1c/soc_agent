@@ -92,6 +92,12 @@
   button.ghost:hover { color: var(--text); border-color: var(--muted); background: transparent; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* Бейдж "есть новые данные" (см. pollUpdates): показывается вместо тихой перезагрузки
+     списка, когда обновлять под руками нельзя - открыта карточка или пользователь не на первой
+     странице пейджера. Акцентный, но не мигающий: это приглашение, а не тревога. */
+  button.updates-badge { background: var(--accent-dim); border-color: var(--accent); color: var(--text); }
+  button.updates-badge:hover { background: var(--accent); color: #06201e; }
+
   .toggle-link { color: var(--accent); cursor: pointer; font-size: 12px; user-select: none; }
 
   .switch-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
@@ -749,6 +755,8 @@
           <input type="datetime-local" id="alert-time-to" step="1" onchange="loadAlerts()">
         </span>
         <button type="button" class="ghost" onclick="loadAlerts()">Обновить</button>
+        <button type="button" class="updates-badge" id="alerts-updates-badge" style="display:none;"
+                onclick="applyUpdates('alerts')"></button>
       </div>
 
       <div class="content-grid" id="alerts-content-grid" style="margin-top:12px;">
@@ -815,6 +823,8 @@
           <input type="datetime-local" id="incident-time-to" step="1" onchange="loadIncidents()">
         </span>
         <button type="button" class="ghost" onclick="loadIncidents()">Обновить</button>
+        <button type="button" class="updates-badge" id="incidents-updates-badge" style="display:none;"
+                onclick="applyUpdates('incidents')"></button>
       </div>
 
       <div class="content-grid" id="incidents-content-grid" style="margin-top:12px;">
@@ -2058,6 +2068,120 @@ function startHealthPolling() {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkHealth(); });
 }
 
+// ---------- Автообновление списков Алертов/Инцидентов ----------
+//
+// Транспорт - поллинг ДЕШЁВОЙ ручки GET /updates (счётчики версий в памяти процесса, см.
+// app/updates.py), а не самого списка: /alerts с фильтрами - это count + выборка, гонять её
+// каждые несколько секунд "а вдруг что-то изменилось" дороже, чем ручное «Обновить». Дальше
+// два режима:
+//   * обновить можно незаметно (мы на активной вкладке, на первой странице пейджера, карточка
+//     не открыта) - список просто перечитывается, пользователь видит свежие строки;
+//   * обновить нельзя (открыта карточка алерта/инцидента, либо человек листает пейджер) -
+//     показываем бейдж "N новых · обновить" и ждём клика. Подменять данные под открытой
+//     карточкой или сбрасывать пейджер на первую страницу хуже, чем показать чуть устаревший
+//     список.
+// События сюда НАМЕРЕННО не включены: там фильтр/группировка/drill-in, автоперезагрузка
+// сломала бы работу аналитика в середине разбора.
+const UPDATES_POLL_MS = 7000;
+
+// Последний снимок /updates, УЖЕ отражённый в том, что сейчас показано в списках.
+let updatesSeen = null;
+// Что накопилось с момента последней отрисовки списка (на канал): created - сколько строк
+// реально СОЗДАНО (для "N новых"), changed - было ли вообще любое изменение (инкремент
+// event_count у существующего алерта, вердикт расследования, удаление источника - created
+// при этом не растёт, но список поменялся).
+const updatesPending = {
+  alerts: { created: 0, changed: false },
+  incidents: { created: 0, changed: false },
+};
+
+// 1 новый алерт / 2 новых алерта / 5 новых алертов
+function pluralRu(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+function renderUpdatesBadge(ch) {
+  const el = document.getElementById(ch + "-updates-badge");
+  if (!el) return;
+  const p = updatesPending[ch];
+  if (!p.changed) { el.style.display = "none"; return; }
+  if (p.created > 0) {
+    const word = ch === "alerts"
+      ? pluralRu(p.created, "новый алерт", "новых алерта", "новых алертов")
+      : pluralRu(p.created, "новый инцидент", "новых инцидента", "новых инцидентов");
+    el.textContent = `\u2191 ${p.created} ${word}`;
+  } else {
+    el.textContent = "\u21bb Данные обновились";
+  }
+  el.style.display = "";
+}
+
+// Список только что перечитан (ручное «Обновить», смена фильтра, пейджер, переключение
+// вкладки) - гасим бейдж и заново берём точку отсчёта У СЕРВЕРА. Именно запросом, а не "поверим
+// следующему поллингу": между перезагрузкой списка и следующим тиком может пройти флаш ingest,
+// и молча принять его за уже показанный значило бы не показать новые алерты вовсе - до
+// следующего изменения. Зовётся ДО запроса самого списка: так снимок заведомо не новее
+// показанных данных, и в худшем случае мы один раз покажем лишний бейдж (ложное срабатывание
+// безопаснее пропущенного).
+async function resetUpdatesBaseline(ch) {
+  const p = updatesPending[ch];
+  p.created = 0;
+  p.changed = false;
+  renderUpdatesBadge(ch);
+  try {
+    const snap = await api("/updates");
+    if (updatesSeen && updatesSeen.epoch === snap.epoch) updatesSeen[ch] = snap[ch];
+    else updatesSeen = snap;
+  } catch (e) { /* не критично: следующий поллинг возьмёт снимок сам */ }
+}
+
+// Тихо перечитать список можно только если это не помешает: чужая вкладка/фон, открытая
+// карточка (выделенная строка) и любая страница пейджера кроме первой - все три случая
+// означают "покажи бейдж, не трогай таблицу".
+function canAutoRefresh(ch) {
+  if (activeTab !== ch || document.hidden) return false;
+  if ((ch === "alerts" ? alertsOffset : incidentsOffset) !== 0) return false;
+  return !document.querySelector("#" + ch + "-tbody tr.selected");
+}
+
+async function pollUpdates() {
+  const ch = (activeTab === "alerts" || activeTab === "incidents") ? activeTab : null;
+  if (!ch || document.hidden) return;
+  let snap;
+  try {
+    snap = await api("/updates");
+  } catch (e) {
+    return;  // молчим: недоступность сервиса показывает светофор /health, дублировать нечего
+  }
+  const prev = updatesSeen;
+  updatesSeen = snap;
+  if (!prev) return;  // первый опрос - просто точка отсчёта
+  const p = updatesPending[ch];
+  if (prev.epoch !== snap.epoch) {
+    // Сервер перезапустился: счётчики начались заново, сравнивать версии бессмысленно -
+    // считаем, что данные могли уехать, и предлагаем перечитать.
+    p.changed = true;
+  } else {
+    if (snap[ch].version === prev[ch].version) return;
+    p.changed = true;
+    p.created += Math.max(0, snap[ch].created - prev[ch].created);
+  }
+  if (canAutoRefresh(ch)) RELOAD_FNS[ch]();  // loadAlerts/loadIncidents сами погасят бейдж
+  else renderUpdatesBadge(ch);
+}
+
+function applyUpdates(ch) { RELOAD_FNS[ch](); }
+
+function startUpdatesPolling() {
+  setInterval(pollUpdates, UPDATES_POLL_MS);
+  // Возврат на вкладку браузера - сразу проверяем, а не ждём до конца интервала (тот же
+  // приём, что у checkHealth).
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollUpdates(); });
+}
+
 // ---------- Развёрнутая проверка (клик по светофору) ----------
 
 let healthDetailsOpen = false;
@@ -2658,6 +2782,7 @@ function sevBar(level) { return `<span class="sev-bar sev-${level}"></span>`; }
 
 async function loadAlerts(offset = 0) {
   alertsOffset = offset;
+  resetUpdatesBaseline("alerts");   // список перечитывается - гасим бейдж «есть новые» (см. pollUpdates)
   const tbody = document.getElementById("alerts-tbody");
   const emptyEl = document.getElementById("alerts-empty");
   document.getElementById("alerts-head-row").innerHTML = ALERT_COLUMNS.map(c => thHtml("alerts", c)).join("");
@@ -2800,6 +2925,7 @@ function verdictBadge(v) {
 
 async function loadIncidents(offset = 0) {
   incidentsOffset = offset;
+  resetUpdatesBaseline("incidents");
   const tbody = document.getElementById("incidents-tbody");
   const emptyEl = document.getElementById("incidents-empty");
   document.getElementById("incidents-head-row").innerHTML = INCIDENT_COLUMNS.map(c => thHtml("incidents", c)).join("");
@@ -4179,6 +4305,7 @@ wireGroupColumnResize();
 applyGroupValueWidth();
 
 startHealthPolling();
+startUpdatesPolling();
 refreshBatches();
 refreshRulesetOptions();
 renderEventFieldChips();

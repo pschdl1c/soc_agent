@@ -29,7 +29,7 @@ except PackageNotFoundError:  # pragma: no cover
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from app import config, incidents, kb, logging_setup
+from app import config, incidents, kb, logging_setup, updates
 from app.detection import correlation
 from app.detection.engine import ZircoliteEngine
 from app.detection.normalize import zircolite_results_to_alerts
@@ -214,7 +214,18 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
     alerts = zircolite_results_to_alerts(
         raw_results, default_source_batch=source_label, dedup_by_content=dedup_by_content,
     )
+    # Какие dedup_key УЖЕ были в БД до записи - только для бейджа "N новых алертов" в UI
+    # (app/updates.py). upsert_alerts возвращает число ОБРАБОТАННЫХ строк, новые от
+    # дедуплицированных по нему не отличить, а менять её контракт нельзя: то же число уходит в
+    # IngestResponse.alerts_created и печатается в UI/скриптах. Отдельный SELECT по индексу
+    # dedup_key на батч - на фоне прогона движка (~0.25с фиксированного оверхеда) незаметен.
+    known_before = set(store.get_alert_ids_by_dedup_keys([a.dedup_key for a in alerts]))
     created = store.upsert_alerts(alerts)
+    if alerts:
+        # Бампим по ФАКТУ upsert-а, а не только когда появились новые строки: повторное
+        # срабатывание правила инкрементит event_count существующего алерта - в списке это
+        # видимое изменение, просто без "новых" (UI покажет нейтральное "данные обновились").
+        updates.bump("alerts", created=len({a.dedup_key for a in alerts} - known_before))
 
     # events.alert_id - проставляем СРАЗУ после upsert_alerts (настоящие alert_id уже известны -
     # и вновь созданные, и переиспользованные по dedup_key), ДО обработки link_specs ниже: та
@@ -354,6 +365,19 @@ def health(detailed: bool = False) -> dict:
     }
     overall = "ok" if all(c.get("status") == "ok" for c in checks.values()) else "degraded"
     return {"status": overall, "checks": checks}
+
+
+@app.get("/updates")
+def get_updates() -> dict:
+    """Счётчики изменений списков для автообновления UI (см. app/updates.py и pollUpdates в
+    index.html): {"epoch": ..., "alerts": {"version": N, "created": M}, "incidents": {...}}.
+
+    Считается ПОЛНОСТЬЮ В ПАМЯТИ, без похода в БД - ручку опрашивает каждая открытая вкладка
+    раз в несколько секунд, поэтому она обязана быть дешевле самого списка (иначе автообновление
+    стоило бы дороже ручного «Обновить»). Отдельная ручка, а не поле в /health: у них разный
+    ритм опроса (7с против 20с) и разная семантика - /health про живость сервиса, эта про
+    свежесть данных."""
+    return updates.snapshot()
 
 
 def _authenticate_ingest(request: Request) -> dict:
@@ -513,6 +537,10 @@ def delete_batch(source_batch: str) -> dict:
     result = store.delete_batch(source_batch)
     if result["events_deleted"] == 0 and result["alerts_deleted"] == 0:
         raise HTTPException(status_code=404, detail=f"Источник не найден: {source_batch}")
+    # Строки ИСЧЕЗЛИ - для открытого UI это такое же изменение списка, как появление новых
+    # (created не растёт, UI покажет нейтральное "данные обновились").
+    updates.bump("alerts")
+    updates.bump("incidents")
     return {"source_batch": source_batch, **result}
 
 
@@ -679,6 +707,7 @@ def get_incident(incident_id: str) -> dict:
 def update_incident_status(incident_id: str, body: IncidentStatusUpdate) -> dict:
     if not store.update_incident_status(incident_id, body.status):
         raise HTTPException(status_code=404, detail="Инцидент не найден")
+    updates.bump("incidents")
     return {"incident_id": incident_id, "status": body.status}
 
 
