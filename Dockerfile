@@ -101,4 +101,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=3)" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --timeout-keep-alive 65: дефолт uvicorn - 5с, и это ровно тот случай, когда форвардер с пулом
+# keep-alive соединений (Fluent Bit и любой другой) переиспользует соединение, уже закрытое
+# сервером по таймауту: в логе форвардера "broken connection" / "could not flush records",
+# чанк уходит в ретрай. События при этом не теряются (ретрай проходит), но поток становится
+# пилообразным, а диагностика забивается ложными ошибками. Ловили вживую, см.
+# docs/guide/windows-vm-lab.md. 65с перекрывает типовой idle-таймаут пула форвардеров (у
+# Fluent Bit net.keepalive_idle_timeout по умолчанию 30с).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "65"]

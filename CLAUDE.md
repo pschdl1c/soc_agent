@@ -639,7 +639,10 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   значений.
 - **Оценка качества — живой adversarial-контур** (не replay датасетов): опенсорсный
   pentest-agent на ВМ с настроенным аудитом, подключённой в SIEM через форвардер
-  (`POST /ingest/stream`, см. `docs/guide/forwarder.md`). pentest-agent генерит атаки →
+  (`POST /ingest/stream`, см. `docs/guide/forwarder.md`). Windows-половина стенда уже поднята
+  и проверена от сети до корреляций — ранбук `docs/guide/windows-vm-lab.md` (Win10 в
+  VirtualBox: аудит по GUID подкатегорий, Sysmon, Fluent Bit с `Event_Data_As_Map`, известные
+  ограничения — `Provider_Name`, точность `event_time`). pentest-agent генерит атаки →
   инциденты → soc-agent выносит вердикты → сверка. OTRF Security-Datasets остаются только для
   ОФЛАЙН-разработки корреляции/правил, НЕ для прогона агента.
 - **Human-in-the-loop:** аналитик подтверждает/отклоняет вердикт → данные для дообучения промптов.

@@ -364,6 +364,8 @@ Swagger UI со всеми схемами запросов/ответов — ht
 То же требование у `POST /ingest/events`. Локальные `/ingest/file` и `/ingest/upload` — без токена.
 
 Протокол и примеры конфигурации форвардеров — в [`docs/guide/forwarder.md`](./docs/guide/forwarder.md).
+Пошаговая настройка тестового стенда (Windows-ВМ в VirtualBox: аудит, Sysmon, Fluent Bit,
+проверка детекта) — в [`docs/guide/windows-vm-lab.md`](./docs/guide/windows-vm-lab.md).
 
 ## Sigma-правила и рулсеты
 

@@ -87,26 +87,39 @@ Linux auditd/syslog.
 **Windows — Security/Sysmon → SIEM:**
 ```ini
 [INPUT]
-    Name         winevtlog
-    Channels     Security,Microsoft-Windows-Sysmon/Operational
-    Read_Existing_Events  false
-
-[FILTER]
-    Name    modify
-    Match   *
-    Add     Hostname ${COMPUTERNAME}
+    Name                    winevtlog
+    Channels                Security,Microsoft-Windows-Sysmon/Operational
+    Read_Existing_Events    false
+    Event_Data_As_Map       true
+    String_Inserts          false
+    Ignore_Missing_Channels true
+    DB                      C:\ProgramData\fluent-bit\winevtlog.sqlite
 
 [OUTPUT]
-    Name          http
-    Match         *
-    Host          SIEM_HOST
-    Port          8000
-    URI           /ingest/stream
-    Format        json_lines
-    Header        Content-Type application/x-ndjson
-    Header        Authorization Bearer <TOKEN>
-    json_date_key EventTime
+    Name             http
+    Match            *
+    Host             SIEM_HOST
+    Port             8000
+    URI              /ingest/stream
+    Format           json_lines
+    Header           Authorization Bearer <TOKEN>
+    json_date_key    EventTime
+    json_date_format iso8601
 ```
+
+> **`Event_Data_As_Map true` обязателен, и он требует Fluent Bit ≥ 4.2.8 / 5.0.10.** Без него
+> `winevtlog` отдаёт `EventData` позиционным массивом `StringInserts` **без имён полей** — то
+> есть `CommandLine`, `Image`, `NewProcessName`, `TargetUserName` в событии не появляются
+> вообще, и Sigma-правила молча не срабатывают: события идут, алертов ноль. Вложенную карту
+> `EventData.CommandLine` Zircolite при flatten схлопывает до `CommandLine` — ровно к тому
+> имени, которое ждут правила.
+>
+> `json_date_key EventTime` не косметика: родное поле `TimeCreated` приходит в локальном
+> времени со смещением (`2026-09-07 08:00:39 +0300`), такой формат `app/timeutil.py` не
+> разбирает, да и в `TIME_FIELDS` (`app/fields.py`) его нет.
+>
+> Полная пошаговая настройка Windows-стенда (аудит, Sysmon, сеть ВМ, проверка детекта) —
+> [`windows-vm-lab.md`](./windows-vm-lab.md).
 
 **Linux — auditd/syslog → SIEM:**
 ```ini
