@@ -1,0 +1,53 @@
+scenario: SCE_Recon_Scripted_Discovery
+cases:
+  - name: positive_four_tools_from_one_shell
+    expect_incidents: [recon_scripted_discovery]
+    events:
+      - repeat: 4
+        step: 5
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe']
+          CommandLine: ['whoami /all', 'ipconfig /all', 'systeminfo', 'net user']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ProcessGuid: "${guid1}", ParentProcessGuid: "${guid9}", ParentImage: 'C:\Windows\System32\cmd.exe', User: 'LAB\workstation_x', IntegrityLevel: Medium}
+  - name: positive_seven_tools_raise_both
+    expect_incidents: [recon_scripted_discovery, th_recon_discovery_burst]
+    events:
+      - repeat: 7
+        step: 5
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe', 'C:\Windows\System32\tasklist.exe', 'C:\Windows\System32\ARP.EXE', 'C:\Windows\System32\NETSTAT.EXE']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentProcessGuid: "${guid9}", ParentImage: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'}
+  - name: negative_net1_child_of_net_not_counted
+    expect_incidents: []
+    events:
+      - repeat: 3
+        step: 5
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\net.exe']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentProcessGuid: "${guid9}", ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 16
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\net1.exe', ParentProcessGuid: "${guid9}", ParentImage: 'C:\Windows\System32\net.exe'}
+  - name: negative_tools_spread_beyond_window
+    expect_incidents: []
+    events:
+      - repeat: 4
+        step: 240
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentProcessGuid: "${guid9}", ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_same_tool_repeated
+    expect_incidents: []
+    events:
+      - repeat: 10
+        step: 5
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\ipconfig.exe', ParentProcessGuid: "${guid9}", ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_4688_ignored
+    expect_incidents: []
+    events:
+      - repeat: 5
+        step: 5
+        vary:
+          NewProcessName: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe', 'C:\Windows\System32\tasklist.exe']
+        event: {EventID: 4688, Channel: Security, ParentProcessName: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'cmd /c "whoami /all & ipconfig /all & systeminfo & net user & tasklist"'

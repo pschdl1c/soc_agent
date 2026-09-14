@@ -1,0 +1,16 @@
+scenario: SCE_KC_Evasion_Then_Impact
+cases:
+  - name: positive_defender_off_then_shadow_deletion
+    expect_incidents: [kc_evasion_then_impact, evasion_defender_tampering, impact_shadow_copy_deletion]
+    events:
+      - event: {EventID: 5001, Channel: Microsoft-Windows-Windows Defender/Operational, ProductName: 'Microsoft Defender Antivirus'}
+      - at: 1800
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\vssadmin.exe', OriginalFileName: VSSADMIN.EXE, CommandLine: 'vssadmin delete shadows /all /quiet', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_impact_then_evasion
+    expect_incidents: [evasion_defender_tampering, impact_shadow_copy_deletion]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\vssadmin.exe', OriginalFileName: VSSADMIN.EXE, CommandLine: 'vssadmin delete shadows /all /quiet', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 600
+        event: {EventID: 5001, Channel: Microsoft-Windows-Windows Defender/Operational, ProductName: 'Microsoft Defender Antivirus'}
+lab:
+  - 'Только на снимке ВМ: Set-MpPreference -DisableRealtimeMonitoring $true; vssadmin delete shadows /all /quiet'

@@ -1,0 +1,37 @@
+title: SCE_Persist_Multiple_Mechanisms
+id: dc6adeee-d2a6-4920-bc6a-c2b7a319322d
+name: sce_persist_multiple_mechanisms
+status: experimental
+description: |
+    Two or more DIFFERENT persistence mechanisms set up on one host within an hour: autorun registry
+    keys, a file in the Startup folder, a scheduled task, a new service, a WMI event subscription.
+    Malware and operators often install redundant persistence; legitimate software rarely touches
+    more than one mechanism at a time.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.t1547.001
+    - attack.t1053.005
+    - attack.t1543.003
+    - attack.t1546.003
+correlation:
+    type: temporal
+    rules:
+        - persist_autorun_currentversion
+        - persist_startup_folder_write
+        - persist_schtasks_creation
+        - persist_sc_create_service
+        - persist_ps_new_service
+        - persist_wmi_event_subscription
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 2
+    incident:
+        type: persist_multiple_mechanisms
+        severity: medium
+falsepositives:
+    - Software installation that registers both a service and a Run key or task
+level: medium

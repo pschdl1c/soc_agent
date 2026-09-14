@@ -1,0 +1,14 @@
+scenario: SCE_Lateral_WinRM_Remote_Exec
+cases:
+  - name: positive_logon_then_wsmprovhost
+    expect_incidents: [lateral_winrm_remote_exec]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.70, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 3
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wsmprovhost.exe', CommandLine: 'C:\Windows\system32\wsmprovhost.exe -Embedding', ParentImage: 'C:\Windows\System32\svchost.exe', User: 'LAB\admin'}
+  - name: negative_wsmprovhost_without_logon
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wsmprovhost.exe', CommandLine: 'C:\Windows\system32\wsmprovhost.exe -Embedding', ParentImage: 'C:\Windows\System32\svchost.exe'}
+lab:
+  - 'Enable-PSRemoting -Force (на стенде); с хоста: Invoke-Command -ComputerName <win10-lab> -Credential lab\admin { whoami }'

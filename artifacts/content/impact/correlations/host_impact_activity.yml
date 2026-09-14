@@ -1,0 +1,31 @@
+title: Host Impact Activity
+id: d2bf6596-d687-437a-a854-5df822e612a1
+name: impact_host_impact
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: recovery inhibition (shadow copies, backups,
+    bcdedit, WinRE, services) or ransom note drops on the host.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1490
+    - attack.t1486
+correlation:
+    type: event_count
+    rules:
+        - impact_shadow_copies_deletion
+        - impact_shadow_copies_deletion_ps
+        - impact_shadow_copies_deletion_scriptblock
+        - impact_bcdedit_tampering
+        - impact_wbadmin_delete_all
+        - impact_wbadmin_delete
+        - impact_reagentc_disable
+        - impact_service_tampering
+        - impact_ransom_note_created
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+level: informational

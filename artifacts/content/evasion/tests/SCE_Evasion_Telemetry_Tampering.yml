@@ -1,0 +1,21 @@
+scenario: SCE_Evasion_Telemetry_Tampering
+cases:
+  - name: positive_auditpol_clear
+    expect_incidents: [evasion_telemetry_tampering]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\auditpol.exe', OriginalFileName: AUDITPOL.EXE, CommandLine: 'auditpol /clear /y', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_sysmon_uninstall
+    expect_incidents: [evasion_telemetry_tampering]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\tools\Sysmon\Sysmon64.exe', Description: System activity monitor, CommandLine: 'Sysmon64.exe -u force', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_sysmon_config_change_16
+    expect_incidents: [evasion_telemetry_tampering]
+    events:
+      - event: {EventID: 16, Channel: Microsoft-Windows-Sysmon/Operational, Configuration: 'C:\Users\Public\empty.xml', ConfigurationFileHash: 'SHA256=00'}
+  - name: negative_auditpol_get
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\auditpol.exe', OriginalFileName: AUDITPOL.EXE, CommandLine: 'auditpol /get /category:*', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'Штатное обновление конфига Sysmon (Шаг 3) само даст этот инцидент - это ожидаемый TP-по-факту'
+  - 'auditpol /backup /file:C:\Users\Public\ap.csv; auditpol /remove /allusers; auditpol /restore /file:C:\Users\Public\ap.csv'

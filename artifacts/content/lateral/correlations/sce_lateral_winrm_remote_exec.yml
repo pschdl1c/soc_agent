@@ -1,0 +1,27 @@
+title: SCE_Lateral_WinRM_Remote_Exec
+id: 010e0a8e-5a0b-4315-b7bd-a3de911137e7
+name: sce_lateral_winrm_remote_exec
+status: experimental
+description: |
+    A network logon to the host is followed within 2 minutes by WinRM remote PowerShell host
+    activity - Enter-PSSession / Invoke-Command / evil-winrm style remote execution.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.lateral-movement
+    - attack.execution
+    - attack.t1021.006
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_successful_remote_logon
+        - lateral_host_winrm_session
+    group-by:
+        - Computer
+    timespan: 2m
+    incident:
+        type: lateral_winrm_remote_exec
+        severity: medium
+falsepositives:
+    - Administrators using PowerShell remoting
+level: medium

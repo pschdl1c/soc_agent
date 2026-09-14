@@ -1,0 +1,31 @@
+name: exec_office_child_ofn
+description: Подозрительные потомки Office по OriginalFileName
+values:
+  - bitsadmin.exe
+  - CertOC.exe
+  - CertUtil.exe
+  - Cmd.Exe
+  - CMSTP.EXE
+  - cscript.exe
+  - curl.exe
+  - HH.exe
+  - IEExec.exe
+  - InstallUtil.exe
+  - javaw.exe
+  - Microsoft.Workflow.Compiler.exe
+  - msdt.exe
+  - MSHTA.EXE
+  - msiexec.exe
+  - Msxsl.exe
+  - odbcconf.exe
+  - pcalua.exe
+  - PowerShell.EXE
+  - RegAsm.exe
+  - RegSvcs.exe
+  - REGSVR32.exe
+  - RUNDLL32.exe
+  - schtasks.exe
+  - ScriptRunner.exe
+  - wmic.exe
+  - WorkFolders.exe
+  - wscript.exe

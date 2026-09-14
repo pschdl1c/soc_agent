@@ -1,0 +1,12 @@
+name: common_browser_images
+description: 'Исполняемые файлы браузеров (|endswith по Image) - исключения для правил "не из браузера"'
+values:
+  - '\chrome.exe'
+  - '\msedge.exe'
+  - '\msedgewebview2.exe'
+  - '\firefox.exe'
+  - '\opera.exe'
+  - '\brave.exe'
+  - '\iexplore.exe'
+  - '\vivaldi.exe'
+  - '\browser.exe'

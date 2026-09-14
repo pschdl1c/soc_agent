@@ -1,0 +1,32 @@
+title: Host Privilege Escalation Activity
+id: 25bd2cfd-fa4b-4627-9fb4-4de8c84d8974
+name: privesc_host_privilege_escalation
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: UAC bypass trigger, getsystem / Potato tooling or
+    privilege escalation enumeration tools on the host.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.privilege-escalation
+    - attack.t1548.002
+    - attack.t1134
+correlation:
+    type: event_count
+    rules:
+        - privesc_host_autoelevated_abuse
+        - privesc_getsystem_service_4697
+        - privesc_getsystem_process
+        - privesc_coercedpotato_pipe
+        - privesc_efspotato_pipe
+        - privesc_coercedpotato_exec
+        - privesc_localpotato_exec
+        - privesc_winpeas
+        - privesc_sharpup
+        - privesc_seatbelt
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+level: informational

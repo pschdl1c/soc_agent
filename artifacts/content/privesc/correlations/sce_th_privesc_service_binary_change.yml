@@ -1,0 +1,28 @@
+title: SCE_TH_PrivEsc_Service_Binary_Change
+id: 248c8955-f8d0-4bc7-99fc-9008f866a3bf
+name: sce_th_privesc_service_binary_change
+status: experimental
+description: |
+    Hunting: the ImagePath of an existing service was changed with reg.exe - service hijacking for
+    privilege escalation or persistence.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.privilege-escalation
+    - attack.persistence
+    - attack.t1574.011
+correlation:
+    type: event_count
+    rules:
+        - privesc_service_imagepath_change
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: th_privesc_service_binary_change
+        severity: low
+falsepositives:
+    - Software reconfiguring its own service
+level: low

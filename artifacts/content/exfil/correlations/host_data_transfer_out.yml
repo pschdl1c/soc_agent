@@ -1,0 +1,28 @@
+title: Host Data Transfer To External Service
+id: de71d7d8-389f-4d4f-aa35-7c7cf94933ac
+name: exfil_host_transfer_out
+status: experimental
+description: |
+    Intermediate link: data leaves the host through a transfer tool or service - rclone, curl upload
+    to a file sharing site, command line upload of command output, MEGA or other file sharing domain
+    resolved by a non-browser. Informational.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.exfiltration
+    - attack.t1567.002
+    - attack.t1048
+correlation:
+    type: event_count
+    rules:
+        - exfil_rclone
+        - exfil_curl_upload_filesharing
+        - exfil_cli_data_exfiltration
+        - exfil_dns_mega
+        - exfil_filesharing_dns_non_browser
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+level: informational

@@ -1,0 +1,28 @@
+scenario: SCE_TH_Lateral_Remote_Service_Task
+cases:
+  - name: positive_logon_then_service_install
+    expect_incidents: [th_lateral_remote_service_task]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.80, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 10
+        event: {EventID: 4697, Channel: Security, ServiceName: UpdSvcRemote, ServiceFileName: 'C:\Windows\Temp\upd.exe', ServiceType: '0x10', ServiceStartType: 3, SubjectUserName: admin}
+  - name: positive_logon_then_task_4698
+    expect_incidents: [th_lateral_remote_service_task]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.81, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 8
+        event: {EventID: 4698, Channel: Security, TaskName: '\RemoteJob', SubjectUserName: admin, TaskContent: '<Task><Actions><Exec><Command>C:\Tools\job.exe</Command></Exec></Actions></Task>'}
+  - name: negative_defender_driver_after_logon
+    expect_incidents: []
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.82, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 10
+        event: {EventID: 4697, Channel: Security, ServiceName: MpKsl6025883b, ServiceFileName: 'C:\ProgramData\Microsoft\Windows Defender\Definition Updates\{3868DEC1-0138-419E-A34F-B075C973F643}\MpKslDrv.sys', ServiceType: '0x1', ServiceStartType: 3}
+  - name: negative_microsoft_task_after_logon
+    expect_incidents: []
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.83, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 8
+        event: {EventID: 4698, Channel: Security, TaskName: '\Microsoft\Windows\UpdateOrchestrator\Reboot', SubjectUserName: 'HOST$', TaskContent: '<Task/>'}
+lab:
+  - 'С второго хоста: sc.exe \\<win10-lab> create LabRemote binPath= C:\Windows\System32\notepad.exe; sc.exe \\<win10-lab> delete LabRemote'

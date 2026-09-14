@@ -1,0 +1,11 @@
+name: common_userwritable_paths
+description: 'Каталоги, куда пишет любой пользователь без прав администратора - типичное место загрузки и запуска полезной нагрузки (|contains по пути)'
+values:
+  - '\Users\Public\'
+  - '\AppData\Local\Temp\'
+  - '\AppData\Roaming\'
+  - '\Downloads\'
+  - '\Windows\Temp\'
+  - ':\PerfLogs\'
+  - ':\Temp\'
+  - '\Desktop\'

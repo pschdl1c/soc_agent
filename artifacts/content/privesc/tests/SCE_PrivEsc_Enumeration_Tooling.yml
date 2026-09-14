@@ -1,0 +1,16 @@
+scenario: SCE_PrivEsc_Enumeration_Tooling
+cases:
+  - name: positive_winpeas
+    expect_incidents: [privesc_enumeration_tooling]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\winPEASx64.exe', OriginalFileName: winPEAS.exe, CommandLine: 'winPEASx64.exe servicesinfo', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_sharpup_audit_check
+    expect_incidents: [privesc_enumeration_tooling]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\a.exe', CommandLine: 'a.exe audit ModifiableServiceBinaries UnquotedServicePath', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_service_query
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\sc.exe', CommandLine: 'sc query state= all', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'Invoke-WebRequest https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASx64.exe -OutFile C:\Users\Public\winPEASx64.exe; C:\Users\Public\winPEASx64.exe servicesinfo'

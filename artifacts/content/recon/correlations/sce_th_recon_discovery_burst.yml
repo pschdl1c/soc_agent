@@ -1,0 +1,28 @@
+title: SCE_TH_Recon_Discovery_Burst
+id: 334af376-9cfa-4136-a3b5-418791fe78b8
+name: sce_th_recon_discovery_burst
+status: experimental
+description: |
+    Hunting: six or more different discovery utilities on one host within 30 minutes, regardless of
+    the parent process (catches recon spread over several shells or spawned through intermediaries).
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.discovery
+    - attack.t1082
+correlation:
+    type: value_count
+    rules:
+        - recon_discovery_utility
+    group-by:
+        - Computer
+    timespan: 30m
+    condition:
+        field: Image
+        gte: 6
+    incident:
+        type: th_recon_discovery_burst
+        severity: low
+falsepositives:
+    - Troubleshooting sessions, system setup
+level: low

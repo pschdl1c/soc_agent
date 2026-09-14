@@ -1,0 +1,25 @@
+title: Host New Service Or Scheduled Task
+id: 100a213b-b109-4c78-ba8a-e3b83697ecb8
+name: lateral_host_new_service_or_task
+status: experimental
+description: |
+    Intermediate link: a service was installed (4697) or a non-Microsoft scheduled task registered
+    (4698) on the host. Informational, references persistence base rules from the persistence
+    ruleset.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.t1543.003
+    - attack.t1053.005
+correlation:
+    type: event_count
+    rules:
+        - persist_service_installed_4697
+        - persist_task_created_4698
+    group-by:
+        - Computer
+    timespan: 2m
+    condition:
+        gte: 1
+level: informational

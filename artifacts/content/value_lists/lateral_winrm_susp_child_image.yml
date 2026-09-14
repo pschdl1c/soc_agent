@@ -1,0 +1,13 @@
+name: lateral_winrm_susp_child_image
+description: Suspicious Processes Spawned by WinRM - Image|endswith
+values:
+  - \cmd.exe
+  - \sh.exe
+  - \bash.exe
+  - \powershell.exe
+  - \pwsh.exe
+  - \wsl.exe
+  - \schtasks.exe
+  - \certutil.exe
+  - \whoami.exe
+  - \bitsadmin.exe

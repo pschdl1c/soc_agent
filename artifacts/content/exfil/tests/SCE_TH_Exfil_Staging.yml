@@ -1,0 +1,22 @@
+scenario: SCE_TH_Exfil_Staging
+cases:
+  - name: positive_five_archives_by_powershell
+    expect_incidents: [th_exfil_staging]
+    events:
+      - repeat: 5
+        step: 30
+        event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', TargetFilename: 'C:\Users\Public\stage\part${i}.zip', ProcessGuid: "${guid1}"}
+  - name: negative_browser_downloads_archives
+    expect_incidents: []
+    events:
+      - repeat: 6
+        step: 30
+        event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Google\Chrome\Application\chrome.exe', TargetFilename: 'C:\Users\victim\Downloads\file${i}.zip'}
+  - name: negative_four_archives
+    expect_incidents: []
+    events:
+      - repeat: 4
+        step: 30
+        event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', TargetFilename: 'C:\Users\Public\stage\part${i}.zip'}
+lab:
+  - '1..5 | ForEach-Object { Compress-Archive -Path C:\Windows\win.ini -DestinationPath "C:\Users\Public\stage$_.zip" -Force }'

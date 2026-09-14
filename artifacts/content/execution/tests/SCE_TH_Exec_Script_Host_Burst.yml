@@ -1,0 +1,25 @@
+scenario: SCE_TH_Exec_Script_Host_Burst
+cases:
+  - name: positive_three_scripts
+    expect_incidents: [th_exec_script_host_burst]
+    events:
+      - repeat: 3
+        step: 120
+        vary:
+          CommandLine: ['wscript.exe C:\Users\victim\Downloads\invoice.js', 'cscript.exe //nologo C:\Users\victim\AppData\Local\Temp\stage2.vbs', 'wscript.exe C:\Users\victim\AppData\Roaming\upd.wsf']
+          Image: ['C:\Windows\System32\wscript.exe', 'C:\Windows\System32\cscript.exe', 'C:\Windows\System32\wscript.exe']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentImage: 'C:\Windows\explorer.exe'}
+  - name: negative_two_scripts
+    expect_incidents: []
+    events:
+      - repeat: 2
+        step: 120
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cscript.exe', CommandLine: 'cscript.exe C:\scripts\report.vbs', ParentImage: 'C:\Windows\explorer.exe'}
+  - name: negative_wscript_without_script_file
+    expect_incidents: []
+    events:
+      - repeat: 4
+        step: 60
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wscript.exe', CommandLine: 'wscript.exe', ParentImage: 'C:\Windows\explorer.exe'}
+lab:
+  - 'Set-Content $env:TEMP\a.vbs ''WScript.Echo 1''; 1..3 | ForEach-Object { cscript //nologo $env:TEMP\a.vbs }'

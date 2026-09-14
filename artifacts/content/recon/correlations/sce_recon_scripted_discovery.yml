@@ -1,0 +1,34 @@
+title: SCE_Recon_Scripted_Discovery
+id: b7da495a-521e-4385-b8bc-34bce9a46596
+name: sce_recon_scripted_discovery
+status: experimental
+description: |
+    Four or more different discovery utilities launched by the SAME parent process within 10 minutes
+    - a recon script, a C2 implant running a discovery module, or an operator typing commands in
+    one shell. Keyed by ParentProcessGuid, so unrelated tools started from different places on the
+    host do not add up.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.discovery
+    - attack.t1082
+    - attack.t1033
+    - attack.t1016
+correlation:
+    type: value_count
+    rules:
+        - recon_discovery_utility
+    group-by:
+        - Computer
+        - ParentProcessGuid
+    timespan: 10m
+    condition:
+        field: Image
+        gte: 4
+    incident:
+        type: recon_scripted_discovery
+        severity: high
+falsepositives:
+    - Administrator troubleshooting in one console window
+    - Inventory / support scripts
+level: high

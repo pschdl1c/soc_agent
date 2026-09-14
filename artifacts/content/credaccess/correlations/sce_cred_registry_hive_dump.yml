@@ -1,0 +1,28 @@
+title: SCE_Cred_Registry_Hive_Dump
+id: 9322e370-5d41-4117-a1fc-7509fdd37846
+name: sce_cred_registry_hive_dump
+status: experimental
+description: |
+    SAM / SYSTEM / SECURITY registry hives exported with reg.exe on the host - offline extraction of
+    local account hashes and LSA secrets.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1003.002
+    - attack.t1003.004
+correlation:
+    type: event_count
+    rules:
+        - cred_reg_dump_hives
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: cred_registry_hive_dump
+        severity: high
+falsepositives:
+    - Backup scripts exporting hives
+level: high

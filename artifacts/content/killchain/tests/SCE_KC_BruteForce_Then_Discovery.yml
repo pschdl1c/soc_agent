@@ -1,0 +1,32 @@
+scenario: SCE_KC_BruteForce_Then_Discovery
+cases:
+  - name: positive_bruteforce_success_then_recon
+    expect_incidents: [kc_bruteforce_then_discovery, auth_bruteforce_success, recon_scripted_discovery]
+    events:
+      - repeat: 12
+        step: 4
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 198.51.100.20, TargetUserName: admin}
+      - at: 90
+        event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 198.51.100.20, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 1200
+        repeat: 4
+        step: 10
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentProcessGuid: "${guid1}", ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_recon_before_bruteforce
+    expect_incidents: [auth_bruteforce_success, recon_scripted_discovery]
+    events:
+      - repeat: 4
+        step: 10
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentProcessGuid: "${guid1}", ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 600
+        repeat: 12
+        step: 4
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 198.51.100.21, TargetUserName: admin}
+      - at: 700
+        event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 198.51.100.21, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+lab:
+  - 'Комбинация лаб-команд SCE_Auth_BruteForce_Success, затем SCE_Recon_Scripted_Discovery'

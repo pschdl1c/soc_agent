@@ -1,0 +1,29 @@
+title: SCE_KC_BruteForce_Then_Discovery
+id: e5ab20d0-6e45-46eb-92b6-a8635a6d3ead
+name: sce_kc_bruteforce_then_discovery
+status: experimental
+description: |
+    Kill chain on one host: a successful logon after a brute force burst, followed within 2 hours by
+    hands-on-keyboard discovery (four or more different discovery utilities).
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.initial-access
+    - attack.credential-access
+    - attack.discovery
+    - attack.t1110
+    - attack.t1082
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_host_bruteforce_success
+        - recon_host_discovery
+    group-by:
+        - Computer
+    timespan: 2h
+    incident:
+        type: kc_bruteforce_then_discovery
+        severity: critical
+falsepositives:
+    - Unlikely
+level: critical

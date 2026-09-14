@@ -1,0 +1,35 @@
+title: SCE_Cred_LSASS_Dump
+id: e75230e4-88be-41f3-aada-7e65009eda20
+name: sce_cred_lsass_dump
+status: experimental
+description: |
+    LSASS memory dumping on the host: suspicious process access to lsass (GrantedAccess, comsvcs
+    call trace, dump-named tool), comsvcs MiniDump or procdump against lsass, dump keywords on the
+    command line, or an lsass dump file written. Any single indicator raises the incident.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+correlation:
+    type: event_count
+    rules:
+        - cred_lsass_susp_access_flags
+        - cred_lsass_access_comsvcs
+        - cred_lsass_access_dump_keyword
+        - cred_comsvcs_minidump
+        - cred_procdump_lsass
+        - cred_lsass_dump_keyword_cli
+        - cred_lsass_dump_files
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: cred_lsass_dump
+        severity: critical
+falsepositives:
+    - Troubleshooting with procdump by administrators
+    - Security products not yet covered by filters
+level: critical

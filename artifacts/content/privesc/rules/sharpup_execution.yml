@@ -1,0 +1,44 @@
+title: HackTool - SharpUp PrivEsc Tool Execution
+id: d90e1b31-315e-46a7-ac14-04976919de9c
+name: privesc_sharpup
+related:
+    -   id: c484e533-ee16-4a93-b6ac-f0ea4868b2f1
+        type: derived
+status: test
+description: Detects the use of SharpUp, a tool for local privilege escalation
+references:
+    - https://github.com/GhostPack/SharpUp
+author: Florian Roth (Nextron Systems), ET, Claude
+date: '2022-08-20'
+modified: '2026-09-14'
+tags:
+    - attack.persistence
+    - attack.privilege-escalation
+    - attack.discovery
+    - attack.execution
+    - attack.stealth
+    - attack.t1615
+    - attack.t1569.002
+    - attack.t1574.005
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection:
+        -   Image|endswith: \SharpUp.exe
+        -   Description: SharpUp
+        -   CommandLine|contains:
+                - HijackablePaths
+                - UnquotedServicePath
+                - ProcessDLLHijack
+                - ModifiableServiceBinaries
+                - ModifiableScheduledTask
+                - DomainGPPPassword
+                - CachedGPPPassword
+    condition: guard_logsource and (selection)
+falsepositives:
+    - Unknown
+level: critical

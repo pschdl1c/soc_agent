@@ -1,0 +1,36 @@
+title: Host Defense Evasion Activity
+id: d331caaf-cebd-4528-b0b7-7cfab8b9406b
+name: evasion_host_defense_evasion
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: event logs cleared, Defender weakened or security
+    telemetry tampered with on the host.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.defense-impairment
+    - attack.t1685
+correlation:
+    type: event_count
+    rules:
+        - evasion_security_log_cleared
+        - evasion_system_log_cleared
+        - evasion_eventlog_clear_cli
+        - evasion_clear_eventlog_ps
+        - evasion_defender_rtp_disabled
+        - evasion_defender_exclusion_added
+        - evasion_defender_config_tamper
+        - evasion_defender_set_mp_ps
+        - evasion_defender_exclusion_cli
+        - evasion_defender_disable_feature_cli
+        - evasion_defender_tamper_registry
+        - evasion_auditpol_tampering
+        - evasion_sysmon_uninstall
+        - evasion_sysmon_driver_unload
+        - evasion_eventlog_disabled_registry
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+level: informational

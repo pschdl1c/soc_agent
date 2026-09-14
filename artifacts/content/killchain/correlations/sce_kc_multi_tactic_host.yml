@@ -1,0 +1,38 @@
+title: SCE_KC_Multi_Tactic_Host
+id: 052446c7-308c-473a-99c6-3fa13f75997f
+name: sce_kc_multi_tactic_host
+status: experimental
+description: |
+    Three or more DIFFERENT attack tactics observed on one host within 4 hours (brute force success,
+    discovery, suspicious execution, persistence, privilege escalation, credential access, defense
+    evasion, inbound lateral movement, impact) - the host is very likely compromised.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.execution
+    - attack.persistence
+    - attack.credential-access
+    - attack.impact
+correlation:
+    type: temporal
+    rules:
+        - auth_host_bruteforce_success
+        - recon_host_discovery
+        - exec_host_suspicious_execution
+        - persist_host_persistence
+        - privesc_host_privilege_escalation
+        - cred_host_credential_access
+        - evasion_host_defense_evasion
+        - lateral_host_inbound
+        - impact_host_impact
+    group-by:
+        - Computer
+    timespan: 4h
+    condition:
+        gte: 3
+    incident:
+        type: kc_multi_tactic_host
+        severity: critical
+falsepositives:
+    - Red team exercises
+level: critical

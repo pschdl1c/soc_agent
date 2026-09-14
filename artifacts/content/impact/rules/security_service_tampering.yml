@@ -1,0 +1,56 @@
+title: Suspicious Windows Service Tampering
+id: ce77e032-e31e-4052-a454-f79d2d8feecb
+name: impact_service_tampering
+related:
+    -   id: eb87818d-db5d-49cc-a987-d5da331fbd90
+        type: obsolete
+    -   id: 6783aa9e-0dc3-49d4-a94a-8b39c5fd700b
+        type: obsolete
+    -   id: 7fd4bb39-12d0-45ab-bb36-cebabc73dc7b
+        type: obsolete
+    -   id: ce72ef99-22f1-43d4-8695-419dcb5d9330
+        type: derived
+status: test
+description: Detects the usage of binaries such as 'net', 'sc' or 'powershell' in order to stop, pause, disable or delete critical or important Windows services such as AV, Backup, etc. As seen being used in some ransomware scripts
+references:
+    - https://www.trendmicro.com/content/dam/trendmicro/global/en/research/22/h/ransomware-actor-abuses-genshin-impact-anti-cheat-driver-to-kill-antivirus/Genshin%20Impact%20Figure%2010.jpg
+    - https://www.trellix.com/en-sg/about/newsroom/stories/threat-labs/lockergoga-ransomware-family-used-in-targeted-attacks.html
+    - https://github.com/redcanaryco/atomic-red-team/blob/f339e7da7d05f6057fdfcdd3742bfcf365fee2a9/atomics/T1562.001/T1562.001.md
+    - https://research.nccgroup.com/2022/08/19/back-in-black-unlocking-a-lockbit-3-0-ransomware-attack/
+    - https://www.virustotal.com/gui/file/38283b775552da8981452941ea74191aa0d203edd3f61fb2dee7b0aea3514955
+    - https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/delete-method-in-class-win32-service
+author: Nasreddine Bencherchali (Nextron Systems), frack113 , X__Junior (Nextron Systems), ET, Claude
+date: '2022-09-01'
+modified: '2026-09-14'
+tags:
+    - attack.impact
+    - attack.defense-impairment
+    - attack.t1489
+    - attack.t1685
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection_tools_img:
+        -   OriginalFileName|expand: '%impact_service_tampering_originalfilename%'
+        -   Image|endswith|expand: '%impact_service_tampering_image%'
+    selection_tools_cli:
+        -   CommandLine|contains:
+                - ' delete '
+                - .delete()
+                - ' pause '
+                - ' stop '
+                - 'Stop-Service '
+                - 'Remove-Service '
+        -   CommandLine|contains|all:
+                - config
+                - start=disabled
+    selection_services:
+        CommandLine|contains|expand: '%impact_service_tampering_commandline%'
+    condition: guard_logsource and (all of selection_*)
+falsepositives:
+    - Administrators or tools shutting down the services due to upgrade or removal purposes. If you experience some false positive, please consider adding filters to the parent process launching this command and not removing the entry
+level: high

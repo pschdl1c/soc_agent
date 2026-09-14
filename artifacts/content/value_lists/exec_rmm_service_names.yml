@@ -1,0 +1,25 @@
+name: exec_rmm_service_names
+description: Имена служб средств удалённого доступа (|contains по ServiceName)
+values:
+  - AmmyyAdmin
+  - AnyDesk
+  - Atera
+  - BASupportExpressSrvcUpdater
+  - BASupportExpressStandaloneService
+  - chromoting
+  - GoToAssist
+  - GoToMyPC
+  - jumpcloud
+  - LMIGuardianSvc
+  - LogMeIn
+  - monblanking
+  - Parsec
+  - RManService
+  - RPCPerformanceService
+  - RPCService
+  - SplashtopRemoteService
+  - SSUService
+  - TeamViewer
+  - TightVNC
+  - vncserver
+  - Zoho

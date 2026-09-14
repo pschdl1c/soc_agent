@@ -1,0 +1,13 @@
+name: cred_mimikatz_cli_commandline2
+description: HackTool - Mimikatz Execution - CommandLine|contains
+values:
+  - 'rpc::'
+  - 'token::'
+  - 'crypto::'
+  - 'dpapi::'
+  - 'sekurlsa::'
+  - 'kerberos::'
+  - 'lsadump::'
+  - 'privilege::'
+  - 'process::'
+  - 'vault::'

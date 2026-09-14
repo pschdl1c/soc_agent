@@ -1,0 +1,30 @@
+title: SCE_Cred_Mimikatz
+id: 14e21433-3a43-44b3-bf5b-c91f75469f26
+name: sce_cred_mimikatz
+status: experimental
+description: |
+    Mimikatz on the host: its command line syntax, Invoke-Mimikatz in PowerShell script block
+    logging, or Kerberos ticket files it writes.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+    - attack.t1558
+correlation:
+    type: event_count
+    rules:
+        - cred_mimikatz_cli
+        - cred_invoke_mimikatz_ps
+        - cred_mimikatz_files
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: cred_mimikatz
+        severity: critical
+falsepositives:
+    - Red team exercises
+level: critical

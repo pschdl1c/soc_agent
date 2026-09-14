@@ -1,0 +1,28 @@
+title: SCE_Impact_Ransom_Notes
+id: 246a8c51-64d2-43a6-8758-3d4f6da03f50
+name: sce_impact_ransom_notes
+status: experimental
+description: |
+    One process writes 5 or more files named like ransom notes within 10 minutes - an encryptor
+    marking the folders it processed.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1486
+correlation:
+    type: event_count
+    rules:
+        - impact_ransom_note_created
+    group-by:
+        - Computer
+        - Image
+    timespan: 10m
+    condition:
+        gte: 5
+    incident:
+        type: impact_ransom_notes
+        severity: high
+falsepositives:
+    - Installers unpacking many README files
+level: high

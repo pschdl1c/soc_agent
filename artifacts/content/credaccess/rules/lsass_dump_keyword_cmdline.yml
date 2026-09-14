@@ -1,0 +1,45 @@
+title: LSASS Dump Keyword In CommandLine
+id: 6222e580-b1b0-4d11-a142-88c4f398b85b
+name: cred_lsass_dump_keyword_cli
+related:
+    -   id: a5a2d357-1ab8-4675-a967-ef9990a59391
+        type: derived
+    -   id: ffa6861c-4461-4f59-8a41-578c39f3f23e
+        type: derived
+status: test
+description: Detects the presence of the keywords "lsass" and ".dmp" in the commandline, which could indicate a potential attempt to dump or create a dump of the lsass process.
+references:
+    - https://github.com/Hackndo/lsassy
+    - https://medium.com/@markmotig/some-ways-to-dump-lsass-exe-c4a75fdc49bf
+    - https://github.com/elastic/detection-rules/blob/c76a39796972ecde44cb1da6df47f1b6562c9770/rules/windows/credential_access_lsass_memdump_file_created.toml
+    - https://www.whiteoaksecurity.com/blog/attacks-defenses-dumping-lsass-no-mimikatz/
+    - https://github.com/helpsystems/nanodump
+    - https://github.com/CCob/MirrorDump
+author: E.M. Anhaus, Tony Lambert, oscd.community, Nasreddine Bencherchali (Nextron Systems), ET, Claude
+date: '2019-10-24'
+modified: '2026-09-14'
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection:
+        -   CommandLine|contains|expand: '%cred_lsass_dump_keyword_cli_commandline%'
+        -   CommandLine|contains|all:
+                - lsass
+                - .dmp
+        -   CommandLine|contains|all:
+                - SQLDmpr
+                - .mdmp
+        -   CommandLine|contains|all:
+                - nanodump
+                - .dmp
+    condition: guard_logsource and (selection)
+falsepositives:
+    - Unlikely
+level: high

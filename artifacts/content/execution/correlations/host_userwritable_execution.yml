@@ -1,0 +1,22 @@
+title: Host Execution From User-Writable Location
+id: 9f6c292b-e69d-43c6-9acf-85d15fd62b59
+name: exec_host_userwritable_execution
+status: experimental
+description: |
+    Intermediate link: a process started from a user-writable folder on the host. Informational,
+    exists to be the "execute" step of SCE_Exec_Download_Then_Execute.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.execution
+    - attack.t1204.002
+correlation:
+    type: event_count
+    rules:
+        - exec_from_userwritable_location
+    group-by:
+        - Computer
+    timespan: 15m
+    condition:
+        gte: 1
+level: informational

@@ -1,0 +1,35 @@
+title: Potential Ransom Note File Created
+id: 09626341-84b3-4ff4-b453-13bc4cea71a1
+name: impact_ransom_note_created
+status: experimental
+description: |
+    A text or HTML file whose name looks like a ransom note (README, DECRYPT, RECOVER, HOW_TO ... - value list
+    impact_ransom_note_names) is written. One such file is common; the same process dropping it into many folders in a
+    few minutes is how encryptors mark every directory they processed.
+references:
+    - https://attack.mitre.org/techniques/T1486/
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1486
+logsource:
+    product: windows
+    category: file_event
+detection:
+    selection:
+        Channel: 'Microsoft-Windows-Sysmon/Operational'
+        EventID: 11
+        TargetFilename|contains|expand: '%impact_ransom_note_names%'
+        TargetFilename|endswith:
+            - '.txt'
+            - '.html'
+            - '.hta'
+    filter_main_installers:
+        Image|endswith:
+            - '\msiexec.exe'
+            - '\TrustedInstaller.exe'
+    condition: selection and not 1 of filter_main_*
+falsepositives:
+    - Software unpacking README files during installation
+level: informational

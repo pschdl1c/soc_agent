@@ -1,0 +1,33 @@
+scenario: SCE_Persist_Suspicious_Autostart
+cases:
+  - name: positive_run_key_to_roaming
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\OneDriveSync', Details: 'C:\Users\victim\AppData\Roaming\sync\odsync.exe', User: 'LAB\victim'}
+  - name: positive_startup_folder_vbs
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wscript.exe', TargetFilename: 'C:\Users\victim\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\update.vbs'}
+  - name: positive_task_4698_powershell_from_public
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 4698, Channel: Security, TaskName: '\WindowsUpdateCheck', SubjectUserName: victim, TaskContent: '<?xml version="1.0" encoding="UTF-16"?><Task><Actions Context="Author"><Exec><Command>powershell.exe</Command><Arguments>-w hidden -f C:\Users\Public\u.ps1</Arguments></Exec></Actions></Task>'}
+  - name: positive_sc_create_cmd_binpath
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\sc.exe', OriginalFileName: sc.exe, CommandLine: 'sc create UpdSvc binPath= "cmd.exe /c C:\Users\Public\svc.exe" start= auto', User: 'LAB\admin'}
+  - name: negative_run_key_to_program_files
+    expect_incidents: []
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Program Files\Vendor\setup.exe', TargetObject: 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\VendorTray', Details: '"C:\Program Files\Vendor\tray.exe" /background'}
+  - name: negative_startup_folder_lnk
+    expect_incidents: []
+    events:
+      - event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\explorer.exe', TargetFilename: 'C:\Users\victim\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Notes.lnk'}
+  - name: negative_run_key_deleted_sysmon12
+    expect_incidents: []
+    events:
+      - event: {EventID: 12, Channel: Microsoft-Windows-Sysmon/Operational, EventType: DeleteValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\OneDriveSync'}
+lab:
+  - 'reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v OneDriveSync /d "%APPDATA%\sync\odsync.exe" /f'
+  - 'reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v OneDriveSync /f'

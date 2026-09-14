@@ -1,0 +1,29 @@
+name: cred_lsass_access_dump_keyword_grantedaccess
+description: LSASS Memory Access by Tool With Dump Keyword In Name - GrantedAccess|endswith
+values:
+  - '10'
+  - '30'
+  - '50'
+  - '70'
+  - '90'
+  - B0
+  - D0
+  - F0
+  - '18'
+  - '38'
+  - '58'
+  - '78'
+  - '98'
+  - B8
+  - D8
+  - F8
+  - 1A
+  - 3A
+  - 5A
+  - 7A
+  - 9A
+  - BA
+  - DA
+  - FA
+  - '0x14C2'
+  - FF

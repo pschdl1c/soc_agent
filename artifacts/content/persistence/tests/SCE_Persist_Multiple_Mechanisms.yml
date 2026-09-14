@@ -1,0 +1,38 @@
+scenario: SCE_Persist_Multiple_Mechanisms
+cases:
+  - name: positive_task_and_service
+    expect_incidents: [persist_multiple_mechanisms]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', OriginalFileName: schtasks.exe, CommandLine: 'schtasks /create /tn Maint /tr C:\Tools\maint.exe /sc daily /st 03:00', User: 'LAB\admin'}
+      - at: 600
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\sc.exe', OriginalFileName: sc.exe, CommandLine: 'sc create MaintSvc binPath= C:\Tools\maintsvc.exe start= auto', User: 'LAB\admin'}
+  - name: positive_three_mechanisms_raise_hunt_too
+    expect_incidents: [persist_multiple_mechanisms, th_persist_autostart_changes]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Tools\inst.exe', TargetObject: 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\ToolAgent', Details: 'C:\Tools\agent.exe'}
+      - at: 60
+        event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\inst.exe', TargetFilename: 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\agent.lnk'}
+      - at: 120
+        event: {EventID: 20, Channel: Microsoft-Windows-Sysmon/Operational, Operation: Created, Name: '"ToolConsumer"', Type: 'Command Line', Destination: 'C:\Tools\agent.exe'}
+  - name: negative_same_mechanism_twice
+    expect_incidents: []
+    events:
+      - repeat: 2
+        step: 300
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', CommandLine: 'schtasks /create /tn "Job${i}" /tr C:\Tools\job.exe /sc hourly', User: 'LAB\admin'}
+  - name: negative_system_scheduled_task
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', CommandLine: 'schtasks /create /tn Upd /tr C:\Tools\u.exe /sc daily', User: 'NT AUTHORITY\СИСТЕМА'}
+      - at: 60
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', CommandLine: 'powershell Get-Service'}
+  - name: negative_mechanisms_hours_apart
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', CommandLine: 'schtasks /create /tn Maint /tr C:\Tools\maint.exe /sc daily', User: 'LAB\admin'}
+      - at: 7200
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\sc.exe', CommandLine: 'sc create MaintSvc binPath= C:\Tools\maintsvc.exe', User: 'LAB\admin'}
+lab:
+  - 'schtasks /create /tn LabMaint /tr C:\Windows\System32\notepad.exe /sc daily /st 03:00'
+  - 'sc.exe create LabSvc binPath= C:\Windows\System32\notepad.exe start= demand'
+  - 'schtasks /delete /tn LabMaint /f; sc.exe delete LabSvc'

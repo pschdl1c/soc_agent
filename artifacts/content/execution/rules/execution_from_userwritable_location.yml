@@ -1,0 +1,52 @@
+title: Process Execution From User-Writable Location
+id: 2f2d8b3b-7cfd-4d38-8685-db6dae47a2ee
+name: exec_from_userwritable_location
+related:
+    - id: 3dfd06d2-eaf4-4532-9555-68aca59f57c4
+      type: similar
+status: experimental
+description: |
+    Executable started from a folder any user can write to (value list common_userwritable_paths):
+    Public, Temp, Roaming, Downloads, Desktop. SigmaHQ keeps these paths out of its "suspicious
+    folder" rule because installers and portable tools live there - here it is an informational
+    building block for "downloaded with a LOLBIN, then executed" correlations. Updaters of per-user
+    installed software (Teams, OneDrive, Zoom and similar in AppData\Local) are not in the path list.
+references:
+    - https://attack.mitre.org/techniques/T1204/002/
+author: ET, Claude
+date: 2026-09-14
+modified: 2026-09-14
+tags:
+    - attack.execution
+    - attack.t1204.002
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        Channel: 'Microsoft-Windows-Sysmon/Operational'
+        EventID: 1
+        Image|contains|expand: '%common_userwritable_paths%'
+    filter_main_installer_temp:
+        ParentImage|endswith:
+            - '\msiexec.exe'
+            - '\TrustedInstaller.exe'
+    filter_main_dismhost:
+        # Очистка диска / DISM распаковывают DismHost.exe во временный GUID-каталог (win10-lab)
+        Image|endswith: '\DismHost.exe'
+        ParentImage|endswith:
+            - '\cleanmgr.exe'
+            - '\Dism.exe'
+            - '\DismHost.exe'
+    filter_main_defender_platform_update:
+        # Обновление платформы Defender через Windows Update: MpSigStub -> MpRecovery в Windows\Temp
+        Image|endswith:
+            - '\MpSigStub.exe'
+            - '\MpRecovery.exe'
+        ParentImage|contains:
+            - '\Windows\SoftwareDistribution\Download\'
+            - '\MpSigStub.exe'
+    condition: selection and not 1 of filter_main_*
+falsepositives:
+    - Portable applications, installers unpacking to Temp
+level: informational

@@ -11,7 +11,15 @@ USER_FIELDS = ["TargetUserName", "SubjectUserName", "User", "AccountName"]
 SRC_IP_FIELDS = ["IpAddress", "SourceAddress", "SourceIp", "src_ip"]
 DST_IP_FIELDS = ["DestAddress", "DestinationIp", "dst_ip"]
 PROCESS_FIELDS = ["Image", "NewProcessName", "CommandLine", "exe"]
-TIME_FIELDS = ["SystemTime", "EventTime", "@timestamp", "timestamp", "EventReceivedTime"]
+# Порядок = приоритет (first_present). TimeCreated (Fluent Bit winevtlog, "ДАТА ВРЕМЯ ±ЧЧММ",
+# момент события у источника) - ДО EventTime: тот подставляет json_date_key форвардера, это время
+# ЧТЕНИЯ журнала, на стенде отстаёт на 1-2с и путает порядок в temporal_ordered. UtcTime (Sysmon,
+# миллисекунды) - в конце: только как фолбэк, иначе у Sysmon и Security-событий одного хоста была
+# бы разная точность меток и порядок между каналами внутри секунды искажался бы. Заодно оба поля
+# попадают в исключения подписи содержимого (normalize._CONTENT_SIGNATURE_EXCLUDED_FIELDS).
+TIME_FIELDS = [
+    "SystemTime", "TimeCreated", "EventTime", "@timestamp", "timestamp", "EventReceivedTime", "UtcTime",
+]
 
 # Идентификатор типа события (Windows EventID / EventCode) - кандидат для ECS-lite колонки
 # events.event_code (см. store.py) - фундамент группировки по сущности для Инцидентов (Этап B

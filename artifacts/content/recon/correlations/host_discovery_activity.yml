@@ -1,0 +1,23 @@
+title: Host Discovery Activity
+id: 4b6e38c2-5d46-49bd-9331-e72f2e5c3b7f
+name: recon_host_discovery
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: four or more different discovery utilities on the
+    host within 30 minutes.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.discovery
+    - attack.t1082
+correlation:
+    type: value_count
+    rules:
+        - recon_discovery_utility
+    group-by:
+        - Computer
+    timespan: 30m
+    condition:
+        field: Image
+        gte: 4
+level: informational

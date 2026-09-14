@@ -1,0 +1,30 @@
+scenario: SCE_Exec_Remote_Access_Tool
+cases:
+  - name: positive_anydesk_exec_and_dns
+    expect_incidents: [exec_remote_access_tool]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\ProgramData\AnyDesk.exe', Product: AnyDesk, Description: AnyDesk, Company: philandro Software GmbH, ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 20
+        event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\ProgramData\AnyDesk.exe', QueryName: relay-8f3a.net.anydesk.com, QueryStatus: "0"}
+  - name: positive_service_install_and_screenconnect
+    expect_incidents: [exec_remote_access_tool]
+    events:
+      - event: {EventID: 4697, Channel: Security, ServiceName: 'ScreenConnect Client (1a2b3c)', ServiceFileName: 'C:\Program Files (x86)\ScreenConnect Client\ScreenConnect.ClientService.exe', SubjectUserName: workstation_x}
+      - at: 30
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files (x86)\ScreenConnect Client\ScreenConnect.ClientService.exe', Product: ScreenConnect, Description: ScreenConnect Service}
+      - at: 31
+        event: {EventID: 4697, Channel: Security, ServiceName: 'AnyDesk', ServiceFileName: 'C:\Program Files (x86)\AnyDesk\AnyDesk.exe'}
+  - name: negative_single_indicator_repeated
+    expect_incidents: []
+    events:
+      - repeat: 3
+        step: 60
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files (x86)\AnyDesk\AnyDesk.exe', Product: AnyDesk}
+  - name: negative_browser_resolves_domain
+    expect_incidents: []
+    events:
+      - event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Google\Chrome\Application\chrome.exe', QueryName: client.teamviewer.com}
+      - at: 10
+        event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Mozilla Firefox\firefox.exe', QueryName: net.anydesk.com}
+lab:
+  - 'Invoke-WebRequest https://download.anydesk.com/AnyDesk.exe -OutFile C:\ProgramData\AnyDesk.exe; Start-Process C:\ProgramData\AnyDesk.exe'

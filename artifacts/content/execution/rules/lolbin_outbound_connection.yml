@@ -1,0 +1,45 @@
+title: Outbound Connection By Script Interpreter Or LOLBIN
+id: 42dfc3ab-56e5-4cef-b44b-48253e19bb17
+name: exec_lolbin_outbound_connection
+related:
+    - id: 992a6cae-db6a-43c8-9cec-76d7195c96fc  # Outbound Network Connection Initiated By Script Interpreter
+      type: similar
+    - id: cdc8da7d-c303-42f8-b08c-b4ab47230263  # Rundll32 Internet Connection
+      type: similar
+    - id: c7e91a02-d771-4a6d-a700-42587e0b1095  # Network Connection Initiated By Regsvr32.EXE
+      type: similar
+status: experimental
+description: |
+    Outbound connection to a non-local address initiated by a script interpreter or a signed binary
+    commonly abused as a downloader (value list exec_lolbin_network_images). On its own common
+    (PowerShell module updates, msiexec installs); the value is in the ProcessGuid join with the
+    event that started the process, e.g. an Office document spawning it.
+references:
+    - https://lolbas-project.github.io/
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.command-and-control
+    - attack.t1105
+    - attack.t1071.001
+logsource:
+    product: windows
+    category: network_connection
+detection:
+    selection:
+        Channel: 'Microsoft-Windows-Sysmon/Operational'
+        EventID: 3
+        Initiated: 1
+        Image|endswith|expand: '%exec_lolbin_network_images%'
+    filter_main_private:
+        DestinationIp|startswith:
+            - '127.'
+            - '10.'
+            - '192.168.'
+            - '169.254.'
+            - '::1'
+            - 'fe80:'
+    condition: selection and not filter_main_private
+falsepositives:
+    - PowerShell module and help updates, software installers
+level: informational

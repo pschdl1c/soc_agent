@@ -1,0 +1,20 @@
+name: exec_uncommon_image_locations
+description: Нетипичные каталоги исполняемых файлов (|contains по Image)
+values:
+  - :\$Recycle.bin
+  - :\Perflogs\
+  - :\Temp\
+  - :\Users\Default\
+  - :\Users\Public\
+  - :\Windows\Fonts\
+  - :\Windows\IME\
+  - :\Windows\System32\Tasks\
+  - :\Windows\Tasks\
+  - \config\systemprofile\
+  - \Contacts\
+  - \Favorites\
+  - \Favourites\
+  - \Music\
+  - \Pictures\
+  - \Videos\
+  - \Windows\addins\

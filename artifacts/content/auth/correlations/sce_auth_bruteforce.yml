@@ -1,0 +1,29 @@
+title: SCE_Auth_BruteForce
+id: 4278bef5-7783-413a-8f15-701510f32776
+name: sce_auth_bruteforce
+status: experimental
+description: |
+    Password guessing against a host: 20 or more failed logons from one source address within
+    5 minutes. No successful logon is required - see SCE_Auth_BruteForce_Success for the case where
+    the attempt worked.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1110.001
+correlation:
+    type: event_count
+    rules:
+        - auth_failed_logon
+    group-by:
+        - Computer
+        - IpAddress
+    timespan: 5m
+    condition:
+        gte: 20
+    incident:
+        type: auth_bruteforce
+        severity: medium
+falsepositives:
+    - Service or scheduled task with a stale password retrying in a loop
+level: medium

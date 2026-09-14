@@ -1,0 +1,36 @@
+scenario: SCE_KC_Multi_Tactic_Host
+cases:
+  - name: positive_discovery_credaccess_evasion
+    # порядок не важен (temporal), каждая тактика ещё и свой доменный инцидент; discovery -> credaccess
+    # дополнительно складывается в упорядоченную цепочку SCE_KC_Discovery_Then_Credential_Access
+    expect_incidents: [kc_multi_tactic_host, kc_discovery_then_credential_access, recon_scripted_discovery, cred_mimikatz, evasion_log_cleared]
+    events:
+      - repeat: 4
+        step: 10
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentProcessGuid: "${guid1}", ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 1800
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Invoke-Mimikatz -Command "sekurlsa::logonpasswords"'}
+      - at: 5400
+        event: {EventID: 1102, Channel: Security, SubjectUserName: admin}
+  - name: negative_two_tactics
+    expect_incidents: [cred_mimikatz, evasion_log_cleared]
+    events:
+      - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Invoke-Mimikatz -Command "sekurlsa::logonpasswords"'}
+      - at: 600
+        event: {EventID: 1102, Channel: Security, SubjectUserName: admin}
+  - name: negative_three_tactics_beyond_window
+    expect_incidents: [recon_scripted_discovery, cred_mimikatz, evasion_log_cleared]
+    events:
+      - repeat: 4
+        step: 10
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentProcessGuid: "${guid1}", ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 9000
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Invoke-Mimikatz -Command "sekurlsa::logonpasswords"'}
+      - at: 18000
+        event: {EventID: 1102, Channel: Security, SubjectUserName: admin}
+lab:
+  - 'Композиция лаб-команд нескольких доменов в пределах 4 часов'

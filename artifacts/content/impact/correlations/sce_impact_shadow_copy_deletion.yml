@@ -1,0 +1,29 @@
+title: SCE_Impact_Shadow_Copy_Deletion
+id: 66e62950-011f-482d-9470-97a87e0e3e7a
+name: sce_impact_shadow_copy_deletion
+status: experimental
+description: |
+    Volume shadow copies deleted on the host with OS utilities or PowerShell - inhibiting system
+    recovery, commonly right before encryption.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1490
+correlation:
+    type: event_count
+    rules:
+        - impact_shadow_copies_deletion
+        - impact_shadow_copies_deletion_ps
+        - impact_shadow_copies_deletion_scriptblock
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: impact_shadow_copy_deletion
+        severity: high
+falsepositives:
+    - Legitimate disk space cleanup by administrators
+level: high

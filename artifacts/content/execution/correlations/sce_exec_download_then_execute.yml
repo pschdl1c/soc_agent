@@ -1,0 +1,30 @@
+title: SCE_Exec_Download_Then_Execute
+id: beab0e7c-dd63-4ac2-8328-bf6ceca6153a
+name: sce_exec_download_then_execute
+status: experimental
+description: |
+    A file is downloaded with a built-in binary or PowerShell, and within 15 minutes a process is
+    started from a user-writable folder on the same host - ingress tool transfer followed by
+    execution of the payload. Linked by host only: the download target path and the executed Image
+    are different fields and often differ in form (relative path, environment variables).
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.command-and-control
+    - attack.execution
+    - attack.t1105
+    - attack.t1204.002
+correlation:
+    type: temporal_ordered
+    rules:
+        - exec_host_lolbin_download
+        - exec_host_userwritable_execution
+    group-by:
+        - Computer
+    timespan: 15m
+    incident:
+        type: exec_download_then_execute
+        severity: high
+falsepositives:
+    - Administrator downloading and running a portable tool with curl/PowerShell
+level: high

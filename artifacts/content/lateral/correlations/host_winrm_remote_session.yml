@@ -1,0 +1,23 @@
+title: Host WinRM Remote Session Activity
+id: 526ed62a-793f-4032-bf49-e2bf2bb6a61a
+name: lateral_host_winrm_session
+status: experimental
+description: |
+    Intermediate link: the WinRM remote PowerShell host (wsmprovhost) started or spawned a
+    suspicious child on the host. Informational.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.lateral-movement
+    - attack.t1021.006
+correlation:
+    type: event_count
+    rules:
+        - lateral_winrm_session_host
+        - lateral_winrm_susp_child
+    group-by:
+        - Computer
+    timespan: 2m
+    condition:
+        gte: 1
+level: informational

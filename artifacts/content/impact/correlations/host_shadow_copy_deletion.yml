@@ -1,0 +1,25 @@
+title: Host Shadow Copy Deletion
+id: a489f26d-83b8-4bdb-afde-77fad251269a
+name: impact_host_shadow_copy_deletion
+status: experimental
+description: |
+    Intermediate link: volume shadow copies deleted or resized away on the host (vssadmin, wmic,
+    diskshadow, PowerShell Win32_ShadowCopy). Merges the process and script block variants of one
+    technique so they count once.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1490
+correlation:
+    type: event_count
+    rules:
+        - impact_shadow_copies_deletion
+        - impact_shadow_copies_deletion_ps
+        - impact_shadow_copies_deletion_scriptblock
+    group-by:
+        - Computer
+    timespan: 30m
+    condition:
+        gte: 1
+level: informational

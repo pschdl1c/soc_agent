@@ -1,0 +1,15 @@
+scenario: SCE_TH_Auth_ShortLived_Account
+cases:
+  - name: positive_created_and_deleted
+    expect_incidents: [th_auth_shortlived_account]
+    events:
+      - event: {EventID: 4720, Channel: Security, TargetUserName: tmp_ops, TargetSid: "S-1-5-21-1-2-3-1011", SubjectUserName: workstation_x}
+      - at: 1800
+        event: {EventID: 4726, Channel: Security, TargetUserName: tmp_ops, TargetSid: "S-1-5-21-1-2-3-1011", SubjectUserName: workstation_x}
+  - name: negative_deletion_only
+    expect_incidents: []
+    events:
+      - event: {EventID: 4726, Channel: Security, TargetUserName: old_user, TargetSid: "S-1-5-21-1-2-3-1002", SubjectUserName: workstation_x}
+lab:
+  - 'net user tmp_ops P@ssw0rd123 /add'
+  - 'net user tmp_ops /delete'

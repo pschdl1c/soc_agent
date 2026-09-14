@@ -1,0 +1,33 @@
+title: SCE_Impact_Ransomware_Preparation
+id: aafcf906-1c30-449f-80f8-5d3f4fb61d4e
+name: sce_impact_ransomware_preparation
+status: experimental
+description: |
+    Two or more DIFFERENT recovery inhibition actions on one host within 30 minutes: shadow copies
+    deleted, backups deleted, boot recovery disabled with bcdedit, Windows Recovery Environment
+    disabled, security / backup services stopped or disabled - the last steps before encryption.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1490
+    - attack.t1489
+correlation:
+    type: temporal
+    rules:
+        - impact_host_shadow_copy_deletion
+        - impact_host_backup_deletion
+        - impact_bcdedit_tampering
+        - impact_reagentc_disable
+        - impact_service_tampering
+    group-by:
+        - Computer
+    timespan: 30m
+    condition:
+        gte: 2
+    incident:
+        type: impact_ransomware_preparation
+        severity: critical
+falsepositives:
+    - Decommissioning or reimaging a machine
+level: critical

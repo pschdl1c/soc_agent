@@ -1,0 +1,13 @@
+name: persist_task_susp_paths
+description: Пользовательские каталоги в XML задачи (|contains по TaskContent)
+values:
+  - \AppData\Local\Temp\
+  - \AppData\Roaming\
+  - \Users\Public\
+  - \WINDOWS\Temp\
+  - C:\Temp\
+  - \Desktop\
+  - \Downloads\
+  - \Temporary Internet
+  - C:\ProgramData\
+  - C:\Perflogs\

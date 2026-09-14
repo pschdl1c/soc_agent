@@ -1,0 +1,30 @@
+title: SCE_Auth_BruteForce_Success
+id: 46c8b64d-9c37-44df-b5da-e05b82e8778d
+name: sce_auth_bruteforce_success
+status: experimental
+description: |
+    A burst of failed logons from a source address (10+ in 5 minutes) followed by a successful
+    network or RDP logon from the same address to the same host within 30 minutes - the guessed
+    password worked.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.initial-access
+    - attack.t1110.001
+    - attack.t1078
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_failed_logon_burst
+        - auth_successful_remote_logon
+    group-by:
+        - Computer
+        - IpAddress
+    timespan: 30m
+    incident:
+        type: auth_bruteforce_success
+        severity: high
+falsepositives:
+    - User who forgot a password and finally typed it correctly over SMB/RDP from the same machine
+level: high

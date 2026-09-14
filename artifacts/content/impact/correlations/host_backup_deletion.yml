@@ -1,0 +1,22 @@
+title: Host Windows Backup Deletion
+id: 89e27086-a55e-4849-be21-fcbc6714636c
+name: impact_host_backup_deletion
+status: experimental
+description: |
+    Intermediate link: Windows Server Backup copies deleted with wbadmin on the host. Informational.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1490
+correlation:
+    type: event_count
+    rules:
+        - impact_wbadmin_delete_all
+        - impact_wbadmin_delete
+    group-by:
+        - Computer
+    timespan: 30m
+    condition:
+        gte: 1
+level: informational

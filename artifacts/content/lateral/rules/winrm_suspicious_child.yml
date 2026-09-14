@@ -1,0 +1,32 @@
+title: Suspicious Processes Spawned by WinRM
+id: cfa0da20-2741-4bd8-9000-9ea1ab5b1a0d
+name: lateral_winrm_susp_child
+related:
+    -   id: 5cc2cda8-f261-4d88-a2de-e9e193c86716
+        type: derived
+status: test
+description: Detects suspicious processes including shells spawnd from WinRM host process
+references:
+    - Internal Research
+author: Andreas Hunkeler (@Karneades), Markus Neis, ET, Claude
+date: '2021-05-20'
+modified: '2026-09-14'
+tags:
+    - attack.t1190
+    - attack.initial-access
+    - attack.persistence
+    - attack.privilege-escalation
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection:
+        ParentImage|endswith: \wsmprovhost.exe
+        Image|endswith|expand: '%lateral_winrm_susp_child_image%'
+    condition: guard_logsource and (selection)
+falsepositives:
+    - Legitimate WinRM usage
+level: high

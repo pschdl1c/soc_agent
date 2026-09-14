@@ -1,0 +1,33 @@
+title: Eventlog Cleared - System Channel Notice
+id: 542d1243-06c4-4562-8384-c619052bec4d
+name: evasion_system_log_cleared
+related:
+    - id: a62b37e0-45d3-48d9-a517-90c1a1b0186b
+      type: derived
+status: experimental
+description: |
+    Event 104 in the System channel: an event log was cleared. Adapted for the SIEM: the original keys on
+    Provider_Name and on the Channel value from UserData (the name of the cleared log). On the Fluent Bit stack the
+    first does not arrive and the second collides with the record's own Channel ("System"), so the rule matches every
+    104 in System - which log was cleared is left to the analyst in the raw event.
+references:
+    - https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-1102
+author: Florian Roth (Nextron Systems), ET, Claude
+date: 2017-01-10
+modified: 2026-09-14
+tags:
+    - attack.defense-impairment
+    - attack.t1685.005
+    - car.2016-04-002
+logsource:
+    product: windows
+    service: system
+detection:
+    selection:
+        Channel: System
+        EventID: 104
+    condition: selection
+falsepositives:
+    - Rollout of log collection agents (the setup routine often includes a reset of the local Eventlog)
+    - System provisioning (system reset before the golden image creation)
+level: medium

@@ -1,0 +1,16 @@
+name: exfil_curl_upload_filesharing_commandline
+description: Curl File Upload To File Sharing Websites - CommandLine|contains
+values:
+  - 0x0.st
+  - bashupload.com
+  - chunk.io
+  - file.io
+  - filebin.net
+  - pastebin
+  - send.firefox.com
+  - temp.sh
+  - transfer.sh
+  - ufile.io
+  - uploadfiles.io
+  - wetransfer.com
+  - x0.at

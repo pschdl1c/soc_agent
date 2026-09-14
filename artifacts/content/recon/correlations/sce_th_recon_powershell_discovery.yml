@@ -1,0 +1,35 @@
+title: SCE_TH_Recon_PowerShell_Discovery
+id: cb6be2f8-d265-4514-ae93-de42f751a7c5
+name: sce_th_recon_powershell_discovery
+status: experimental
+description: |
+    Hunting: three or more DIFFERENT PowerShell discovery techniques (script block logging) on one
+    host within 10 minutes - security software lookup, hotfix / software inventory, current user,
+    local groups, SMB shares, virtualization checks.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.discovery
+    - attack.t1518
+    - attack.t1069.001
+correlation:
+    type: temporal
+    rules:
+        - recon_ps_security_software_discovery
+        - recon_ps_hotfix_enumeration
+        - recon_ps_software_discovery
+        - recon_ps_get_current_user
+        - recon_ps_local_group_discovery
+        - recon_ps_smb_share_discovery
+        - recon_ps_detect_virtualization
+    group-by:
+        - Computer
+    timespan: 10m
+    condition:
+        gte: 3
+    incident:
+        type: th_recon_powershell_discovery
+        severity: low
+falsepositives:
+    - Inventory and compliance scripts
+level: low

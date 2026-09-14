@@ -1,0 +1,34 @@
+title: SCE_Lateral_PsExec_Inbound
+id: c2be6536-da42-451c-99f5-0a3e4ff214c3
+name: sce_lateral_psexec_inbound
+status: experimental
+description: |
+    Inbound PsExec-style remote execution on the host: two or more DIFFERENT indicators within 5
+    minutes among the PSEXESVC service binary running, its children running as SYSTEM, the PsExec
+    named pipe, an Impacket/Metasploit SMB exec service install, and a network logon.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.lateral-movement
+    - attack.execution
+    - attack.t1021.002
+    - attack.t1569.002
+correlation:
+    type: temporal
+    rules:
+        - lateral_psexesvc_execution
+        - lateral_psexesvc_child_system
+        - lateral_psexec_pipe
+        - lateral_impacket_psexec_service_4697
+        - auth_successful_remote_logon
+    group-by:
+        - Computer
+    timespan: 5m
+    condition:
+        gte: 2
+    incident:
+        type: lateral_psexec_inbound
+        severity: high
+falsepositives:
+    - Administrators using PsExec for remote support
+level: high

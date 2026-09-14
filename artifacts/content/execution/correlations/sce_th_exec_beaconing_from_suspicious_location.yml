@@ -1,0 +1,30 @@
+title: SCE_TH_Exec_Beaconing_From_Suspicious_Location
+id: 25cfbc5a-5bb6-4099-acb0-8ad8ace205e5
+name: sce_th_exec_beaconing_suspicious_location
+status: experimental
+description: |
+    Hunting: one process running from an uncommon or suspicious folder (Public, Perflogs, Tasks,
+    Recycle Bin, media folders ...) makes 10 or more outbound connections within 10 minutes -
+    periodic check-ins of an implant.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.command-and-control
+    - attack.t1071
+    - attack.t1573
+correlation:
+    type: event_count
+    rules:
+        - exec_connection_from_suspicious_location
+    group-by:
+        - Computer
+        - ProcessGuid
+    timespan: 10m
+    condition:
+        gte: 10
+    incident:
+        type: th_exec_beaconing
+        severity: low
+falsepositives:
+    - Portable software and games running from Public or media folders
+level: low

@@ -1,0 +1,29 @@
+title: SCE_KC_Execution_Then_Persistence
+id: f33e536d-1b72-450b-85f3-f5f5062363e5
+name: sce_kc_execution_then_persistence
+status: experimental
+description: |
+    Kill chain on one host: suspicious execution (document macro, LOLBIN download, encoded
+    PowerShell, cradle) followed within an hour by a suspicious autostart entry - initial payload
+    establishing persistence.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.execution
+    - attack.persistence
+    - attack.t1059
+    - attack.t1547
+correlation:
+    type: temporal_ordered
+    rules:
+        - exec_host_suspicious_execution
+        - persist_host_persistence
+    group-by:
+        - Computer
+    timespan: 1h
+    incident:
+        type: kc_execution_then_persistence
+        severity: high
+falsepositives:
+    - Software installers using PowerShell that register autostart
+level: high

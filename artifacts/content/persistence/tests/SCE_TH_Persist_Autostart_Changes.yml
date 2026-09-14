@@ -1,0 +1,17 @@
+scenario: SCE_TH_Persist_Autostart_Changes
+cases:
+  - name: positive_three_tasks_in_a_day
+    # один механизм три раза: мультимеханизмный сценарий молчит, hunting - нет
+    expect_incidents: [th_persist_autostart_changes]
+    events:
+      - repeat: 3
+        step: 5400
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', CommandLine: 'schtasks /create /tn "Job${i}" /tr C:\Tools\job.exe /sc hourly', User: 'LAB\admin'}
+  - name: negative_two_changes
+    expect_incidents: []
+    events:
+      - repeat: 2
+        step: 3600
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', CommandLine: 'schtasks /create /tn "Job${i}" /tr C:\Tools\job.exe /sc hourly', User: 'LAB\admin'}
+lab:
+  - '1..3 | ForEach-Object { schtasks /create /tn "LabJob$_" /tr C:\Windows\System32\notepad.exe /sc daily /f }; 1..3 | ForEach-Object { schtasks /delete /tn "LabJob$_" /f }'

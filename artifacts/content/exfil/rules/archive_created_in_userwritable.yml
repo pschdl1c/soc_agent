@@ -1,0 +1,32 @@
+title: Archive File Created In User-Writable Location
+id: b0b92291-951d-40ec-9480-9cdddd93d8a8
+name: exfil_archive_created_userdir
+status: experimental
+description: |
+    An archive (zip, 7z, rar, tar, gz, cab - value list exfil_archive_extensions) is written to a user-writable folder
+    (value list common_userwritable_paths) by something other than a browser. Informational building block for data
+    staging hunting: many archives from one process in a short time.
+references:
+    - https://attack.mitre.org/techniques/T1560/001/
+    - https://attack.mitre.org/techniques/T1074/001/
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.collection
+    - attack.t1560.001
+    - attack.t1074.001
+logsource:
+    product: windows
+    category: file_event
+detection:
+    selection:
+        Channel: 'Microsoft-Windows-Sysmon/Operational'
+        EventID: 11
+        TargetFilename|endswith|expand: '%exfil_archive_extensions%'
+        TargetFilename|contains|expand: '%common_userwritable_paths%'
+    filter_main_browsers:
+        Image|endswith|expand: '%common_browser_images%'
+    condition: selection and not filter_main_browsers
+falsepositives:
+    - Backup and export features of user applications
+level: informational

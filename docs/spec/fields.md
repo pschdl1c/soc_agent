@@ -21,7 +21,7 @@
 | `SRC_IP_FIELDS` | `IpAddress`, `SourceAddress`, `SourceIp`, `src_ip` |
 | `DST_IP_FIELDS` | `DestAddress`, `DestinationIp`, `dst_ip` |
 | `PROCESS_FIELDS` | `Image`, `NewProcessName`, `CommandLine`, `exe` |
-| `TIME_FIELDS` | `SystemTime`, `EventTime`, `@timestamp`, `timestamp`, `EventReceivedTime` |
+| `TIME_FIELDS` | `SystemTime`, `TimeCreated`, `EventTime`, `@timestamp`, `timestamp`, `EventReceivedTime`, `UtcTime` (порядок = приоритет; `TimeCreated` — момент события у Fluent Bit, `EventTime` — время чтения журнала) |
 
 ## `INGEST_SOURCE_FIELD`
 

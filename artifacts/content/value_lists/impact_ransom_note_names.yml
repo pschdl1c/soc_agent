@@ -1,0 +1,11 @@
+name: impact_ransom_note_names
+description: 'Фрагменты имён файлов-записок шифровальщиков (|contains по TargetFilename)'
+values:
+  - 'README'
+  - 'DECRYPT'
+  - 'RECOVER'
+  - 'RESTORE'
+  - 'HOW_TO'
+  - 'HOW-TO'
+  - '_HELP_'
+  - 'RANSOM'

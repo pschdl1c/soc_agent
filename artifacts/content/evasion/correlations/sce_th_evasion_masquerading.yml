@@ -1,0 +1,29 @@
+title: SCE_TH_Evasion_Masquerading
+id: 6c7c3b7b-6daa-40af-9c6e-e0c7e9ce053c
+name: sce_th_evasion_masquerading
+status: experimental
+description: |
+    Hunting: a Windows system binary name running from an unexpected folder, or a known binary
+    renamed (OriginalFileName differs from the file name).
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.stealth
+    - attack.t1036.003
+    - attack.t1036.005
+correlation:
+    type: event_count
+    rules:
+        - evasion_system_exe_location_anomaly
+        - evasion_renamed_binary
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: th_evasion_masquerading
+        severity: low
+falsepositives:
+    - Portable copies of system tools
+level: low

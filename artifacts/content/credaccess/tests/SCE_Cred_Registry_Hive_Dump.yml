@@ -1,0 +1,16 @@
+scenario: SCE_Cred_Registry_Hive_Dump
+cases:
+  - name: positive_reg_save_sam_system
+    expect_incidents: [cred_registry_hive_dump]
+    events:
+      - repeat: 2
+        step: 2
+        vary:
+          CommandLine: ['reg save HKLM\SAM C:\Users\Public\sam.save', 'reg save hklm\system C:\Users\Public\system.save']
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\reg.exe', OriginalFileName: reg.exe, ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High}
+  - name: negative_reg_save_software_hive
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\reg.exe', OriginalFileName: reg.exe, CommandLine: 'reg export HKCU\Software\Vendor C:\backup\vendor.reg', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'reg save HKLM\SAM C:\Users\Public\sam.save /y; reg save HKLM\SYSTEM C:\Users\Public\system.save /y; Remove-Item C:\Users\Public\*.save'

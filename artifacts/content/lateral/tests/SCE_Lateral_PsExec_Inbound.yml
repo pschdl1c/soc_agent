@@ -1,0 +1,29 @@
+scenario: SCE_Lateral_PsExec_Inbound
+cases:
+  - name: positive_psexec_service_and_child
+    expect_incidents: [lateral_psexec_inbound]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.50, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 2
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\PSEXESVC.exe', OriginalFileName: psexesvc.exe, CommandLine: 'C:\Windows\PSEXESVC.exe', ParentImage: 'C:\Windows\System32\services.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+      - at: 3
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', CommandLine: '"cmd" /c whoami', ParentImage: 'C:\Windows\PSEXESVC.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+  - name: positive_logon_then_psexesvc_only
+    # сетевой вход (из рулсета auth) + сам PSEXESVC - два разных индикатора
+    expect_incidents: [lateral_psexec_inbound]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.51, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 5
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\PSEXESVC.exe', OriginalFileName: psexesvc.exe, ParentImage: 'C:\Windows\System32\services.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+  - name: negative_network_logon_only
+    expect_incidents: []
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.52, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+  - name: negative_indicators_far_apart
+    expect_incidents: []
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.53, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 900
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\PSEXESVC.exe', OriginalFileName: psexesvc.exe, ParentImage: 'C:\Windows\System32\services.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+lab:
+  - 'Нужен второй хост в Host-Only сети: psexec.exe \\<win10-lab> -u lab\admin -p <pass> cmd /c whoami'

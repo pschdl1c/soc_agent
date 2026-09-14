@@ -1,0 +1,29 @@
+title: Host Suspicious Execution Activity
+id: fa1d594c-d07b-43b4-811a-fef7c2a39af0
+name: exec_host_suspicious_execution
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: a suspicious Office child, a LOLBIN / PowerShell
+    download, an encoded PowerShell command or a download cradle on the host.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.execution
+    - attack.t1059
+    - attack.t1105
+correlation:
+    type: event_count
+    rules:
+        - exec_office_suspicious_child
+        - exec_certutil_download
+        - exec_bitsadmin_download
+        - exec_ps_iwr_download
+        - exec_ps_encoded_command
+        - exec_ps_webclient_download
+        - exec_ps_com_cradle
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+level: informational

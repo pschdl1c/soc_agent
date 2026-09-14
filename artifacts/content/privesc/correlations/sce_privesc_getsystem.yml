@@ -1,0 +1,34 @@
+title: SCE_PrivEsc_GetSystem
+id: d6889b08-99cd-4a71-bf7d-c60d1d570662
+name: sce_privesc_getsystem
+status: experimental
+description: |
+    Escalation to SYSTEM with offensive tooling on the host: Meterpreter / Cobalt Strike getsystem
+    service or command patterns, or a Potato-family exploit (process or its named pipe). Any single
+    indicator raises the incident.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.privilege-escalation
+    - attack.t1134.001
+    - attack.t1543.003
+correlation:
+    type: event_count
+    rules:
+        - privesc_getsystem_service_4697
+        - privesc_getsystem_process
+        - privesc_coercedpotato_pipe
+        - privesc_efspotato_pipe
+        - privesc_coercedpotato_exec
+        - privesc_localpotato_exec
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: privesc_getsystem
+        severity: critical
+falsepositives:
+    - Red team exercises
+level: critical

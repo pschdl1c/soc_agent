@@ -1,0 +1,30 @@
+title: SCE_Exec_PowerShell_Download_Cradle
+id: 4a5e409c-54de-4651-95c4-a61db8cf95ca
+name: sce_exec_powershell_download_cradle
+status: experimental
+description: |
+    PowerShell started with an encoded command and, within 5 minutes on the same host, script block
+    logging records a download cradle - the decoded payload of a stager pulling its next stage.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.execution
+    - attack.t1059.001
+    - attack.stealth
+    - attack.t1027
+    - attack.command-and-control
+    - attack.t1105
+correlation:
+    type: temporal
+    rules:
+        - exec_ps_encoded_command
+        - exec_host_ps_download_cradle
+    group-by:
+        - Computer
+    timespan: 5m
+    incident:
+        type: exec_powershell_download_cradle
+        severity: high
+falsepositives:
+    - Management agents that deliver encoded PowerShell and download packages
+level: high

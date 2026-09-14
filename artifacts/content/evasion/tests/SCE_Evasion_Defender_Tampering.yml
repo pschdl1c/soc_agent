@@ -1,0 +1,27 @@
+scenario: SCE_Evasion_Defender_Tampering
+cases:
+  - name: positive_realtime_protection_disabled_5001
+    expect_incidents: [evasion_defender_tampering]
+    events:
+      - event: {EventID: 5001, Channel: Microsoft-Windows-Windows Defender/Operational, ProductName: 'Microsoft Defender Antivirus', ProductVersion: '4.18.26080.3'}
+  - name: positive_exclusion_path_cli
+    expect_incidents: [evasion_defender_tampering]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell Add-MpPreference -ExclusionPath C:\Users\Public ', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 2
+        event: {EventID: 5007, Channel: Microsoft-Windows-Windows Defender/Operational, OldValue: '', NewValue: 'HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths\C:\Users\Public = 0x0'}
+  - name: positive_scriptblock_disable_realtime
+    expect_incidents: [evasion_defender_tampering]
+    events:
+      - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Set-MpPreference -DisableRealtimeMonitoring $true'}
+  - name: negative_signature_update_5007
+    expect_incidents: []
+    events:
+      - event: {EventID: 5007, Channel: Microsoft-Windows-Windows Defender/Operational, OldValue: 'HKLM\SOFTWARE\Microsoft\Windows Defender\Signature Updates\SignaturesLastUpdated = 0x1', NewValue: 'HKLM\SOFTWARE\Microsoft\Windows Defender\Signature Updates\SignaturesLastUpdated = 0x2'}
+  - name: negative_get_mppreference
+    expect_incidents: []
+    events:
+      - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Get-MpPreference | Select-Object ExclusionPath'}
+lab:
+  - 'Add-MpPreference -ExclusionPath C:\Users\Public\lab-excl'
+  - 'Remove-MpPreference -ExclusionPath C:\Users\Public\lab-excl'

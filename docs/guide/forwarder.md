@@ -114,9 +114,9 @@ Linux auditd/syslog.
 > `EventData.CommandLine` Zircolite при flatten схлопывает до `CommandLine` — ровно к тому
 > имени, которое ждут правила.
 >
-> `json_date_key EventTime` не косметика: родное поле `TimeCreated` приходит в локальном
-> времени со смещением (`2026-09-07 08:00:39 +0300`), такой формат `app/timeutil.py` не
-> разбирает, да и в `TIME_FIELDS` (`app/fields.py`) его нет.
+> Время события берётся из родного `TimeCreated` (`2026-09-07 08:00:39 +0300`, момент события
+> у источника, первым в `TIME_FIELDS`). `json_date_key EventTime` остаётся фолбэком: это момент
+> ЧТЕНИЯ журнала форвардером, он отстаёт на 1–2 с.
 >
 > Полная пошаговая настройка Windows-стенда (аудит, Sysmon, сеть ВМ, проверка детекта) —
 > [`windows-vm-lab.md`](./windows-vm-lab.md).

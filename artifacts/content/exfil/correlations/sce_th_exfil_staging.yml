@@ -1,0 +1,29 @@
+title: SCE_TH_Exfil_Staging
+id: b7c5069c-45dd-4e00-9f87-b7853c7ccfb8
+name: sce_th_exfil_staging
+status: experimental
+description: |
+    Hunting: one process writes 5 or more archives into user-writable folders within 30 minutes -
+    data being collected and staged for exfiltration.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.collection
+    - attack.t1074.001
+    - attack.t1560.001
+correlation:
+    type: event_count
+    rules:
+        - exfil_archive_created_userdir
+    group-by:
+        - Computer
+        - Image
+    timespan: 30m
+    condition:
+        gte: 5
+    incident:
+        type: th_exfil_staging
+        severity: low
+falsepositives:
+    - Backup and export jobs
+level: low

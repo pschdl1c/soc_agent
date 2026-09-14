@@ -21,6 +21,11 @@ DEFAULT_RULESET_PATH = os.getenv(
     "SIEM_DEFAULT_RULESET_PATH", str(BASE_DIR / "Zircolite" / "rules" / "rules_windows_merged.json")
 )
 UPLOADS_DIR = Path(os.getenv("SIEM_UPLOADS_DIR", str(BASE_DIR / "data" / "uploads")))
+# Свои рулсеты (app/rules/rules_catalog.py) и списки значений (app/rules/value_lists.py).
+# Переопределяются, чтобы поднять изолированный экземпляр (прогон детект-контента
+# scripts/test_content.py на отдельном порту не должен трогать рабочие правила).
+CUSTOM_RULESETS_DIR = Path(os.getenv("SIEM_CUSTOM_RULESETS_DIR", str(BASE_DIR / "data" / "custom_rulesets")))
+VALUE_LISTS_DIR = Path(os.getenv("SIEM_VALUE_LISTS_DIR", str(BASE_DIR / "data" / "value_lists")))
 
 # База знаний MITRE ATT&CK (read-only SQLite, см. app/kb.py и scripts/build_kb.py). Собирается
 # на этапе docker build и вшивается в образ - НЕ монтируется как volume. Локально файла может

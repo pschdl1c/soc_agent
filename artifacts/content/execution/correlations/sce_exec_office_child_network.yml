@@ -1,0 +1,32 @@
+title: SCE_Exec_Office_Child_Network
+id: e0aaf252-9fde-4a50-8653-7ce2d63565c2
+name: sce_exec_office_child_network
+status: experimental
+description: |
+    An Office application spawns a script interpreter or LOLBIN, and that very process (same
+    ProcessGuid) opens an outbound connection to a non-local address within 5 minutes - a macro
+    or exploit document fetching its second stage or talking to C2.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.initial-access
+    - attack.execution
+    - attack.command-and-control
+    - attack.t1566.001
+    - attack.t1204.002
+    - attack.t1105
+correlation:
+    type: temporal_ordered
+    rules:
+        - exec_office_suspicious_child
+        - exec_lolbin_outbound_connection
+    group-by:
+        - Computer
+        - ProcessGuid
+    timespan: 5m
+    incident:
+        type: exec_office_child_network
+        severity: high
+falsepositives:
+    - Office add-ins that shell out to PowerShell for updates
+level: high

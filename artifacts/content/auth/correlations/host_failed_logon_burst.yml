@@ -1,0 +1,22 @@
+title: Host Failed Logon Burst
+id: 387db14c-56ff-49db-86e1-01506ae3eabd
+name: auth_host_failed_logon_burst
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: 10 or more failed logons against the host within 5
+    minutes, regardless of the source address.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1110
+correlation:
+    type: event_count
+    rules:
+        - auth_failed_logon
+    group-by:
+        - Computer
+    timespan: 5m
+    condition:
+        gte: 10
+level: informational

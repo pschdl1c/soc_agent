@@ -1,0 +1,11 @@
+name: evasion_defender_set_mp_ps_scriptblocktext2
+description: Tamper Windows Defender - ScriptBlockLogging - ScriptBlockText|contains
+values:
+  - HighThreatDefaultAction Allow
+  - htdefac Allow
+  - LowThreatDefaultAction Allow
+  - ltdefac Allow
+  - ModerateThreatDefaultAction Allow
+  - mtdefac Allow
+  - SevereThreatDefaultAction Allow
+  - stdefac Allow

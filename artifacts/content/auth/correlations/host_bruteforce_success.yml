@@ -1,0 +1,21 @@
+title: Host Brute Force Success
+id: db11242e-4518-4bcc-ad04-d9a59567be1f
+name: auth_host_bruteforce_success
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: a burst of failed logons against the host followed
+    within 30 minutes by a successful network or RDP logon.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1110
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_host_failed_logon_burst
+        - auth_successful_remote_logon
+    group-by:
+        - Computer
+    timespan: 30m
+level: informational

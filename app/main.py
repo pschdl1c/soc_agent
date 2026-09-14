@@ -51,7 +51,7 @@ from app.models import (
     ValueListUpdate,
 )
 from app.rules import main_ruleset, rules_catalog, value_lists
-from app.rules.rules_catalog import CatalogError, CatalogNotFound, RuleValidationError
+from app.rules.rules_catalog import CatalogConflict, CatalogError, CatalogNotFound, RuleValidationError
 from app.rules.value_lists import ValueListError
 from app.store import Store
 
@@ -120,8 +120,13 @@ def _catalog_http(exc: CatalogError) -> HTTPException:
 
     Раньше ручки каталога отдавали 404 на любую CatalogError, и отказ по смыслу выглядел как
     «не найден» на заведомо существующий встроенный рулсет - см. app/rules/rules_catalog.py:
-    CatalogNotFound."""
-    return HTTPException(status_code=404 if isinstance(exc, CatalogNotFound) else 400, detail=str(exc))
+    CatalogNotFound. 409 - действие сломало бы ссылки корреляций (CatalogConflict), повтор с
+    force=true проходит."""
+    if isinstance(exc, CatalogNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, CatalogConflict):
+        return HTTPException(status_code=409, detail={"message": str(exc), "references": exc.references})
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 MAX_PAGE_LIMIT = 500
@@ -159,8 +164,11 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
         # манифесте плейсхолдеры value lists (%name% / |expand, см. app/rules/value_lists.py) уже
         # развёрнуты - RulesetHandler, глядя на сырой .yml с %name%, молча уронил бы такое
         # правило (0 правил в рулсете). Freshness манифеста держит mtime-кэш rules_catalog.
+        # Вместе с межрулсетными зависимостями корреляций (main_ruleset.resolve_for) - иначе
+        # корреляция, опирающаяся на базовое правило другого рулсета, в изолированном прогоне
+        # была бы мертва.
         try:
-            rules = rules_catalog.load_rules(ruleset_path)
+            rules = [rule for _src, rule in main_ruleset.resolve_for(ruleset_path)]
         except CatalogError as exc:
             raise _catalog_http(exc)
         raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
@@ -739,16 +747,17 @@ def get_incident_context(incident_id: str) -> dict:
 
     member_rules: list[dict] = []
     member_titles = set(inc.get("member_rule_titles") or [])
-    if ruleset_path and member_titles:
+    if member_titles:
+        # По title среди ВСЕХ своих рулсетов: ссылки correlation.rules межрулсетные, member-
+        # правило может лежать в другом домене, чем сама корреляция.
         try:
-            for r in rules_catalog.load_rules(ruleset_path):
-                if r.get("title") not in member_titles:
-                    continue
+            for src, r in rules_catalog.find_rules_by_titles(member_titles):
                 entry = {
                     "rule_id": r.get("id"), "title": r.get("title"), "level": r.get("level"),
                     "description": r.get("description", ""), "rule": r.get("rule", []),
+                    "ruleset_path": src,
                 }
-                got = rules_catalog.get_rule(ruleset_path, r.get("id"))
+                got = rules_catalog.get_rule(src, r.get("id"))
                 if got and got.get("yaml_text"):
                     entry["yaml_text"] = got["yaml_text"]
                 member_rules.append(entry)
@@ -953,8 +962,10 @@ def get_ruleset_rules(
         # собранный из НЕСКОЛЬКИХ реальных рулсетов сразу (не проходит через load_rules).
         # Каждая строка несёт source_ruleset - настоящий ruleset_path, по которому фронт
         # должен бить в /rulesets/rule и /main-ruleset/rules при клике/снятии с main.
+        # Правило, подтянутое как зависимость корреляции (via_dependency), в main явно не
+        # включено - in_main=False, чтобы кнопка тоггла не врала.
         rules = [
-            {**rule, "source_ruleset": src, "in_main": True}
+            {**rule, "source_ruleset": src, "in_main": not rule.get("via_dependency")}
             for src, rule in main_ruleset.resolve_with_sources()
         ]
         return rules_catalog.paginate_rules(
@@ -1013,9 +1024,9 @@ async def upload_ruleset(
 
 
 @app.delete("/rulesets")
-def delete_ruleset(ruleset: str) -> dict:
+def delete_ruleset(ruleset: str, force: bool = False) -> dict:
     try:
-        rules_catalog.delete_custom_ruleset(ruleset)
+        rules_catalog.delete_custom_ruleset(ruleset, force=force)
     except CatalogError as exc:
         raise _catalog_http(exc)
     engine.invalidate(ruleset)
@@ -1048,9 +1059,9 @@ def update_custom_rule(rule_id: str, ruleset: str, body: CustomRuleUpdate) -> di
 
 
 @app.delete("/rules/custom/{rule_id}")
-def delete_custom_rule(rule_id: str, ruleset: str) -> dict:
+def delete_custom_rule(rule_id: str, ruleset: str, force: bool = False) -> dict:
     try:
-        rules_catalog.delete_custom_rule(ruleset, rule_id)
+        rules_catalog.delete_custom_rule(ruleset, rule_id, force=force)
     except CatalogError as exc:
         raise _catalog_http(exc)
     engine.invalidate(ruleset)

@@ -1,0 +1,28 @@
+scenario: SCE_TH_Recon_Internal_Scan
+cases:
+  - name: positive_smb_sweep
+    expect_incidents: [th_recon_internal_scan]
+    events:
+      - repeat: 16
+        step: 2
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\nmap\scan.exe', Initiated: 1, Protocol: tcp, DestinationIp: "10.0.2.${i}", DestinationPort: 445, ProcessGuid: "${guid1}"}
+  - name: negative_14_hosts
+    expect_incidents: []
+    events:
+      - repeat: 14
+        step: 2
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\nmap\scan.exe', Initiated: 1, DestinationIp: "10.0.2.${i}", DestinationPort: 445}
+  - name: negative_non_admin_port
+    expect_incidents: []
+    events:
+      - repeat: 20
+        step: 2
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\nmap\scan.exe', Initiated: 1, DestinationIp: "10.0.2.${i}", DestinationPort: 443}
+  - name: negative_svchost
+    expect_incidents: []
+    events:
+      - repeat: 20
+        step: 2
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\svchost.exe', Initiated: 1, DestinationIp: "10.0.2.${i}", DestinationPort: 135}
+lab:
+  - '1..20 | ForEach-Object { $c = New-Object Net.Sockets.TcpClient; $null = $c.BeginConnect("10.0.2.$_", 445, $null, $null); Start-Sleep -Milliseconds 200; $c.Close() }'

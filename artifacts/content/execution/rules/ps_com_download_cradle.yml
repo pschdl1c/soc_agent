@@ -1,0 +1,35 @@
+title: Potential COM Objects Download Cradles Usage - PS Script
+id: 0da4b05e-d37b-4c50-bfc4-3809ba2285ee
+name: exec_ps_com_cradle
+related:
+    -   id: 02b64f1b-3f33-4e67-aede-ef3b0a5a8fcf
+        type: similar
+    -   id: 3c7d1587-3b13-439f-9941-7d14313dbdfe
+        type: derived
+status: test
+description: Detects usage of COM objects that can be abused to download files in PowerShell by CLSID
+references:
+    - https://learn.microsoft.com/en-us/dotnet/api/system.type.gettypefromclsid?view=net-7.0
+    - https://speakerdeck.com/heirhabarov/hunting-for-powershell-abuse?slide=57
+author: frack113, ET, Claude
+date: '2022-12-25'
+modified: '2026-09-14'
+tags:
+    - attack.command-and-control
+    - attack.t1105
+logsource:
+    product: windows
+    category: ps_script
+    definition: Script Block Logging must be enable
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-PowerShell/Operational
+        EventID: 4104
+    selection_1:
+        ScriptBlockText|contains: '[Type]::GetTypeFromCLSID('
+    selection_2:
+        ScriptBlockText|contains|expand: '%exec_download_cradle_clsids%'
+    condition: guard_logsource and (all of selection_*)
+falsepositives:
+    - Legitimate use of the library
+level: medium

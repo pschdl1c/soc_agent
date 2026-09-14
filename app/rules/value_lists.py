@@ -37,11 +37,13 @@ from typing import Any, NamedTuple
 
 import yaml
 
+from app import config
+
 # файл лежит в app/rules/, до корня проекта — три уровня вверх
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-# data/ - тот же общий корень runtime-данных, что и custom_rulesets/uploads (см.
-# app/rules/rules_catalog.py:CUSTOM_ROOT, docker-compose.yml). Под Docker монтируется volume-ом.
-VALUE_LISTS_ROOT = BASE_DIR / "data" / "value_lists"
+# data/value_lists по умолчанию - тот же общий корень runtime-данных, что и custom_rulesets/
+# uploads (см. app/config.py, docker-compose.yml). Под Docker монтируется volume-ом.
+VALUE_LISTS_ROOT = config.VALUE_LISTS_DIR
 VALUE_LISTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Имя списка = имя плейсхолдера = имя файла (<name>.yml). Отдельный индекс не нужен.

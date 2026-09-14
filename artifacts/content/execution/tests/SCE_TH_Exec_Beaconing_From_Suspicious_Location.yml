@@ -1,0 +1,30 @@
+scenario: SCE_TH_Exec_Beaconing_From_Suspicious_Location
+cases:
+  - name: positive_public_folder_implant_checkins
+    expect_incidents: [th_exec_beaconing]
+    events:
+      - repeat: 12
+        step: 30
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\Music\svc.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 198.51.100.77, DestinationPort: 443, DestinationHostname: c2.example-cdn.net}
+  - name: negative_nine_checkins
+    expect_incidents: []
+    events:
+      - repeat: 9
+        step: 30
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\Music\svc.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 198.51.100.77, DestinationPort: 443}
+  - name: negative_checkins_spread_over_processes
+    expect_incidents: []
+    events:
+      - repeat: 12
+        step: 30
+        vary:
+          ProcessGuid: ["${guid1}", "${guid2}", "${guid3}"]
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\Music\svc.exe', Initiated: 1, DestinationIp: 198.51.100.77, DestinationPort: 443}
+  - name: negative_program_files_process
+    expect_incidents: []
+    events:
+      - repeat: 15
+        step: 20
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Agent\agent.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 198.51.100.77, DestinationPort: 443}
+lab:
+  - 'Copy-Item C:\Windows\System32\curl.exe C:\Users\Public\Music\svc.exe; 1..12 | ForEach-Object { C:\Users\Public\Music\svc.exe -s -m 3 http://example.com >$null; Start-Sleep 20 }'

@@ -1,0 +1,25 @@
+title: Host PowerShell Download Cradle
+id: 89e02cb5-e38e-4514-8d5a-eddb56fdaa03
+name: exec_host_ps_download_cradle
+status: experimental
+description: |
+    Intermediate link: script block logging shows a PowerShell download cradle on the host
+    (Net.WebClient download methods or COM-object based cradles). Informational.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.execution
+    - attack.t1059.001
+    - attack.command-and-control
+    - attack.t1105
+correlation:
+    type: event_count
+    rules:
+        - exec_ps_webclient_download
+        - exec_ps_com_cradle
+    group-by:
+        - Computer
+    timespan: 5m
+    condition:
+        gte: 1
+level: informational

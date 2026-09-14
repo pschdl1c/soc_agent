@@ -1,0 +1,26 @@
+title: Host UAC Bypass Registry Hijack
+id: 79189c55-a876-419d-8db0-b151dda7ea04
+name: privesc_host_uac_registry_hijack
+status: experimental
+description: |
+    Intermediate link: a registry value typical for UAC bypass hijacks was set on the host (ms-
+    settings / shell open command, Event Viewer or sdclt handlers). Informational, merges several
+    registry rules into one reference.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.privilege-escalation
+    - attack.t1548.002
+correlation:
+    type: event_count
+    rules:
+        - privesc_shell_open_keys_manipulation
+        - privesc_uac_eventvwr_registry
+        - privesc_uac_sdclt_registry
+        - privesc_ms_settings_handler_mod
+    group-by:
+        - Computer
+    timespan: 5m
+    condition:
+        gte: 1
+level: informational

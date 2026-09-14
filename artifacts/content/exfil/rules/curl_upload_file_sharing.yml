@@ -1,0 +1,46 @@
+title: Curl File Upload To File Sharing Websites
+id: 6098aaa1-577e-4baf-a7e6-032bf96b3c10
+name: exfil_curl_upload_filesharing
+related:
+    -   id: 00bca14a-df4e-4649-9054-3f2aa676bc04
+        type: derived
+    -   id: 7d1aaf3d-4304-425c-b7c3-162055e0b3ab
+        type: similar
+    -   id: e328cc73-f92a-42fb-b3fa-7c2cffda981a
+        type: derived
+status: experimental
+description: Detects usage of curl to upload files to known file sharing domains, which may indicate data exfiltration.
+references:
+    - https://unit42.paloaltonetworks.com/advanced-backdoor-squidoor/
+author: Swachchhanda Shrawan Poudel (Nextron Systems), ET, Claude
+date: '2026-03-29'
+modified: '2026-09-14'
+tags:
+    - attack.exfiltration
+    - attack.t1567.002
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection_img:
+        -   Image|endswith: \curl.exe
+        -   OriginalFileName: curl.exe
+    selection_cli_domain:
+        CommandLine|contains|expand: '%exfil_curl_upload_filesharing_commandline%'
+    selection_cli_flags:
+        -   CommandLine|contains:
+                - ' --form'
+                - ' --upload-file'
+                - ' --data'
+                - ' -X POST'
+                - ' --request POST '
+        -   CommandLine|re:
+                - \s-[FTd]\s
+                - \s-sT\s
+    condition: guard_logsource and (all of selection_*)
+falsepositives:
+    - Legitimate file uploads to these services by administrators or developers
+level: high

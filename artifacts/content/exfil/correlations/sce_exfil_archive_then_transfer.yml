@@ -1,0 +1,28 @@
+title: SCE_Exfil_Archive_Then_Transfer
+id: 9291dc0b-9923-48c4-bd9f-4d3c6a9cea78
+name: sce_exfil_archive_then_transfer
+status: experimental
+description: |
+    Data is packed into a password protected archive and, within an hour on the same host, sent out
+    through a transfer tool or a file sharing service - staged collection followed by exfiltration.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.collection
+    - attack.exfiltration
+    - attack.t1560.001
+    - attack.t1567.002
+correlation:
+    type: temporal_ordered
+    rules:
+        - exfil_host_password_archive
+        - exfil_host_transfer_out
+    group-by:
+        - Computer
+    timespan: 1h
+    incident:
+        type: exfil_archive_then_transfer
+        severity: high
+falsepositives:
+    - Users sending encrypted archives to partners over file sharing
+level: high

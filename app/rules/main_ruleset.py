@@ -84,7 +84,11 @@ def resolve_with_sources() -> list[tuple[str, dict[str, Any]]]:
     (2680 уникальных id на 4291 запись) - бага, не защита: структура state (included_rulesets -
     список без повторов, included_rules - dict по уникальным путям, каждый src_rules
     проходится ровно один раз) и так гарантирует, что один и тот же элемент списка не
-    попадёт в pairs дважды, доп. дедуп не нужен вообще."""
+    попадёт в pairs дважды, доп. дедуп не нужен вообще.
+
+    В конце дополняется зависимостями активных корреляций из рулсетов, не включённых в main
+    (rules_catalog.with_dependencies, строки с via_dependency=True) - межрулсетная ссылка
+    correlation.rules иначе указывала бы на правило, которое движок не исполняет."""
     state = load_state()
     pairs: list[tuple[str, dict[str, Any]]] = []
 
@@ -110,7 +114,23 @@ def resolve_with_sources() -> list[tuple[str, dict[str, Any]]]:
             if rule.get("id") in wanted:
                 pairs.append((ruleset_path, rule))
 
-    return pairs
+    return rules_catalog.with_dependencies(pairs)
+
+
+def resolve_for(ruleset_path: str | None) -> list[tuple[str, dict[str, Any]]]:
+    """Что реально исполняется для ruleset_path, с настоящим рулсетом-источником каждого
+    правила: "main" - состав основного рулсета, custom-путь - все правила рулсета; оба - вместе
+    с межрулсетными зависимостями корреляций. builtin/None - пусто (их гоняет engine.run_batch
+    напрямую, корреляций там нет). Несуществующий custom-путь - CatalogNotFound из load_rules."""
+    if not ruleset_path:
+        return []
+    if ruleset_path == MAIN_RULESET_ID:
+        return resolve_with_sources()
+    if ruleset_path.startswith(rules_catalog.CUSTOM_PREFIX):
+        return rules_catalog.with_dependencies(
+            [(ruleset_path, rule) for rule in rules_catalog.load_rules(ruleset_path)]
+        )
+    return []
 
 
 def resolve() -> list[dict[str, Any]]:

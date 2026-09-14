@@ -1,0 +1,14 @@
+name: evasion_renamed_binary_originalfilename
+description: Potential Defense Evasion Via Binary Rename - OriginalFileName
+values:
+  - Cmd.Exe
+  - CONHOST.EXE
+  - 7z.exe
+  - 7za.exe
+  - 7zr.exe
+  - WinRAR.exe
+  - wevtutil.exe
+  - net.exe
+  - net1.exe
+  - netsh.exe
+  - InstallUtil.exe

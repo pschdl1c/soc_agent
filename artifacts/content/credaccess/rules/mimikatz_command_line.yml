@@ -1,0 +1,40 @@
+title: HackTool - Mimikatz Execution
+id: 75d13c38-79cb-4625-884b-39b4917c7f44
+name: cred_mimikatz_cli
+related:
+    -   id: a642964e-bead-4bed-8910-1bb4d63e3b4d
+        type: derived
+status: test
+description: Detection well-known mimikatz command line arguments
+references:
+    - https://www.slideshare.net/heirhabarov/hunting-for-credentials-dumping-in-windows-environment
+    - https://tools.thehacker.recipes/mimikatz/modules
+author: Teymur Kheirkhabarov, oscd.community, David ANDRE (additional keywords), Tim Shelton, ET, Claude
+date: '2019-10-22'
+modified: '2026-09-14'
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+    - attack.t1003.002
+    - attack.t1003.004
+    - attack.t1003.005
+    - attack.t1003.006
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection_tools_name:
+        CommandLine|contains:
+            - DumpCreds
+            - mimikatz
+    selection_function_names:
+        CommandLine|contains|expand: '%cred_mimikatz_cli_commandline%'
+    selection_module_names:
+        CommandLine|contains|expand: '%cred_mimikatz_cli_commandline2%'
+    condition: guard_logsource and (1 of selection_*)
+falsepositives:
+    - Unlikely
+level: high

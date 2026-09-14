@@ -1,0 +1,29 @@
+title: SCE_KC_Evasion_Then_Impact
+id: 84dcc07b-4fd5-44dc-a146-a8c436ec6218
+name: sce_kc_evasion_then_impact
+status: experimental
+description: |
+    Kill chain on one host: logs cleared, Defender or telemetry disabled, followed within 2 hours by
+    recovery inhibition or ransom notes - ransomware deployment.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.defense-impairment
+    - attack.impact
+    - attack.t1685
+    - attack.t1490
+    - attack.t1486
+correlation:
+    type: temporal_ordered
+    rules:
+        - evasion_host_defense_evasion
+        - impact_host_impact
+    group-by:
+        - Computer
+    timespan: 2h
+    incident:
+        type: kc_evasion_then_impact
+        severity: critical
+falsepositives:
+    - Unlikely
+level: critical

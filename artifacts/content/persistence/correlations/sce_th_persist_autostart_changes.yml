@@ -1,0 +1,34 @@
+title: SCE_TH_Persist_Autostart_Changes
+id: 3709243c-7c78-41b2-a97c-5cb270cda150
+name: sce_th_persist_autostart_changes
+status: experimental
+description: |
+    Hunting: three or more autostart changes of any kind (autorun keys, Startup folder, schtasks,
+    services, WMI subscriptions) on one host within a day - worth a look at what was registered.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.t1547
+    - attack.t1053
+    - attack.t1543
+correlation:
+    type: event_count
+    rules:
+        - persist_autorun_currentversion
+        - persist_startup_folder_write
+        - persist_schtasks_creation
+        - persist_sc_create_service
+        - persist_ps_new_service
+        - persist_wmi_event_subscription
+    group-by:
+        - Computer
+    timespan: 1d
+    condition:
+        gte: 3
+    incident:
+        type: th_persist_autostart_changes
+        severity: low
+falsepositives:
+    - Software updates, new application installs
+level: low

@@ -1,0 +1,35 @@
+scenario: SCE_Auth_BruteForce
+cases:
+  - name: positive_20_failures_in_window
+    expect_incidents: [auth_bruteforce]
+    events:
+      - repeat: 20
+        step: 3
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 203.0.113.10, TargetUserName: administrator, TargetDomainName: "${host}", Status: "0xc000006d", SubStatus: "0xc000006a"}
+  - name: negative_19_failures
+    expect_incidents: []
+    events:
+      - repeat: 19
+        step: 3
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 203.0.113.10, TargetUserName: administrator}
+  - name: negative_spread_beyond_timespan
+    # 20 отказов с шагом 20с: любое 5-минутное окно накрывает максимум 16
+    expect_incidents: []
+    events:
+      - repeat: 20
+        step: 20
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 203.0.113.10, TargetUserName: administrator}
+  - name: negative_local_failures_without_address
+    expect_incidents: []
+    events:
+      - repeat: 30
+        step: 2
+        event: {EventID: 4625, Channel: Security, LogonType: 2, IpAddress: "-", TargetUserName: workstation_x}
+  - name: negative_machine_account
+    expect_incidents: []
+    events:
+      - repeat: 25
+        step: 2
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 10.0.2.20, TargetUserName: "FILESRV$"}
+lab:
+  - '1..25 | ForEach-Object { cmd /c "net use \\127.0.0.1\IPC$ /delete /y >nul 2>&1 & net use \\127.0.0.1\IPC$ /user:$env:COMPUTERNAME\hacker WrongPass$_" 2>$null | Out-Null }'

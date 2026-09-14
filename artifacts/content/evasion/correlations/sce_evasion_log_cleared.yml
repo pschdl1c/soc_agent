@@ -1,0 +1,30 @@
+title: SCE_Evasion_Log_Cleared
+id: 91bc633a-10df-400f-aa23-7a06a155c8ca
+name: sce_evasion_log_cleared
+status: experimental
+description: |
+    Event logs cleared on the host: Security 1102, System 104, wevtutil / Clear-EventLog / WMI
+    clearing or log configuration tampering on the command line or in script block logging.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.defense-impairment
+    - attack.t1685.005
+correlation:
+    type: event_count
+    rules:
+        - evasion_security_log_cleared
+        - evasion_system_log_cleared
+        - evasion_eventlog_clear_cli
+        - evasion_clear_eventlog_ps
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: evasion_log_cleared
+        severity: high
+falsepositives:
+    - System provisioning and log agent rollouts
+level: high

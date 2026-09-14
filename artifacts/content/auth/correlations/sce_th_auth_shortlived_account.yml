@@ -1,0 +1,28 @@
+title: SCE_TH_Auth_ShortLived_Account
+id: 631c6eea-30b1-44fe-a3ed-704a316e5fc5
+name: sce_th_auth_shortlived_account
+status: experimental
+description: |
+    Hunting: a local account is created and an account is deleted on the same host within 4 hours
+    - a throwaway account used for a single operation and removed to cover tracks.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.impact
+    - attack.t1136.001
+    - attack.t1531
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_local_user_created
+        - auth_local_user_deleted
+    group-by:
+        - Computer
+    timespan: 4h
+    incident:
+        type: th_auth_shortlived_account
+        severity: low
+falsepositives:
+    - Test accounts created and removed by administrators
+level: low

@@ -1,0 +1,38 @@
+title: Discovery Utility Execution
+id: 40a075b2-14fc-4b93-81b9-02826c4b23b9
+name: recon_discovery_utility
+status: experimental
+description: |
+    Execution of a built-in Windows discovery utility (whoami, systeminfo, ipconfig, net, tasklist,
+    quser ...), list in value list recon_discovery_tools. A single run means nothing; the rule is a
+    building block for "several different discovery tools in a short time" correlations, which count
+    distinct Image values. net1.exe spawned by net.exe is dropped - otherwise every "net user" would
+    count as two different tools.
+references:
+    - https://attack.mitre.org/tactics/TA0007/
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.discovery
+    - attack.t1033
+    - attack.t1082
+    - attack.t1016
+    - attack.t1049
+    - attack.t1057
+    - attack.t1087.001
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        Channel: 'Microsoft-Windows-Sysmon/Operational'
+        EventID: 1
+        Image|endswith|expand: '%recon_discovery_tools%'
+    filter_main_net1_child_of_net:
+        Image|endswith: '\net1.exe'
+        ParentImage|endswith: '\net.exe'
+    condition: selection and not filter_main_net1_child_of_net
+falsepositives:
+    - Administrators and IT support troubleshooting a host
+    - Inventory and monitoring agents
+level: informational

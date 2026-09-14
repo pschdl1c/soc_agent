@@ -1,0 +1,24 @@
+scenario: SCE_Impact_Ransom_Notes
+cases:
+  - name: positive_notes_in_many_folders
+    expect_incidents: [impact_ransom_notes]
+    events:
+      - repeat: 6
+        step: 10
+        event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\enc.exe', TargetFilename: 'C:\Users\victim\Documents\folder${i}\HOW_TO_DECRYPT.txt'}
+  - name: negative_installer_readmes
+    expect_incidents: []
+    events:
+      - repeat: 6
+        step: 10
+        event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\msiexec.exe', TargetFilename: 'C:\Program Files\Vendor\module${i}\README.txt'}
+  - name: negative_notes_from_different_processes
+    expect_incidents: []
+    events:
+      - repeat: 6
+        step: 10
+        vary:
+          Image: ['C:\Tools\a.exe', 'C:\Tools\b.exe', 'C:\Tools\c.exe']
+        event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, TargetFilename: 'C:\Users\victim\Documents\README${i}.txt'}
+lab:
+  - '1..6 | ForEach-Object { New-Item -ItemType Directory "C:\Users\Public\lab$_" -Force | Out-Null; Set-Content "C:\Users\Public\lab$_\HOW_TO_DECRYPT.txt" "lab" }'

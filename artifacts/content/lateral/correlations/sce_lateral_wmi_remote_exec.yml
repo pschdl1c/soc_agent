@@ -1,0 +1,28 @@
+title: SCE_Lateral_WMI_Remote_Exec
+id: 408b0f68-19e8-4a50-a28e-1215de3be4e3
+name: sce_lateral_wmi_remote_exec
+status: experimental
+description: |
+    A network logon to the host is followed within 2 minutes by WmiPrvSE spawning a shell or LOLBIN
+    - remote command execution over WMI (wmic /node, Invoke-WmiMethod, impacket wmiexec).
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.lateral-movement
+    - attack.execution
+    - attack.t1047
+    - attack.t1021
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_successful_remote_logon
+        - lateral_wmiprvse_susp_child
+    group-by:
+        - Computer
+    timespan: 2m
+    incident:
+        type: lateral_wmi_remote_exec
+        severity: high
+falsepositives:
+    - Management systems running commands over WMI
+level: high

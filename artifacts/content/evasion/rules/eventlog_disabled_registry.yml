@@ -1,0 +1,52 @@
+title: Disable Windows Event Logging Via Registry
+id: 9e73ff31-150d-4e78-b5e5-c1c5a6e83cb3
+name: evasion_eventlog_disabled_registry
+related:
+    -   id: 2f78da12-f7c7-430b-8b19-a28f269b77a3
+        type: derived
+status: test
+description: Detects tampering with the "Enabled" registry key in order to disable Windows logging of a Windows event channel
+references:
+    - https://twitter.com/WhichbufferArda/status/1543900539280293889
+    - https://github.com/DebugPrivilege/CPP/blob/c39d365617dbfbcb01fffad200d52b6239b2918c/Windows%20Defender/RestoreDefenderConfig.cpp
+author: frack113, Nasreddine Bencherchali (Nextron Systems), ET, Claude
+date: '2022-07-04'
+modified: '2026-09-14'
+tags:
+    - attack.defense-impairment
+    - attack.t1685.001
+logsource:
+    category: registry_set
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 13
+    selection:
+        TargetObject|contains: \Microsoft\Windows\CurrentVersion\WINEVT\Channels\
+        TargetObject|endswith: \Enabled
+        Details: DWORD (0x00000000)
+    filter_main_wevutil:
+        Image: C:\Windows\system32\wevtutil.exe
+    filter_main_iis:
+        Image|startswith: C:\Windows\winsxs\
+        Image|endswith: \TiWorker.exe
+    filter_main_svchost:
+        Image: C:\Windows\System32\svchost.exe
+        TargetObject|contains:
+            - \Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-FileInfoMinifilter
+            - \Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-ASN1\
+            - \Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-Kernel-AppCompat\
+            - \Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-Runtime\Error\
+            - \Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-CAPI2/Operational\
+    filter_main_trusted_installer:
+        Image: C:\Windows\servicing\TrustedInstaller.exe
+        TargetObject|contains: \Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-Compat-Appraiser
+    filter_optional_empty:
+        Image: ''
+    filter_optional_null:
+        Image: null
+    condition: guard_logsource and (selection and not 1 of filter_main_* and not 1 of filter_optional_*)
+falsepositives:
+    - Rare falsepositives may occur from legitimate administrators disabling specific event log for troubleshooting
+level: high

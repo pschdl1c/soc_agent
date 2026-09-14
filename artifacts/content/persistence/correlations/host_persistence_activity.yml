@@ -1,0 +1,32 @@
+title: Host Persistence Activity
+id: c35f7d28-d55d-4f71-8af3-02445b1c6a3d
+name: persist_host_persistence
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: a suspicious autostart entry (Run key, Startup
+    folder, scheduled task, service) or a WMI event subscription on the host.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.t1547
+    - attack.t1053
+    - attack.t1543
+correlation:
+    type: event_count
+    rules:
+        - persist_run_key_suspicious_folder
+        - persist_run_key_powershell
+        - persist_startup_folder_suspicious
+        - persist_task_suspicious_4698
+        - persist_schtasks_suspicious_folder
+        - persist_schtasks_temp_once
+        - persist_service_creation_suspicious
+        - persist_service_powershell_4697
+        - persist_wmi_event_subscription
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+level: informational

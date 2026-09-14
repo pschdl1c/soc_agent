@@ -1,0 +1,36 @@
+scenario: SCE_TH_Recon_PowerShell_Discovery
+cases:
+  - name: positive_three_techniques
+    expect_incidents: [th_recon_powershell_discovery]
+    events:
+      - repeat: 3
+        step: 20
+        vary:
+          ScriptBlockText:
+            - 'Get-WmiObject -Class Win32_QuickFixEngineering | Select-Object HotFixID, InstalledOn'
+            - 'Write-Output $env:UserName'
+            - 'Get-LocalGroupMember -Group Administrators | ft'
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockId: "${guid1}", MessageNumber: 1, MessageTotal: 1}
+  - name: negative_two_techniques_repeated
+    expect_incidents: []
+    events:
+      - repeat: 6
+        step: 20
+        vary:
+          ScriptBlockText:
+            - 'Write-Output $env:UserName'
+            - 'Get-SmbShare | Select Name, Path'
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, MessageNumber: 1, MessageTotal: 1}
+  - name: negative_benign_scriptblocks
+    expect_incidents: []
+    events:
+      - repeat: 5
+        step: 10
+        vary:
+          ScriptBlockText: ['prompt', 'Get-ChildItem C:\Temp', 'Get-Date', 'Set-Location C:\', 'exit']
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational}
+lab:
+  - 'Get-WmiObject -Class Win32_QuickFixEngineering | Select-Object HotFixID'
+  - '$env:UserName'
+  - 'Get-LocalGroupMember -Group Администраторы '
+  - 'Get-SmbShare'

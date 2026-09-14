@@ -1,0 +1,10 @@
+name: exec_script_extensions
+description: Расширения скриптов Windows Script Host
+values:
+  - .js
+  - .jse
+  - .vba
+  - .vbe
+  - .vbs
+  - .wsf
+  - .wsh

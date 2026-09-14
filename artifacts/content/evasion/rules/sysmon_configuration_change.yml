@@ -1,0 +1,28 @@
+title: Sysmon Configuration Change
+id: 52ef246b-c5aa-4d9b-a6b0-4c1f0adf08a9
+name: evasion_sysmon_config_change
+related:
+    -   id: 8ac03a65-6c84-4116-acad-dc1558ff7a77
+        type: derived
+status: test
+description: Detects a Sysmon configuration change, which could be the result of a legitimate reconfiguration or someone trying manipulate the configuration
+references:
+    - https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon
+author: frack113, ET, Claude
+date: '2022-01-12'
+modified: '2026-09-14'
+tags:
+    - attack.defense-impairment
+logsource:
+    product: windows
+    service: sysmon
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 16
+    selection:
+        EventID: 16
+    condition: guard_logsource and (selection)
+falsepositives:
+    - Legitimate administrative action
+level: medium

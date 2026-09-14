@@ -1,0 +1,27 @@
+title: Host LOLBIN File Download
+id: c12cfb42-b5aa-4623-97aa-9c8e3f6b592d
+name: exec_host_lolbin_download
+status: experimental
+description: |
+    Intermediate link: any file download through a built-in binary or PowerShell on the host
+    (certutil, bitsadmin, curl, Invoke-WebRequest, WebClient). Informational - no alert of its own,
+    it merges several download rules into one reference for temporal_ordered correlations.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.command-and-control
+    - attack.t1105
+correlation:
+    type: event_count
+    rules:
+        - exec_certutil_download
+        - exec_bitsadmin_download
+        - exec_curl_download
+        - exec_ps_iwr_download
+        - exec_ps_webclient_download
+    group-by:
+        - Computer
+    timespan: 15m
+    condition:
+        gte: 1
+level: informational

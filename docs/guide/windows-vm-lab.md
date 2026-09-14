@@ -354,13 +354,20 @@ Image / NewProcessName` (medium). Сработали **обе** ветки — �
 фильтрация не ломается — просто эти правила не сработают. Лечится своим файлом маппингов через
 `SIEM_ZIRCOLITE_CONFIG_PATH` (добавить `ProviderName: Provider_Name` в `mappings`).
 
-**Точность метки времени.** Родной `TimeCreated` приходит в локальном времени со смещением
-(`2026-09-07 08:00:39 +0300`), а `app/timeutil.normalize_event_time` такой формат (пробел перед
-смещением) не разбирает и уходит в фолбэк с мусорной строкой. Поэтому `event_time` берётся из
-`EventTime`, который подставляет `json_date_key` — это момент **чтения** журнала Fluent Bit,
-отстающий от события примерно на секунду (`Interval_Sec 1`). Сырое значение `TimeCreated`
-остаётся в `raw_json`. Точная метка — небольшая правка `timeutil.py` (разобрать
-`ДАТА ВРЕМЯ ±ЧЧММ`), пока не сделана.
+**Точность метки времени.** `event_time` берётся из родного `TimeCreated`
+(`2026-09-07 08:00:39 +0300`, переводится в UTC), `EventTime` от `json_date_key` — фолбэк (момент
+чтения журнала, отстаёт на 1–2 с). Точность `TimeCreated` — секунда: события одной секунды
+корреляция `temporal_ordered` считает одновременными.
+
+**Поля, которых стек не доставляет.** У System 7045 и 104 именованных полей нет (только
+`StringInserts`), у 4648 нет `ProcessName`. Правило, упоминающее такое поле, не срабатывает никогда
+(Zircolite падает на «no such column»). Детект установки служб поэтому идёт по Security 4697.
+
+**Детект-контент и телеметрия под него** — `artifacts/content/` (см. CLAUDE.md §9): конфиг Sysmon
+`telemetry/sysmonconfig.xml` (sysmon-modular balanced + свои дополнения; установка
+`Sysmon64.exe -c sysmonconfig.xml`), Fluent Bit `telemetry/fluent-bit.conf` (каналы Defender,
+WMI-Activity, TaskScheduler, Bits-Client, фильтр 4673/4674/5379). Команды эмуляции каждого
+сценария — секция `lab:` его фикстуры в `artifacts/content/<domain>/tests/`.
 
 **Инциденты не заводятся сами.** Таблица `incidents` заполняется только correlation-правилами
 с блоком `correlation.incident`; catch-all прохода по алертам нет by design

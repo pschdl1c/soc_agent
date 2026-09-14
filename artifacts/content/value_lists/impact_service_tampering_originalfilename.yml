@@ -1,0 +1,11 @@
+name: impact_service_tampering_originalfilename
+description: Suspicious Windows Service Tampering - OriginalFileName
+values:
+  - net.exe
+  - net1.exe
+  - PowerShell_ISE.EXE
+  - PowerShell.EXE
+  - psservice.exe
+  - pwsh.dll
+  - sc.exe
+  - wmic.exe

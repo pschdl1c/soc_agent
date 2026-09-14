@@ -1,0 +1,30 @@
+title: SCE_PrivEsc_Enumeration_Tooling
+id: 9d429c30-3d77-4b89-a7c0-6a78cde85ab8
+name: sce_privesc_enumeration_tooling
+status: experimental
+description: |
+    Privilege escalation enumeration tooling ran on the host (winPEAS, SharpUp, Seatbelt) - an
+    operator looking for a local escalation path.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.privilege-escalation
+    - attack.discovery
+    - attack.t1082
+correlation:
+    type: event_count
+    rules:
+        - privesc_winpeas
+        - privesc_sharpup
+        - privesc_seatbelt
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: privesc_enumeration_tooling
+        severity: medium
+falsepositives:
+    - Security assessments
+level: medium

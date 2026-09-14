@@ -1,0 +1,39 @@
+title: SCE_Persist_Suspicious_Autostart
+id: e34c40f9-9771-4c5c-8487-75655709c092
+name: sce_persist_suspicious_autostart
+status: experimental
+description: |
+    An autostart entry that points at something an attacker would install: a Run key or scheduled
+    task launching from a user-writable folder or through PowerShell / a shell, a script dropped into
+    the Startup folder, or a service whose binary path is an interpreter or a temp location. Any one
+    such high-signal event on a host raises the incident; repeats within the hour update it.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.t1547.001
+    - attack.t1053.005
+    - attack.t1543.003
+correlation:
+    type: event_count
+    rules:
+        - persist_run_key_suspicious_folder
+        - persist_run_key_powershell
+        - persist_startup_folder_suspicious
+        - persist_task_suspicious_4698
+        - persist_schtasks_suspicious_folder
+        - persist_schtasks_temp_once
+        - persist_service_creation_suspicious
+        - persist_service_powershell_4697
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: persist_suspicious_autostart
+        severity: high
+falsepositives:
+    - Software installed per-user that registers itself from AppData\Roaming
+    - Administrative scheduled tasks running PowerShell scripts
+level: high

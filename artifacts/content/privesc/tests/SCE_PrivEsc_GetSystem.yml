@@ -1,0 +1,24 @@
+scenario: SCE_PrivEsc_GetSystem
+cases:
+  - name: positive_meterpreter_named_pipe_service
+    expect_incidents: [privesc_getsystem]
+    events:
+      - event: {EventID: 4697, Channel: Security, ServiceName: 'abcdefgh', ServiceFileName: 'cmd.exe /c echo abcdefgh > \\.\pipe\abcdefgh', ServiceType: '0x10', ServiceStartType: 3, SubjectUserName: victim}
+  - name: positive_getsystem_child_of_services
+    expect_incidents: [privesc_getsystem]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', CommandLine: 'cmd.exe /c echo wxyz > \\.\pipe\wxyz', ParentImage: 'C:\Windows\System32\services.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+  - name: positive_coercedpotato_pipe
+    expect_incidents: [privesc_getsystem]
+    events:
+      - event: {EventID: 17, Channel: Microsoft-Windows-Sysmon/Operational, EventType: CreatePipe, Image: 'C:\Users\Public\cp.exe', PipeName: '\coerced\pipe\spoolss'}
+  - name: negative_services_child_mpcmdrun
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', CommandLine: 'cmd /c echo x > \\.\pipe\x & MpCmdRun.exe -SignatureUpdate', ParentImage: 'C:\Windows\System32\services.exe'}
+  - name: negative_normal_service_install
+    expect_incidents: []
+    events:
+      - event: {EventID: 4697, Channel: Security, ServiceName: VendorUpdate, ServiceFileName: '"C:\Program Files\Vendor\update.exe" -service', ServiceType: '0x10', ServiceStartType: 2}
+lab:
+  - 'Metasploit getsystem недоступен на стенде без C2; эмуляция 4697: sc.exe create gstest binPath= "cmd.exe /c echo gstest > \\.\pipe\gstest" && sc.exe start gstest & sc.exe delete gstest'

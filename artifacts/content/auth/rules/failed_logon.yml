@@ -1,0 +1,34 @@
+title: Failed Logon With Source Address
+id: ac8c35e9-caeb-4daa-bac4-2515f4ec4387
+name: auth_failed_logon
+status: experimental
+description: |
+    Failed logon (4625) that carries a usable source address. Building block for brute force and
+    password spraying correlations: events without an address ('-' for local interactive logons)
+    and machine accounts are dropped here, otherwise all local failures of a host would collapse
+    into one correlation bucket keyed by IpAddress '-'.
+references:
+    - https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1110
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 4625
+        IpAddress|exists: true
+    filter_main_no_address:
+        IpAddress:
+            - '-'
+            - ''
+    filter_main_machine_account:
+        TargetUserName|endswith: '$'
+    condition: selection and not 1 of filter_main_*
+falsepositives:
+    - Users mistyping passwords
+level: informational

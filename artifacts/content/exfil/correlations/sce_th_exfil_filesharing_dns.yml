@@ -1,0 +1,28 @@
+title: SCE_TH_Exfil_FileSharing_DNS
+id: 48d81a80-5ab5-4bd3-9225-064b4397045f
+name: sce_th_exfil_filesharing_dns
+status: experimental
+description: |
+    Hunting: a non-browser process on the host resolved a file sharing or paste service.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.exfiltration
+    - attack.t1567.002
+    - attack.command-and-control
+    - attack.t1102
+correlation:
+    type: event_count
+    rules:
+        - exfil_filesharing_dns_non_browser
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: th_exfil_filesharing_dns
+        severity: low
+falsepositives:
+    - Sync clients and developer tools
+level: low

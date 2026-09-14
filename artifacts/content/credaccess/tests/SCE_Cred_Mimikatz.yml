@@ -1,0 +1,20 @@
+scenario: SCE_Cred_Mimikatz
+cases:
+  - name: positive_sekurlsa_cli
+    expect_incidents: [cred_mimikatz]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\m.exe', CommandLine: 'm.exe "privilege::debug" "sekurlsa::logonpasswords" exit', ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High}
+  - name: positive_invoke_mimikatz_scriptblock
+    expect_incidents: [cred_mimikatz]
+    events:
+      - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Invoke-Mimikatz -Command "sekurlsa::logonpasswords"'}
+  - name: positive_kirbi_file
+    expect_incidents: [cred_mimikatz]
+    events:
+      - event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\m.exe', TargetFilename: 'C:\Users\Public\[0;3e7]-2-0-40e10000-HOST$@krbtgt-LAB.LOCAL.kirbi'}
+  - name: negative_similar_words
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', CommandLine: 'cmd /c type logon_passwords_policy.txt', ParentImage: 'C:\Windows\explorer.exe'}
+lab:
+  - 'Без бинаря mimikatz: запись 4104 даёт сам вызов - powershell -c "Write-Output ''sekurlsa::logonpasswords''"'

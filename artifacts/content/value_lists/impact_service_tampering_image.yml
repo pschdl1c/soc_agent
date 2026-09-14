@@ -1,0 +1,12 @@
+name: impact_service_tampering_image
+description: Suspicious Windows Service Tampering - Image|endswith
+values:
+  - \net.exe
+  - \net1.exe
+  - \PowerShell_ISE.EXE
+  - \powershell.exe
+  - \PsService.exe
+  - \PsService64.exe
+  - \pwsh.exe
+  - \sc.exe
+  - \wmic.exe

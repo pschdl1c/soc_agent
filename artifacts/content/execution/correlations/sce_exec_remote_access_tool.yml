@@ -1,0 +1,37 @@
+title: SCE_Exec_Remote_Access_Tool
+id: d23bb795-2cd5-4bdf-8db8-1d77100deaa9
+name: sce_exec_remote_access_tool
+status: experimental
+description: |
+    Two or more DIFFERENT remote access tool indicators on one host within an hour: a known RMM
+    binary is executed, an RMM service is installed, or a non-browser process resolves an RMM
+    domain. Legitimate RMM is common in helpdesk setups - two independent indicators filter out
+    a single stray lookup or an inventory scan touching an installed tool.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.command-and-control
+    - attack.t1219
+correlation:
+    type: temporal
+    rules:
+        - exec_rmm_anydesk
+        - exec_rmm_gotoopener
+        - exec_rmm_logmein
+        - exec_rmm_netsupport
+        - exec_rmm_screenconnect
+        - exec_rmm_simple_help
+        - exec_rmm_ultraviewer
+        - exec_rmm_service_install
+        - exec_rmm_dns_non_browser
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 2
+    incident:
+        type: exec_remote_access_tool
+        severity: medium
+falsepositives:
+    - Sanctioned remote support software being installed or used
+level: medium

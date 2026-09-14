@@ -1,0 +1,21 @@
+scenario: SCE_Evasion_Log_Cleared
+cases:
+  - name: positive_security_1102
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 1102, Channel: Security, SubjectUserName: admin, SubjectDomainName: LAB, SubjectUserSid: "S-1-5-21-1-2-3-500"}
+  - name: positive_wevtutil_cl
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wevtutil.exe', OriginalFileName: wevtutil.exe, CommandLine: 'wevtutil cl Security', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_clear_eventlog_scriptblock
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Clear-EventLog -LogName Application,System'}
+  - name: negative_wevtutil_query
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wevtutil.exe', OriginalFileName: wevtutil.exe, CommandLine: 'wevtutil qe Security /c:5 /f:text', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'wevtutil cl "Windows PowerShell"'
+  - 'Снимок ВМ перед: wevtutil cl Security уничтожит историю аудита стенда'

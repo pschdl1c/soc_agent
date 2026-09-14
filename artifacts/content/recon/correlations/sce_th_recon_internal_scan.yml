@@ -1,0 +1,30 @@
+title: SCE_TH_Recon_Internal_Scan
+id: d7ac155e-4886-4d04-bd0b-47841aae2c65
+name: sce_th_recon_internal_scan
+status: experimental
+description: |
+    Hunting: one process on a host connects to 15 or more different addresses on remote
+    administration ports within 10 minutes - host / service discovery sweep (port scanner, SMB
+    sweeper, lateral movement tooling).
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.discovery
+    - attack.t1046
+correlation:
+    type: value_count
+    rules:
+        - recon_admin_port_connection
+    group-by:
+        - Computer
+        - Image
+    timespan: 10m
+    condition:
+        field: DestinationIp
+        gte: 15
+    incident:
+        type: th_recon_internal_scan
+        severity: low
+falsepositives:
+    - Administration and inventory tools, backup agents
+level: low

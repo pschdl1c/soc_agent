@@ -99,6 +99,9 @@ _COND_OPS: dict[str, Any] = {
     "lte": lambda c, n: c <= n,
     "lt": lambda c, n: c < n,
     "eq": lambda c, n: c == n,
+    # neq есть в Sigma-спеке и принимался валидацией (rules_catalog._CORR_CONDITION_OPS), но
+    # здесь отсутствовал - правило с одним neq сохранялось и никогда не срабатывало.
+    "neq": lambda c, n: c != n,
 }
 
 
@@ -169,8 +172,12 @@ def _expand_synthetic_samples(
     event_ids: list[str],
     limit: int,
     depth: int = 0,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Разворачивает синтетические попадания ЦЕПОЧКИ в РЕАЛЬНЫЕ события правила-предка.
+    Возвращает (sample_events, event_ids) - вторые нужны привязке member-алертов инцидента
+    (store.link_alerts_to_incident): у ТИХОГО звена (informational-корреляция без алерта, см.
+    evaluate_batch) синтетический id не резолвится ни в один алерт, и без реальных event_id
+    предка базовые алерты сценария к инциденту не привязались бы вовсе.
 
     Зачем: попадание сработавшей корреляции живёт в rule_hits с синтетическим event_id, которому
     в events не соответствует ничего - JOIN в store.evaluate_correlation_window его молча
@@ -189,8 +196,9 @@ def _expand_synthetic_samples(
     Стоимость платится ТОЛЬКО в момент реального срабатывания цепочки и только на контент
     событий - счётный путь (см. докстринг модуля) не затрагивается вообще."""
     if depth >= _MAX_EXPAND_DEPTH or limit <= 0 or not corr_index:
-        return []
+        return [], []
     collected: list[dict[str, Any]] = []
+    collected_ids: list[str] = []
     for event_id in event_ids:
         if len(collected) >= limit:
             break
@@ -225,11 +233,14 @@ def _expand_synthetic_samples(
             sample_limit=limit - len(collected),
         )
         collected += inner["sample_events"]
+        collected_ids += [e for e in inner["event_ids"] if not e.startswith(_SYNTHETIC_HIT_PREFIX)]
         if len(collected) < limit:
-            collected += _expand_synthetic_samples(
+            deeper, deeper_ids = _expand_synthetic_samples(
                 store, corr_index, source_batch, inner["event_ids"], limit - len(collected), depth + 1,
             )
-    return collected[:limit]
+            collected += deeper
+            collected_ids += deeper_ids
+    return collected[:limit], collected_ids
 
 
 def _merge_samples(
@@ -290,24 +301,25 @@ def _active_correlation_rules(ruleset_path: str | None) -> list[dict[str, Any]]:
     напрямую; для builtin/None - пусто (builtin корреляций не содержит)."""
     if not ruleset_path:
         return []
-    if ruleset_path == main_ruleset.MAIN_RULESET_ID:
-        active_ids_by_ruleset: dict[str, set[str]] = {}
-        for src, rule in main_ruleset.resolve_with_sources():
-            if rule.get("correlation"):
-                active_ids_by_ruleset.setdefault(src, set()).add(rule.get("id"))
-        result: list[dict[str, Any]] = []
-        for src, ids in active_ids_by_ruleset.items():
-            # {**c, ...} - НЕ мутируем dict'ы из кэша rules_catalog. ruleset_path (реальный
-            # custom-рулсет-источник, не "main") нужен инцидентам для GET /incidents/{id}/context.
-            result += [
-                {**c, "ruleset_path": src}
-                for c in rules_catalog.load_correlation_rules(src) if c["id"] in ids
-            ]
-        return result
-    return [
-        {**c, "ruleset_path": ruleset_path}
-        for c in rules_catalog.load_correlation_rules(ruleset_path)
-    ]
+    try:
+        pairs = main_ruleset.resolve_for(ruleset_path)
+    except rules_catalog.CatalogError:
+        return []
+    # Один источник правды для main и custom-пути: что исполняется (включая межрулсетные
+    # зависимости, см. rules_catalog.with_dependencies) - то и считается.
+    active_ids_by_ruleset: dict[str, set[str]] = {}
+    for src, rule in pairs:
+        if rule.get("correlation"):
+            active_ids_by_ruleset.setdefault(src, set()).add(rule.get("id"))
+    result: list[dict[str, Any]] = []
+    for src, ids in active_ids_by_ruleset.items():
+        # {**c, ...} - НЕ мутируем dict'ы из кэша rules_catalog. ruleset_path (реальный
+        # custom-рулсет-источник, не "main") нужен инцидентам для GET /incidents/{id}/context.
+        result += [
+            {**c, "ruleset_path": src}
+            for c in rules_catalog.load_correlation_rules(src) if c["id"] in ids
+        ]
+    return result
 
 
 def active_hit_spec(ruleset_path: str | None) -> dict[str, set[str]]:
@@ -384,12 +396,26 @@ def _sequence_matches_order(sequence: list[tuple[str, str]], expected_titles: li
     внутри уже отфильтрованного по ключу окна (см. store.fetch_correlation_hit_sequence) - все
     строки уже принадлежат ОДНОМУ group-by-ключу, строк мало (окно узкое), поэтому линейный
     проход дёшев. Апстрим-бэкенды (pysigma-backend-sqlite/-clickhouse) считают такую же
-    GROUP_CONCAT-последовательность, но НИКОГДА её не сравнивают - см. докстринг модуля."""
+    GROUP_CONCAT-последовательность, но НИКОГДА её не сравнивают - см. докстринг модуля.
+
+    Попадания с РАВНОЙ меткой времени - одна «ступень», порядок внутри неё не определён: SQL
+    ORDER BY event_time отдаёт их в произвольном порядке, а у Windows-событий через Fluent Bit
+    точность секундная (TimeCreated), так что «процесс -> его сетевое соединение» почти всегда
+    попадает в одну секунду. Строгий проход по строкам ложно отвергал бы такую пару в половине
+    случаев. Поэтому внутри ступени последовательно засчитываются ВСЕ ожидаемые ссылки, какие в
+    ней встретились (ничьё не нарушает порядок, опережение - нарушает)."""
     if not expected_titles:
         return False
     idx = 0
-    for title, _ in sequence:
-        if title == expected_titles[idx]:
+    i = 0
+    n = len(sequence)
+    while i < n:
+        step_time = sequence[i][1]
+        step_titles: set[str] = set()
+        while i < n and sequence[i][1] == step_time:
+            step_titles.add(sequence[i][0])
+            i += 1
+        while idx < len(expected_titles) and expected_titles[idx] in step_titles:
             idx += 1
             if idx == len(expected_titles):
                 return True
@@ -655,14 +681,17 @@ def _evaluate_correlation_rule(
         # реальные события, иначе sample_events (а с ними и entities) у корреляции НАД
         # корреляцией остались бы пустыми, см. _expand_synthetic_samples.
         sample_events = precise["sample_events"]
-        expanded = _expand_synthetic_samples(
+        event_ids = list(precise["event_ids"])
+        expanded, expanded_ids = _expand_synthetic_samples(
             store, corr_index, source_batch, precise["event_ids"],
             limit=_MAX_SAMPLE_EVENTS - len(sample_events),
         )
         if expanded:
             sample_events = _merge_samples(sample_events, expanded, _MAX_SAMPLE_EVENTS)
+        seen_ids = set(event_ids)
+        event_ids += [e for e in expanded_ids if e not in seen_ids]
 
-        result[key] = (count, sample_events, anchor_time, precise["event_ids"])
+        result[key] = (count, sample_events, anchor_time, event_ids)
     return result
 
 
@@ -710,11 +739,13 @@ def evaluate_batch(
 
     for corr in corr_rules:
         incident_spec = corr.get("incident")
-        # informational - шум, алертов по нему не заводим (см. normalize.py/UI). НО помеченное
-        # инцидентное правило пропускаем сквозь эту отсечку: у него severity инцидента берётся
-        # из incident.severity (или дефолт medium), а не из level correlation-правила.
-        if not incident_spec and Severity.from_zircolite(corr.get("level")) == Severity.informational:
-            continue
+        # informational без incident - ТИХОЕ звено: считается и пишет своё попадание в rule_hits
+        # (на него могут ссылаться цепочки - промежуточные "Failed Logon Burst", агрегаторы
+        # тактик для killchain), но алерта не создаёт. Раньше такое правило пропускалось
+        # целиком, и ссылающаяся на него цепочка молча никогда не срабатывала. Инцидентное
+        # правило informational-уровня работает как обычно: severity инцидента берётся из
+        # incident.severity (или дефолт medium), а не из level correlation-правила.
+        silent = not incident_spec and Severity.from_zircolite(corr.get("level")) == Severity.informational
         group_by = corr.get("group_by") or []
         if not group_by:
             continue  # без group-by корреляция была бы "по всей выборке" - не поддерживаем
@@ -794,6 +825,8 @@ def evaluate_batch(
                         "window_start": built.window_start,
                         "window_end": built.window_end,
                     })
+            elif silent:
+                hit_dedup = _dedup_key(corr.get("id") or "", key)
             else:
                 alert = _build_alert(corr, key, count, sample_events, source_batch)
                 alerts.append(alert)

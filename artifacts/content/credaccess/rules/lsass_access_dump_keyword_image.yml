@@ -1,0 +1,33 @@
+title: LSASS Memory Access by Tool With Dump Keyword In Name
+id: 39ae2fe7-0518-40ac-b634-3ad697021f89
+name: cred_lsass_access_dump_keyword
+related:
+    -   id: 9bd012ee-0dff-44d7-84a0-aa698cfd87a3
+        type: derived
+status: test
+description: Detects LSASS process access requests from a source process with the "dump" keyword in its image name.
+references:
+    - https://twitter.com/_xpn_/status/1491557187168178176
+    - https://www.ired.team/offensive-security/credential-access-and-credential-dumping/dump-credentials-from-lsass-process-without-mimikatz
+author: Florian Roth (Nextron Systems), ET, Claude
+date: '2022-02-10'
+modified: '2026-09-14'
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+    - attack.s0002
+logsource:
+    category: process_access
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 10
+    selection:
+        TargetImage|endswith: \lsass.exe
+        SourceImage|contains: dump
+        GrantedAccess|endswith|expand: '%cred_lsass_access_dump_keyword_grantedaccess%'
+    condition: guard_logsource and (selection)
+falsepositives:
+    - Rare programs that contain the word dump in their name and access lsass
+level: high

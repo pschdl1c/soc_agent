@@ -1,0 +1,13 @@
+name: exec_office_parents
+description: Процессы Office и редакторов документов (для |endswith по ParentImage)
+values:
+  - \EQNEDT32.EXE
+  - \EXCEL.EXE
+  - \MSACCESS.EXE
+  - \MSPUB.exe
+  - \ONENOTE.EXE
+  - \POWERPNT.exe
+  - \VISIO.exe
+  - \WINWORD.EXE
+  - \wordpad.exe
+  - \wordview.exe

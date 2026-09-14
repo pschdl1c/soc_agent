@@ -1,0 +1,30 @@
+title: SCE_TH_Lateral_Remote_Service_Task
+id: ee2e0e47-86d4-48fb-b5d4-c6827acbe50d
+name: sce_th_lateral_remote_service_task
+status: experimental
+description: |
+    Hunting: a network logon to the host is followed within 2 minutes by a new service or scheduled
+    task - typical of remote service / task creation for lateral execution (sc create against a
+    remote host, schtasks /s, impacket smbexec / atexec).
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.lateral-movement
+    - attack.execution
+    - attack.t1021.002
+    - attack.t1569.002
+    - attack.t1053.005
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_successful_remote_logon
+        - lateral_host_new_service_or_task
+    group-by:
+        - Computer
+    timespan: 2m
+    incident:
+        type: th_lateral_remote_service_task
+        severity: low
+falsepositives:
+    - Software deployment tools
+level: low

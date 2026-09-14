@@ -1,0 +1,12 @@
+scenario: SCE_TH_PrivEsc_Service_Binary_Change
+cases:
+  - name: positive_reg_add_imagepath
+    expect_incidents: [th_privesc_service_binary_change]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\reg.exe', CommandLine: 'reg add HKLM\SYSTEM\CurrentControlSet\Services\Spooler /v ImagePath /t REG_EXPAND_SZ /d C:\Users\Public\svc.exe /f', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_reg_query_imagepath
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\reg.exe', CommandLine: 'reg query HKLM\SYSTEM\CurrentControlSet\Services\Spooler /v ImagePath', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'reg add HKLM\SYSTEM\CurrentControlSet\Services\LabDummy /v ImagePath /t REG_EXPAND_SZ /d C:\Windows\System32\notepad.exe /f; reg delete HKLM\SYSTEM\CurrentControlSet\Services\LabDummy /f'

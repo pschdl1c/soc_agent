@@ -117,7 +117,7 @@ def test_load_correlation_rules_resolves_ref_by_name():
     corr = rules[0]
     assert corr["title"] == "Bruteforce By Name"
     assert corr["base_rule_titles"] == ["Failed Auth"]
-    assert corr["base_rule_refs"] == [{"title": "Failed Auth", "kind": "base"}]
+    assert corr["base_rule_refs"] == [{"title": "Failed Auth", "kind": "base", "ruleset_path": ruleset_path}]
     assert corr["group_by"] == ["IpAddress"]
     assert corr["timespan"] == "5m"
 
@@ -149,8 +149,8 @@ def test_load_correlation_rules_resolves_reference_to_another_correlation():
     parent = rules["Auth After Brute"]
     assert parent["base_rule_titles"] == ["Bruteforce By Name", "Successful Auth"]
     assert parent["base_rule_refs"] == [
-        {"title": "Bruteforce By Name", "kind": "correlation"},
-        {"title": "Successful Auth", "kind": "base"},
+        {"title": "Bruteforce By Name", "kind": "correlation", "ruleset_path": ruleset_path},
+        {"title": "Successful Auth", "kind": "base", "ruleset_path": ruleset_path},
     ]
 
 
@@ -200,6 +200,122 @@ def test_load_correlation_rules_cache_reflects_new_file(tmp_path):
 
 def test_builtin_ruleset_has_no_correlation_rules():
     assert rules_catalog.load_correlation_rules("Zircolite/rules/rules_windows_generic_pysigma.json") == []
+
+
+# ------------------------------------------------------------------ Межрулсетные ссылки
+
+
+def _two_domains():
+    """auth - базовые правила, killchain - корреляция, ссылающаяся на них из ДРУГОГО рулсета."""
+    auth = rules_catalog.create_custom_ruleset("auth")
+    _save(auth, _BASE_RULE_A)
+    _save(auth, _BASE_RULE_B)
+    chain = rules_catalog.create_custom_ruleset("killchain")
+    _save(chain, _CORR_BY_NAME)
+    return auth, chain
+
+
+def test_correlation_resolves_reference_into_another_ruleset():
+    auth, chain = _two_domains()
+    rules = rules_catalog.load_correlation_rules(chain)
+    assert len(rules) == 1
+    assert rules[0]["base_rule_refs"] == [{"title": "Failed Auth", "kind": "base", "ruleset_path": auth}]
+
+
+def test_cross_ruleset_chain_to_correlation_resolves():
+    auth, chain = _two_domains()
+    lateral = rules_catalog.create_custom_ruleset("lateral")
+    _save(lateral, _CORR_CHAIN_PARENT)  # bruteforce_by_name (killchain) + success_auth (auth)
+    parent = rules_catalog.load_correlation_rules(lateral)[0]
+    assert [(r["kind"], r["ruleset_path"]) for r in parent["base_rule_refs"]] == [
+        ("correlation", chain), ("base", auth),
+    ]
+
+
+def test_title_must_be_unique_across_rulesets():
+    auth, _chain = _two_domains()
+    other = rules_catalog.create_custom_ruleset("other")
+    dup_title = _BASE_RULE_A.replace("name: failed_auth", "name: failed_auth_copy").replace(
+        "11111111-1111-1111-1111-111111111111", "77777777-1111-1111-1111-111111111111"
+    )
+    with pytest.raises(RuleValidationError, match="title 'Failed Auth'"):
+        rules_catalog.save_custom_rule(dup_title, ruleset=other)
+
+
+def test_name_must_be_unique_across_rulesets():
+    _two_domains()
+    other = rules_catalog.create_custom_ruleset("other")
+    dup_name = _BASE_RULE_A.replace("title: Failed Auth", "title: Failed Auth Copy").replace(
+        "11111111-1111-1111-1111-111111111111", "77777777-1111-1111-1111-111111111111"
+    )
+    with pytest.raises(RuleValidationError, match="name 'failed_auth'"):
+        rules_catalog.save_custom_rule(dup_name, ruleset=other)
+
+
+def test_duplicate_title_inside_one_pack_is_rejected():
+    ruleset = rules_catalog.create_custom_ruleset("pack")
+    twin = _BASE_RULE_B.replace("title: Successful Auth", "title: Failed Auth")
+    with pytest.raises(RuleValidationError, match="больше одного раза"):
+        rules_catalog.save_ruleset_yaml(_BASE_RULE_A + "\n---\n" + twin, ruleset=ruleset)
+
+
+def test_reuploading_same_pack_reports_collisions_not_uniqueness_error():
+    """Тот же id у владельца title - это то же правило: пак не отклоняется целиком, а даёт
+    коллизии по id, как раньше."""
+    ruleset = rules_catalog.create_custom_ruleset("pack")
+    _save(ruleset, _BASE_RULE_A)
+    _summary, _path, collisions, _imported = rules_catalog.save_ruleset_yaml(_BASE_RULE_A, ruleset=ruleset)
+    assert [c["id"] for c in collisions] == ["11111111-1111-1111-1111-111111111111"]
+
+
+def test_delete_rule_referenced_from_other_ruleset_conflicts_until_force():
+    auth, chain = _two_domains()
+    with pytest.raises(rules_catalog.CatalogConflict) as exc:
+        rules_catalog.delete_custom_rule(auth, "11111111-1111-1111-1111-111111111111")
+    assert exc.value.references[0]["ruleset"] == chain
+    # Не упомянутое ни одной корреляцией правило удаляется как раньше.
+    rules_catalog.delete_custom_rule(auth, "22222222-2222-2222-2222-222222222222")
+    rules_catalog.delete_custom_rule(auth, "11111111-1111-1111-1111-111111111111", force=True)
+    assert rules_catalog.load_correlation_rules(chain) == []
+
+
+def test_delete_ruleset_referenced_from_other_ruleset_conflicts_until_force():
+    auth, chain = _two_domains()
+    with pytest.raises(rules_catalog.CatalogConflict):
+        rules_catalog.delete_custom_ruleset(auth)
+    # Ссылки ИЗНУТРИ удаляемого рулсета конфликтом не считаются.
+    rules_catalog.delete_custom_ruleset(chain)
+    rules_catalog.delete_custom_ruleset(auth)
+
+
+def test_renaming_referenced_name_conflicts():
+    auth, _chain = _two_domains()
+    renamed = _BASE_RULE_A.replace("name: failed_auth", "name: failed_auth_v2")
+    with pytest.raises(rules_catalog.CatalogConflict):
+        rules_catalog.update_custom_rule(auth, "11111111-1111-1111-1111-111111111111", renamed)
+    # Правка без смены name проходит.
+    same_name = _BASE_RULE_A.replace("level: informational", "level: low")
+    rules_catalog.update_custom_rule(auth, "11111111-1111-1111-1111-111111111111", same_name)
+
+
+def test_with_dependencies_pulls_base_rules_of_other_ruleset():
+    from app.rules import main_ruleset
+
+    auth, chain = _two_domains()
+    pairs = main_ruleset.resolve_for(chain)
+    by_title = {rule["title"]: (src, rule) for src, rule in pairs}
+    assert set(by_title) == {"Bruteforce By Name", "Failed Auth"}
+    src, dep = by_title["Failed Auth"]
+    assert src == auth and dep["via_dependency"] is True
+    assert not by_title["Bruteforce By Name"][1].get("via_dependency")
+
+
+def test_find_rules_by_titles_searches_all_rulesets():
+    auth, _chain = _two_domains()
+    found = rules_catalog.find_rules_by_titles({"Failed Auth", "Bruteforce By Name"})
+    assert {(src, r["title"]) for src, r in found} == {
+        (auth, "Failed Auth"), (_chain, "Bruteforce By Name"),
+    }
 
 
 # ------------------------------------------------------------------ Валидация при сохранении

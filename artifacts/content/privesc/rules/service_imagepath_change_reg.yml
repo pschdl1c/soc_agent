@@ -1,0 +1,41 @@
+title: Changing Existing Service ImagePath Value Via Reg.EXE
+id: 5b293ca8-e94a-42d1-af93-c7c34ad951db
+name: privesc_service_imagepath_change
+related:
+    -   id: 9b0b7ac3-6223-47aa-a3fd-e8f211e637db
+        type: derived
+status: test
+description: |
+    Adversaries may execute their own malicious payloads by hijacking the Registry entries used by services.
+    Adversaries may use flaws in the permissions for registry to redirect from the originally specified executable to one that they control, in order to launch their own code at Service start.
+    Windows stores local service configuration information in the Registry under HKLM\SYSTEM\CurrentControlSet\Services
+references:
+    - https://github.com/redcanaryco/atomic-red-team/blob/f339e7da7d05f6057fdfcdd3742bfcf365fee2a9/atomics/T1574.011/T1574.011.md#atomic-test-2---service-imagepath-change-with-regexe
+author: frack113, ET, Claude
+date: '2021-12-30'
+modified: '2026-09-14'
+tags:
+    - attack.privilege-escalation
+    - attack.persistence
+    - attack.execution
+    - attack.stealth
+    - attack.t1574.011
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection:
+        Image|endswith: \reg.exe
+        CommandLine|contains|all:
+            - 'add '
+            - SYSTEM\CurrentControlSet\Services\
+            - ' ImagePath '
+    selection_value:
+        CommandLine|contains|windash: ' -d '
+    condition: guard_logsource and (all of selection*)
+falsepositives:
+    - Unknown
+level: medium

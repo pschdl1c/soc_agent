@@ -1,0 +1,35 @@
+title: PowerShell Scripts Installed as Services - Security
+id: 5aaaaa96-1442-4cc3-9e03-4937d7f65709
+name: persist_service_powershell_4697
+related:
+    -   id: a2e5019d-a658-4c6a-92bf-7197b54e2cae
+        type: derived
+    -   id: 2a926e6a-4b81-4011-8a96-e36cc8c04302
+        type: derived
+status: test
+description: Detects powershell script installed as a Service
+references:
+    - https://speakerdeck.com/heirhabarov/hunting-for-powershell-abuse
+author: oscd.community, Natalia Shornikova, ET, Claude
+date: '2020-10-06'
+modified: '2026-09-14'
+tags:
+    - attack.execution
+    - attack.t1569.002
+logsource:
+    product: windows
+    service: security
+    definition: The 'System Security Extension' audit subcategory need to be enabled to log the EID 4697
+detection:
+    guard_logsource:
+        Channel: Security
+        EventID: 4697
+    selection:
+        EventID: 4697
+        ServiceFileName|contains:
+            - powershell
+            - pwsh
+    condition: guard_logsource and (selection)
+falsepositives:
+    - Unknown
+level: high

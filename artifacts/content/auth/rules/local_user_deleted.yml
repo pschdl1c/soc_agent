@@ -1,0 +1,27 @@
+title: Local User Account Deleted
+id: 94a1745a-1979-4374-bcf8-d235958340e3
+name: auth_local_user_deleted
+status: experimental
+description: |
+    A local user account was deleted (4726). On its own routine; paired with a recent creation of
+    an account on the same host it points at a short-lived account used for one operation.
+references:
+    - https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4726
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.impact
+    - attack.t1531
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 4726
+    filter_main_machine_account:
+        TargetUserName|endswith: '$'
+    condition: selection and not filter_main_machine_account
+falsepositives:
+    - Account lifecycle management
+level: low

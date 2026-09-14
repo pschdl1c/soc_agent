@@ -1,0 +1,38 @@
+title: Outbound Connection To Remote Administration Port
+id: 3f180514-aa48-4f72-a77a-8884e4e65827
+name: recon_admin_port_connection
+status: experimental
+description: |
+    Outbound connection initiated by a process to a remote administration port (SSH, RPC, NetBIOS,
+    SMB, RDP, WinRM - value list recon_admin_ports). Building block for internal scanning hunting:
+    one process touching many different hosts on these ports. System components that legitimately
+    talk SMB/RPC (the kernel "System" process, svchost, lsass) are excluded.
+references:
+    - https://attack.mitre.org/techniques/T1046/
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.discovery
+    - attack.t1046
+logsource:
+    product: windows
+    category: network_connection
+detection:
+    selection:
+        Channel: 'Microsoft-Windows-Sysmon/Operational'
+        EventID: 3
+        Initiated: 1
+        DestinationPort|expand: '%recon_admin_ports%'
+    filter_main_system:
+        Image:
+            - 'System'
+            - 'C:\Windows\System32\svchost.exe'
+            - 'C:\Windows\System32\lsass.exe'
+    filter_main_loopback:
+        DestinationIp|startswith:
+            - '127.'
+            - '::1'
+    condition: selection and not 1 of filter_main_*
+falsepositives:
+    - Management and backup servers, vulnerability scanners
+level: informational

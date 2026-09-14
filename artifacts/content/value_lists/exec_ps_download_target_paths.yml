@@ -1,0 +1,12 @@
+name: exec_ps_download_target_paths
+description: Пути назначения загрузки в командной строке PowerShell (|contains)
+values:
+  - \AppData\
+  - \Desktop\
+  - \Temp\
+  - \Users\Public\
+  - '%AppData%'
+  - '%Public%'
+  - '%Temp%'
+  - '%tmp%'
+  - :\Windows\

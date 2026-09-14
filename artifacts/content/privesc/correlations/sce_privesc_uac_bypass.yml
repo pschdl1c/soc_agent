@@ -1,0 +1,28 @@
+title: SCE_PrivEsc_UAC_Bypass
+id: 2a5ab20f-0e08-49cb-940d-e79e8f458d16
+name: sce_privesc_uac_bypass
+status: experimental
+description: |
+    A UAC bypass hijack is planted in the registry and, within 5 minutes on the same host, an auto-
+    elevating binary spawns a process - the hijack was triggered and the payload runs at high
+    integrity without a UAC prompt.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.privilege-escalation
+    - attack.defense-impairment
+    - attack.t1548.002
+correlation:
+    type: temporal_ordered
+    rules:
+        - privesc_host_uac_registry_hijack
+        - privesc_host_autoelevated_abuse
+    group-by:
+        - Computer
+    timespan: 5m
+    incident:
+        type: privesc_uac_bypass
+        severity: high
+falsepositives:
+    - Unlikely
+level: high

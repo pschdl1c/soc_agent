@@ -1,0 +1,32 @@
+title: Security Eventlog Cleared
+id: 28bf89aa-7448-4ab1-9eab-ea641423ba65
+name: evasion_security_log_cleared
+related:
+    - id: d99b79d2-0a6f-4f46-ad8b-260b6e17f982
+      type: derived
+status: test
+description: |
+    The Security event log was cleared (1102). Adapted for the SIEM: the original keys on Provider_Name, which the
+    Fluent Bit stack does not deliver (field arrives as ProviderName and Zircolite strips the underscore), so the rule
+    keys on the Security channel instead. The legacy 517 variant is dropped - pre-Vista only.
+references:
+    - https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-1102
+author: Florian Roth (Nextron Systems), ET, Claude
+date: 2017-01-10
+modified: 2026-09-14
+tags:
+    - attack.defense-impairment
+    - attack.t1685.005
+    - car.2016-04-002
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 1102
+    condition: selection
+falsepositives:
+    - Rollout of log collection agents (the setup routine often includes a reset of the local Eventlog)
+    - System provisioning (system reset before the golden image creation)
+level: high

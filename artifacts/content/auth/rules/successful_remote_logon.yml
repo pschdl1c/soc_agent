@@ -1,0 +1,43 @@
+title: Successful Network Or RDP Logon
+id: d399a47a-2416-4bb7-b02a-04fa35f8c3de
+name: auth_successful_remote_logon
+status: experimental
+description: |
+    Successful network (LogonType 3) or RemoteInteractive (LogonType 10) logon from an explicit
+    source address. Building block for "logon after brute force" and inbound lateral movement
+    correlations. Service start logons (LogonType 5), machine accounts, SYSTEM and anonymous
+    sessions are excluded - on a workstation they are the bulk of 4624 and carry no signal.
+references:
+    - https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4624
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.initial-access
+    - attack.lateral-movement
+    - attack.t1078
+    - attack.t1021
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 4624
+        LogonType:
+            - 3
+            - 10
+        IpAddress|exists: true
+    filter_main_no_address:
+        IpAddress:
+            - '-'
+            - ''
+    filter_main_machine_account:
+        TargetUserName|endswith: '$'
+    filter_main_builtin_sids:
+        TargetUserSid:
+            - 'S-1-5-18'  # SYSTEM
+            - 'S-1-5-7'   # ANONYMOUS LOGON
+    condition: selection and not 1 of filter_main_*
+falsepositives:
+    - Legitimate file share access and remote administration
+level: informational

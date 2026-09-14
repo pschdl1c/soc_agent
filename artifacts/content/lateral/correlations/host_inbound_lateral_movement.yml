@@ -1,0 +1,25 @@
+title: Host Inbound Lateral Movement
+id: 980f7a0a-8a0b-40d5-9eb1-e3d272b26334
+name: lateral_host_inbound
+status: experimental
+description: |
+    Intermediate link for the killchain ruleset: PsExec service, WMI remote child process or WinRM
+    remote session activity on the host.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.lateral-movement
+    - attack.t1021
+correlation:
+    type: event_count
+    rules:
+        - lateral_psexesvc_execution
+        - lateral_impacket_psexec_service_4697
+        - lateral_wmiprvse_susp_child
+        - lateral_winrm_session_host
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+level: informational

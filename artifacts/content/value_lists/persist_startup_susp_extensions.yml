@@ -1,0 +1,20 @@
+name: persist_startup_susp_extensions
+description: Расширения исполняемых/скриптовых файлов в папке автозагрузки
+values:
+  - .bat
+  - .cmd
+  - .dll
+  - .hta
+  - .jar
+  - .js
+  - .jse
+  - .msi
+  - .ps1
+  - .psd1
+  - .psm1
+  - .scr
+  - .url
+  - .vba
+  - .vbe
+  - .vbs
+  - .wsf

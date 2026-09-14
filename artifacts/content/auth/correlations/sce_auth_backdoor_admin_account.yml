@@ -1,0 +1,30 @@
+title: SCE_Auth_Backdoor_Admin_Account
+id: a50a94ca-2dcf-4400-9a20-f64706ef9fd2
+name: sce_auth_backdoor_admin_account
+status: experimental
+description: |
+    A local account is created and a member is added to the local Administrators group on the same
+    host within one hour - typical backdoor account for persistence. Linked by host only: 4720
+    carries the new account in TargetSid, 4732 carries it in MemberSid, and correlation group-by
+    cannot join differently named fields.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.privilege-escalation
+    - attack.t1136.001
+    - attack.t1098
+correlation:
+    type: temporal_ordered
+    rules:
+        - auth_local_user_created
+        - auth_user_added_local_admins
+    group-by:
+        - Computer
+    timespan: 1h
+    incident:
+        type: auth_backdoor_admin_account
+        severity: high
+falsepositives:
+    - Administrator provisioning a new local admin account
+level: high

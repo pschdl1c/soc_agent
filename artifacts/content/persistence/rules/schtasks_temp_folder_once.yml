@@ -1,0 +1,36 @@
+title: Suspicious Scheduled Task Creation Involving Temp Folder
+id: 80731b63-a8a6-453f-99f3-de6363f76140
+name: persist_schtasks_temp_once
+related:
+    -   id: 39019a4e-317f-4ce3-ae63-309a8c6b53c5
+        type: derived
+status: test
+description: Detects the creation of scheduled tasks that involves a temporary folder and runs only once
+references:
+    - https://discuss.elastic.co/t/detection-and-response-for-hafnium-activity/266289/3
+author: Florian Roth (Nextron Systems), ET, Claude
+date: '2021-03-11'
+modified: '2026-09-14'
+tags:
+    - attack.privilege-escalation
+    - attack.execution
+    - attack.persistence
+    - attack.t1053.005
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection:
+        Image|endswith: \schtasks.exe
+        CommandLine|contains|all:
+            - ' /create '
+            - ' /sc once '
+            - \Temp\
+    condition: guard_logsource and (selection)
+falsepositives:
+    - Administrative activity
+    - Software installation
+level: high

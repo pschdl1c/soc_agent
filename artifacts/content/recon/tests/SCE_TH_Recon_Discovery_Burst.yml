@@ -1,0 +1,22 @@
+scenario: SCE_TH_Recon_Discovery_Burst
+cases:
+  - name: positive_six_tools_different_parents
+    expect_incidents: [th_recon_discovery_burst]
+    events:
+      - repeat: 6
+        step: 120
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe', 'C:\Windows\System32\tasklist.exe', 'C:\Windows\System32\quser.exe']
+          ParentProcessGuid: ["${guid1}", "${guid2}", "${guid3}", "${guid4}", "${guid5}", "${guid6}"]
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentImage: 'C:\Windows\explorer.exe'}
+  - name: negative_five_tools
+    expect_incidents: []
+    events:
+      - repeat: 5
+        step: 120
+        vary:
+          Image: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe', 'C:\Windows\System32\tasklist.exe']
+          ParentProcessGuid: ["${guid1}", "${guid2}", "${guid3}", "${guid4}", "${guid5}"]
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, ParentImage: 'C:\Windows\explorer.exe'}
+lab:
+  - 'whoami; hostname; ipconfig /all; systeminfo; net user; tasklist; quser'

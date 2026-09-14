@@ -1,0 +1,34 @@
+title: SCE_Evasion_Defender_Tampering
+id: 2346ce01-30b0-4c88-a6ba-819b69d9d976
+name: sce_evasion_defender_tampering
+status: experimental
+description: |
+    Microsoft Defender weakened on the host: real-time protection disabled, exclusions added or
+    protection features switched off - seen in Defender's own log, PowerShell (command line or
+    script block) or registry.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.defense-impairment
+    - attack.t1685
+correlation:
+    type: event_count
+    rules:
+        - evasion_defender_rtp_disabled
+        - evasion_defender_exclusion_added
+        - evasion_defender_config_tamper
+        - evasion_defender_set_mp_ps
+        - evasion_defender_exclusion_cli
+        - evasion_defender_disable_feature_cli
+        - evasion_defender_tamper_registry
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: evasion_defender_tampering
+        severity: high
+falsepositives:
+    - Administrators adding exclusions for business software
+level: high

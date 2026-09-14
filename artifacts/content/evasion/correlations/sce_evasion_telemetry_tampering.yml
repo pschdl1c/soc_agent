@@ -1,0 +1,32 @@
+title: SCE_Evasion_Telemetry_Tampering
+id: 444ed882-b43f-426e-8210-c4f110f49f3d
+name: sce_evasion_telemetry_tampering
+status: experimental
+description: |
+    Security telemetry sabotaged on the host: audit policy cleared or disabled with auditpol, Sysmon
+    uninstalled or its driver unloaded, Sysmon configuration changed, event logging disabled in the
+    registry.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.defense-impairment
+    - attack.t1685
+correlation:
+    type: event_count
+    rules:
+        - evasion_auditpol_tampering
+        - evasion_sysmon_config_change
+        - evasion_sysmon_uninstall
+        - evasion_sysmon_driver_unload
+        - evasion_eventlog_disabled_registry
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: evasion_telemetry_tampering
+        severity: high
+falsepositives:
+    - Planned Sysmon configuration updates
+level: high

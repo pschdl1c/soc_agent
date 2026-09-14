@@ -1,0 +1,23 @@
+name: persist_autorun_keys
+description: ASEP-ключи под SOFTWARE\Microsoft\Windows\CurrentVersion (|contains по TargetObject)
+values:
+  - \ShellServiceObjectDelayLoad
+  - \Run\
+  - \RunOnce\
+  - \RunOnceEx\
+  - \RunServices\
+  - \RunServicesOnce\
+  - \Policies\System\Shell
+  - \Policies\Explorer\Run
+  - \Group Policy\Scripts\Startup
+  - \Group Policy\Scripts\Shutdown
+  - \Group Policy\Scripts\Logon
+  - \Group Policy\Scripts\Logoff
+  - \Explorer\ShellServiceObjects
+  - \Explorer\ShellIconOverlayIdentifiers
+  - \Explorer\ShellExecuteHooks
+  - \Explorer\SharedTaskScheduler
+  - \Explorer\Browser Helper Objects
+  - \Authentication\PLAP Providers
+  - \Authentication\Credential Providers
+  - \Authentication\Credential Provider Filters

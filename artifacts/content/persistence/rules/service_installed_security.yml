@@ -1,0 +1,43 @@
+title: Service Installed - Security
+id: fd803c76-e4ed-45a3-a66c-4a06452b5b2b
+name: persist_service_installed_4697
+status: experimental
+description: |
+    A service was installed (4697). Unlike System 7045, 4697 arrives on the Fluent Bit stack with named fields
+    (ServiceName, ServiceFileName). Excluded (the bulk of 4697 on the lab host): Defender kernel drivers and platform
+    services, per-user service instances that svchost groups create at every logon, Credential Enrollment Manager.
+    An attacker service launched via "svchost.exe -k" slips through - acceptable for a hunting building block.
+    Building block for hunting "remote logon followed by a new
+    service" (remote service creation shows no sc.exe on the target).
+references:
+    - https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4697
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.execution
+    - attack.t1543.003
+    - attack.t1569.002
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 4697
+    filter_main_defender_driver:
+        ServiceName|startswith: 'MpKsl'
+        ServiceFileName|contains: '\Microsoft\Windows Defender\Definition Updates\'
+    filter_main_defender_platform:
+        # драйверы и службы платформы Defender при её обновлении (win10-lab)
+        - ServiceFileName|startswith: 'system32\drivers\wd\'
+        - ServiceFileName|contains: '\Microsoft\Windows Defender\platform\'
+    filter_main_per_user_services:
+        # пользовательские экземпляры служб (<имя>_<luid>) создаются svchost-группами при каждом входе
+        ServiceFileName|startswith: 'C:\Windows\system32\svchost.exe -k '
+    filter_main_credential_enrollment:
+        ServiceFileName: 'C:\Windows\system32\CredentialEnrollmentManager.exe'
+    condition: selection and not 1 of filter_main_*
+falsepositives:
+    - Software and driver installation
+level: informational

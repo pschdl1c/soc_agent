@@ -1,0 +1,93 @@
+title: Potentially Suspicious GrantedAccess Flags On LSASS
+id: e826ab37-8c29-4d5f-a9cf-fe7835f4a8b1
+name: cred_lsass_susp_access_flags
+related:
+    -   id: 32d0d3e2-e58d-4d41-926b-18b520b2b32d
+        type: similar
+    -   id: a18dd26b-6450-46de-8c91-9659150cf088
+        type: derived
+status: test
+description: Detects process access requests to LSASS process with potentially suspicious access flags
+references:
+    - https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights
+    - https://onedrive.live.com/view.aspx?resid=D026B4699190F1E6!2843&ithint=file%2cpptx&app=PowerPoint&authkey=!AMvCRTKB_V1J5ow
+    - https://web.archive.org/web/20230208123920/https://cyberwardog.blogspot.com/2017/03/chronicles-of-threat-hunter-hunting-for_22.html
+    - https://www.slideshare.net/heirhabarov/hunting-for-credentials-dumping-in-windows-environment
+    - https://web.archive.org/web/20230420013146/http://security-research.dyndns.org/pub/slides/FIRST2017/FIRST-2017_Tom-Ueltschi_Sysmon_FINAL_notes.pdf
+author: Florian Roth, Roberto Rodriguez, Dimitrios Slamaris, Mark Russinovich, Thomas Patzke, Teymur Kheirkhabarov, Sherif Eldeeb, James Dickenson, Aleksey Potapov, oscd.community, ET, Claude
+date: '2021-11-22'
+modified: '2026-09-14'
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+    - attack.s0002
+logsource:
+    category: process_access
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 10
+    selection_target:
+        TargetImage|endswith: \lsass.exe
+    selection_access:
+        -   GrantedAccess|endswith|expand: '%cred_lsass_susp_access_flags_grantedaccess%'
+        -   GrantedAccess|startswith|expand: '%cred_lsass_susp_access_flags_grantedaccess2%'
+    filter_main_generic:
+        SourceImage|contains:
+            - :\Program Files (x86)\
+            - :\Program Files\
+            - :\Windows\System32\
+            - :\Windows\SysWOW64\
+    filter_optional_malwarebytes:
+        SourceImage|endswith: :\ProgramData\MALWAREBYTES\MBAMSERVICE\ctlrupdate\mbupdatr.exe
+    filter_optional_vscode:
+        SourceImage|endswith: \AppData\Local\Programs\Microsoft VS Code\Code.exe
+    filter_main_windefend_1:
+        SourceImage|contains: :\ProgramData\Microsoft\Windows Defender\
+        SourceImage|endswith: \MsMpEng.exe
+    filter_main_windefend_2:
+        CallTrace|contains|all:
+            - '|?:\ProgramData\Microsoft\Windows Defender\Definition Updates\{'
+            - '}\mpengine.dll+'
+        GrantedAccess: '0x1418'
+    filter_main_windefend_3:
+        CallTrace|contains:
+            - '|c:\program files\windows defender\mprtp.dll'
+            - '|c:\program files\windows defender\MpClient.dll'
+    filter_optional_vmwaretools:
+        SourceImage|contains: :\ProgramData\VMware\VMware Tools\
+        SourceImage|endswith: \vmtoolsd.exe
+    filter_optional_sysinternals_process_explorer:
+        SourceImage|endswith:
+            - \PROCEXP64.EXE
+            - \PROCEXP.EXE
+        GrantedAccess: '0x40'
+    filter_optional_mbami:
+        SourceImage|endswith: \MBAMInstallerService.exe
+        GrantedAccess: '0x40'
+    filter_optional_nextron:
+        SourceImage|endswith:
+            - \aurora-agent-64.exe
+            - \aurora-agent.exe
+            - \thor.exe
+            - \thor64.exe
+        GrantedAccess: '0x40'
+    filter_main_explorer:
+        SourceImage|endswith: \explorer.exe
+        GrantedAccess: '0x401'
+    filter_optional_sysinternals_handle:
+        SourceImage|endswith:
+            - \handle.exe
+            - \handle64.exe
+            - \handle64a.exe
+        GrantedAccess: '0x40'
+    filter_optional_webex:
+        SourceImage|endswith: \AppData\Local\WebEx\WebexHost.exe
+        GrantedAccess: '0x401'
+    filter_optional_steam_apps:
+        SourceImage|contains: \SteamLibrary\steamapps\
+    condition: guard_logsource and (all of selection_* and not 1 of filter_main_* and not 1 of filter_optional_*)
+falsepositives:
+    - Legitimate software such as AV and EDR
+level: medium

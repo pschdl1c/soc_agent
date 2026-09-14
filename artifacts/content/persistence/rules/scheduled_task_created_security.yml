@@ -1,0 +1,33 @@
+title: Scheduled Task Created - Security
+id: 70e354de-6f0c-4835-b319-899852904acd
+name: persist_task_created_4698
+status: experimental
+description: |
+    A scheduled task was registered (4698). Tasks under \Microsoft\ and per-user OneDrive / Edge update tasks are
+    excluded - they are re-registered by Windows and Microsoft updaters all the time. Building block for hunting
+    "remote logon followed by a new task" (remote task creation shows no schtasks.exe on the target).
+references:
+    - https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4698
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.execution
+    - attack.t1053.005
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 4698
+    filter_main_microsoft_tree:
+        TaskName|startswith: '\Microsoft\'
+    filter_main_microsoft_updaters:
+        TaskName|startswith:
+            - '\OneDrive '
+            - '\MicrosoftEdgeUpdateTask'
+    condition: selection and not 1 of filter_main_*
+falsepositives:
+    - Software installers registering their update tasks
+level: informational

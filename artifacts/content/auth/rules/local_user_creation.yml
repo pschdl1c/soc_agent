@@ -1,0 +1,32 @@
+title: Local User Creation
+id: 2bfbc460-56af-4961-aae6-a3e508af11ee
+name: auth_local_user_created
+related:
+    - id: 66b6be3d-55d0-4f47-9855-d69df21740ea
+      type: derived
+status: test
+description: |
+    Detects local user creation on Windows servers, which shouldn't happen in an Active Directory environment.
+    Adapted for the SIEM (no logsource pipeline): explicit Channel guard, machine accounts excluded.
+references:
+    - https://patrick-bareiss.com/detecting-local-user-creation-in-ad-with-sigma/
+author: Patrick Bareiss, ET, Claude
+date: 2019-04-18
+modified: 2026-09-14
+tags:
+    - attack.persistence
+    - attack.t1136.001
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 4720
+    filter_main_machine_account:
+        TargetUserName|endswith: '$'
+    condition: selection and not filter_main_machine_account
+falsepositives:
+    - Domain Controller Logs
+    - Local accounts managed by privileged account management tools
+level: low

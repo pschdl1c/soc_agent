@@ -1,0 +1,25 @@
+title: Host Auto-Elevated Binary Abuse
+id: 4b8bcd93-d29b-4131-bcb1-e263c62e79b0
+name: privesc_host_autoelevated_abuse
+status: experimental
+description: |
+    Intermediate link: an auto-elevating Windows binary (fodhelper, computerdefaults, sdclt,
+    eventvwr) spawned an unexpected child or ran elevated. Informational.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.privilege-escalation
+    - attack.t1548.002
+correlation:
+    type: event_count
+    rules:
+        - privesc_uac_fodhelper
+        - privesc_uac_computerdefaults
+        - privesc_uac_sdclt_process
+        - privesc_eventvwr_susp_child
+    group-by:
+        - Computer
+    timespan: 5m
+    condition:
+        gte: 1
+level: informational

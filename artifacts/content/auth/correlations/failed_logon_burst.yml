@@ -1,0 +1,24 @@
+title: Failed Logon Burst From Source Address
+id: 7ffcf6ff-7b4b-48f2-bd71-ded3de7b294e
+name: auth_failed_logon_burst
+status: experimental
+description: |
+    Intermediate link: at least 10 failed logons from one source address against one host within
+    5 minutes. Informational on purpose - it raises no alert of its own and only feeds
+    SCE_Auth_BruteForce_Success.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.credential-access
+    - attack.t1110
+correlation:
+    type: event_count
+    rules:
+        - auth_failed_logon
+    group-by:
+        - Computer
+        - IpAddress
+    timespan: 5m
+    condition:
+        gte: 10
+level: informational

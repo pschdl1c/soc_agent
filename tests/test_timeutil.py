@@ -21,6 +21,11 @@ def test_offset_converted_to_utc():
     assert normalize_event_time("2026-09-05T21:00:00+03:00") == normalize_event_time("2026-09-05T18:00:00Z")
 
 
+def test_fluent_bit_time_created_with_space_before_offset():
+    """TimeCreated от Fluent Bit winevtlog: 'ДАТА ВРЕМЯ ±ЧЧММ' - раньше уходило в фолбэк мусором."""
+    assert normalize_event_time("2026-09-14 02:08:49 +0300") == "2026-09-13T23:08:49"
+
+
 def test_negative_offset_converted_to_utc():
     assert normalize_event_time("2026-09-05T13:00:00-05:00") == "2026-09-05T18:00:00"
 

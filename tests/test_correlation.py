@@ -335,7 +335,7 @@ def test_correlation_reference_cycle_does_not_hang(store, monkeypatch):
 # ------------------------------------------------------------------ прочее
 
 
-def test_informational_correlation_is_skipped(store, monkeypatch):
+def test_informational_correlation_creates_no_alert(store, monkeypatch):
     events = _events("Failed Auth", 10, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:00:00")
     _ingest(store, events, "b1", "Failed Auth", {"IpAddress"})
     corr = _corr(
@@ -347,6 +347,53 @@ def test_informational_correlation_is_skipped(store, monkeypatch):
     created = correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": events})
     assert created == 0
     assert store.list_alerts(source_batch="b1") == []
+
+
+def test_chain_over_silent_informational_link_fires(store, monkeypatch):
+    """Тихое звено (informational, без incident) не создаёт алерт, но пишет попадание в
+    rule_hits - иначе ссылающаяся на него цепочка молча никогда не срабатывала."""
+    child = _corr(
+        "Failed Logon Burst", ["Failed Auth"], "event_count", ["IpAddress"], "5m", {"gte": 10},
+        level="informational",
+    )
+    parent = _corr(
+        "Brute Then Success", ["Failed Logon Burst", "Success Auth"], "temporal_ordered",
+        ["IpAddress"], "30m",
+        base_refs=[
+            {"title": "Failed Logon Burst", "kind": "correlation"},
+            {"title": "Success Auth", "kind": "base"},
+        ],
+    )
+    _active(monkeypatch, [child, parent])
+
+    failed = _events("Failed Auth", 10, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:00:00")
+    _ingest(store, failed, "b1", "Failed Auth", {"IpAddress"})
+    success = _events("Success Auth", 1, {"IpAddress": "10.0.0.1"}, "2024-01-01T00:02:00")
+    _ingest(store, success, "b1", "Success Auth", {"IpAddress"})
+
+    created = correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": failed, "Success Auth": success})
+    assert created == 1
+    alerts = store.list_alerts(source_batch="b1")
+    assert [a["rule_title"] for a in alerts] == ["Brute Then Success"]
+    # Сэмплы родителя разворачиваются в реальные события тихого звена.
+    full = store.get_alert(alerts[0]["alert_id"])
+    assert any(e.get("IpAddress") == "10.0.0.1" for e in full["sample_events"])
+
+
+def test_condition_neq_is_evaluated():
+    """neq принимается валидацией - значит обязан и считаться (раньше молча давал False)."""
+    assert correlation._condition_met({"neq": 3}, 5)
+    assert not correlation._condition_met({"neq": 5}, 5)
+
+
+def test_sequence_matches_order_treats_equal_timestamps_as_one_step():
+    """Секундная точность TimeCreated: 'процесс' и 'его соединение' в одной секунде, SQL отдаёт
+    их в произвольном порядке - ничья не должна ломать temporal_ordered."""
+    t = "2024-01-01T00:00:01"
+    assert correlation._sequence_matches_order([("B", t), ("A", t)], ["A", "B"])
+    assert correlation._sequence_matches_order([("A", "2024-01-01T00:00:00"), ("C", t), ("B", t)], ["A", "B", "C"])
+    # Реальное опережение по-прежнему отвергается.
+    assert not correlation._sequence_matches_order([("B", "2024-01-01T00:00:00"), ("A", t)], ["A", "B"])
 
 
 def test_active_hit_spec_collects_group_by_and_value_count_field(monkeypatch):

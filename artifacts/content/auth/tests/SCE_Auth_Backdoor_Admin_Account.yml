@@ -1,0 +1,30 @@
+scenario: SCE_Auth_Backdoor_Admin_Account
+cases:
+  - name: positive_create_then_add_to_administrators
+    expect_incidents: [auth_backdoor_admin_account]
+    events:
+      - event: {EventID: 4720, Channel: Security, TargetUserName: support_x, TargetSid: "S-1-5-21-1-2-3-1010", SubjectUserName: workstation_x}
+      - at: 120
+        event: {EventID: 4732, Channel: Security, TargetUserName: Администраторы, TargetSid: "S-1-5-32-544", MemberSid: "S-1-5-21-1-2-3-1010", SubjectUserName: workstation_x}
+  - name: negative_added_to_users_group
+    expect_incidents: []
+    events:
+      - event: {EventID: 4720, Channel: Security, TargetUserName: support_x, TargetSid: "S-1-5-21-1-2-3-1010", SubjectUserName: workstation_x}
+      - at: 120
+        event: {EventID: 4732, Channel: Security, TargetUserName: Пользователи, TargetSid: "S-1-5-32-545", MemberSid: "S-1-5-21-1-2-3-1010", SubjectUserName: workstation_x}
+  - name: negative_admin_membership_before_creation
+    expect_incidents: []
+    events:
+      - event: {EventID: 4732, Channel: Security, TargetUserName: Администраторы, TargetSid: "S-1-5-32-544", MemberSid: "S-1-5-21-1-2-3-1001", SubjectUserName: workstation_x}
+      - at: 600
+        event: {EventID: 4720, Channel: Security, TargetUserName: support_x, TargetSid: "S-1-5-21-1-2-3-1010", SubjectUserName: workstation_x}
+  - name: negative_beyond_timespan
+    expect_incidents: []
+    events:
+      - event: {EventID: 4720, Channel: Security, TargetUserName: support_x, TargetSid: "S-1-5-21-1-2-3-1010", SubjectUserName: workstation_x}
+      - at: 4000
+        event: {EventID: 4732, Channel: Security, TargetUserName: Администраторы, TargetSid: "S-1-5-32-544", MemberSid: "S-1-5-21-1-2-3-1010", SubjectUserName: workstation_x}
+lab:
+  - 'net user support_x P@ssw0rd123 /add'
+  - 'net localgroup Администраторы support_x /add'
+  - 'net user support_x /delete'

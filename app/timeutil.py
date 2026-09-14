@@ -44,7 +44,8 @@ def normalize_event_time(value: str | None) -> str | None:
 
     Понимает всё, что реально приходит от источников: "YYYY-MM-DD HH:MM:SS[.fff]" (EVTX через
     Zircolite - пробел, без зоны), ISO с "T" и суффиксом "Z" (Sysmon/JSON), ISO со смещением
-    ("+03:00" - будущий форвардер с ВМ, Этап 5), ISO без зоны. Aware-значения переводятся в UTC
+    ("+03:00" - будущий форвардер с ВМ, Этап 5), ISO без зоны, и "YYYY-MM-DD HH:MM:SS +0300" -
+    TimeCreated от Fluent Bit winevtlog (пробел ПЕРЕД смещением). Aware-значения переводятся в UTC
     и теряют tzinfo; naive считаются УЖЕ UTC (единственное возможное допущение - зоны в метке
     нет и взять её неоткуда).
 
@@ -58,7 +59,9 @@ def normalize_event_time(value: str | None) -> str | None:
     if not raw:
         return value
     try:
-        dt = datetime.fromisoformat(raw.replace(" ", "T"))
+        # Только ПЕРВЫЙ пробел (дата/время) - второй, перед смещением у TimeCreated Fluent Bit,
+        # fromisoformat понимает сам; замена всех пробелов давала "…T02:08:49T+0300" и фолбэк.
+        dt = datetime.fromisoformat(raw.replace(" ", "T", 1))
     except ValueError:
         return raw.replace(" ", "T").replace("Z", "")
     if dt.tzinfo is not None:

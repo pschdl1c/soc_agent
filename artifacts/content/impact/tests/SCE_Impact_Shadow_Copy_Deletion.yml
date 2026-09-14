@@ -1,0 +1,12 @@
+scenario: SCE_Impact_Shadow_Copy_Deletion
+cases:
+  - name: positive_wmic_shadowcopy_delete
+    expect_incidents: [impact_shadow_copy_deletion]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wbem\WMIC.exe', OriginalFileName: wmic.exe, CommandLine: 'wmic shadowcopy delete /nointeractive', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_shadow_creation
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wbem\WMIC.exe', OriginalFileName: wmic.exe, CommandLine: 'wmic shadowcopy call create Volume=C:\', ParentImage: 'C:\Windows\System32\cmd.exe'}
+lab:
+  - 'Только на снимке ВМ: wmic shadowcopy delete /nointeractive'

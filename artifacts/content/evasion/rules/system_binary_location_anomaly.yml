@@ -1,0 +1,53 @@
+title: System File Execution Location Anomaly
+id: eac1a118-1b00-4b03-9702-ca506568afef
+name: evasion_system_exe_location_anomaly
+related:
+    -   id: be58d2e2-06c8-4f58-b666-b99f6dc3b6cd
+        type: derived
+    -   id: e4a6b256-3e47-40fc-89d2-7a477edd6915
+        type: derived
+status: test
+description: Detects the execution of a Windows system binary that is usually located in the system folder from an uncommon location.
+references:
+    - https://twitter.com/GelosSnake/status/934900723426439170
+    - https://asec.ahnlab.com/en/39828/
+    - https://www.splunk.com/en_us/blog/security/inno-setup-malware-redline-stealer-campaign.html
+author: Florian Roth (Nextron Systems), Patrick Bareiss, Anton Kutepov, oscd.community, Nasreddine Bencherchali (Nextron Systems), ET, Claude
+date: '2017-11-27'
+modified: '2026-09-14'
+tags:
+    - attack.stealth
+    - attack.t1036
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection:
+        Image|endswith|expand: '%evasion_system_exe_location_anomaly_image%'
+    filter_main_generic:
+        Image|startswith|expand: '%evasion_system_exe_location_anomaly_image2%'
+    filter_optional_system32:
+        Image|contains: \SystemRoot\System32\
+    filter_main_powershell:
+        Image|contains:
+            - C:\Program Files\PowerShell\7\
+            - C:\Program Files\PowerShell\7-preview\
+            - C:\Program Files\WindowsApps\Microsoft.PowerShellPreview
+            - \AppData\Local\Microsoft\WindowsApps\Microsoft.PowerShellPreview
+        Image|endswith: \pwsh.exe
+    filter_main_wsl_programfiles:
+        Image|startswith:
+            - C:\Program Files\WindowsApps\MicrosoftCorporationII.WindowsSubsystemForLinux
+            - C:\Program Files\WSL\
+        Image|endswith: \wsl.exe
+    filter_main_wsl_appdata:
+        Image|startswith: C:\Users\
+        Image|contains: \AppData\Local\Microsoft\WindowsApps\
+        Image|endswith: \wsl.exe
+    condition: guard_logsource and (selection and not 1 of filter_main_* and not 1 of filter_optional_*)
+falsepositives:
+    - Unknown
+level: high

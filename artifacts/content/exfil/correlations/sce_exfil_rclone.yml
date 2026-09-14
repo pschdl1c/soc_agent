@@ -1,0 +1,27 @@
+title: SCE_Exfil_Rclone
+id: e52123fc-c500-4f78-aebc-ea168c2161ba
+name: sce_exfil_rclone
+status: experimental
+description: |
+    rclone ran on the host with cloud remote, copy/sync or credential options - the tool of choice
+    for bulk exfiltration to cloud storage in ransomware operations.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.exfiltration
+    - attack.t1567.002
+correlation:
+    type: event_count
+    rules:
+        - exfil_rclone
+    group-by:
+        - Computer
+    timespan: 1h
+    condition:
+        gte: 1
+    incident:
+        type: exfil_rclone
+        severity: high
+falsepositives:
+    - Sanctioned backups with rclone
+level: high

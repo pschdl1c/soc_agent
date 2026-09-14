@@ -1,0 +1,16 @@
+scenario: SCE_TH_Evasion_Masquerading
+cases:
+  - name: positive_svchost_from_public
+    expect_incidents: [th_evasion_masquerading]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\svchost.exe', OriginalFileName: '-', CommandLine: 'C:\Users\Public\svchost.exe -k netsvcs', ParentImage: 'C:\Windows\explorer.exe'}
+  - name: positive_renamed_cmd
+    expect_incidents: [th_evasion_masquerading]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\updater.exe', OriginalFileName: Cmd.Exe, CommandLine: 'updater.exe /c whoami', ParentImage: 'C:\Windows\explorer.exe'}
+  - name: negative_genuine_svchost
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\svchost.exe', OriginalFileName: svchost.exe, CommandLine: 'C:\Windows\system32\svchost.exe -k netsvcs -p', ParentImage: 'C:\Windows\System32\services.exe'}
+lab:
+  - 'Copy-Item C:\Windows\System32\cmd.exe C:\Users\Public\updater.exe; C:\Users\Public\updater.exe /c whoami; Remove-Item C:\Users\Public\updater.exe'

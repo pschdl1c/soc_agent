@@ -134,10 +134,13 @@ base-ссылки) молча пропадает целиком (Этап A до
 
 `_validate_correlation_doc` на сохранении дополнительно проверяет:
 - разрешимость КАЖДОЙ ссылки `correlation.rules` по `ref_index` (см. `build_ref_index`):
-  неизвестное имя → `RuleValidationError` с перечислением доступных имён рулсета. Ссылки
-  резолвятся только внутри своего рулсета; при загрузке пака в индекс дополнительно входят
-  документы самого файла. Без этой проверки правило сохранялось успешно и молча выпадало из
-  `load_correlation_rules` — корреляция никогда не срабатывала;
+  неизвестное имя → `RuleValidationError` с перечислением доступных имён. Ссылки резолвятся по
+  ВСЕМ custom-рулсетам (`_scan_custom_rules` → `_ref_entry_index`; неоднозначный ключ выкидывается);
+  при загрузке пака в индекс дополнительно входят документы самого файла. Без этой проверки правило
+  сохранялось успешно и молча выпадало из `load_correlation_rules` — корреляция никогда не срабатывала;
+- глобальную уникальность `title` и `name` среди всех своих правил (`_check_global_uniqueness`):
+  `title` — ключ `rule_hits`, `name` — ключ ссылки. Документ с тем же `id`, что у владельца, не
+  отклоняется (это то же правило — коллизия по id в `save_ruleset_yaml`); дубль внутри файла — ошибка;
 - блок `correlation.incident`, если задан: `type` обязателен и slug `^[a-z0-9][a-z0-9_]{0,63}$`,
   `severity` из набора `Severity`, `title` непуст;
 - `timespan` не длиннее срока хранения событий: `parse_timespan(timespan) >
@@ -145,8 +148,19 @@ base-ссылки) молча пропадает целиком (Этап A до
   окно корреляции систематически недосчитывало бы, часть его старше ретеншна физически
   удаляется вместе с `events` и осиротевшими `rule_hits` (см. `docs/spec/correlation.md`).
 
+Межрулсетные ссылки на исполнении: `with_dependencies(pairs)` дополняет набор активных правил
+базовыми правилами и корреляциями других рулсетов, на которые (транзитивно) ссылаются активные
+корреляции, — копии с `via_dependency=True`. Зовётся из `main_ruleset.resolve_with_sources()` и
+`main_ruleset.resolve_for(custom-путь)`. Защита ссылок: `delete_custom_rule`/`delete_custom_ruleset`
+и смена `name` в `update_custom_rule` поднимают `CatalogConflict` (HTTP 409, `detail.references`),
+если на объект ссылаются корреляции вне удаляемого набора (`find_referencing_correlations`);
+`force=True` удаляет всё равно. `find_rules_by_titles` — поиск member-правил инцидента по всем рулсетам.
+
+Кэш скана: сигнатура всех файлов правил перепроверяется не чаще раза в `_SCAN_RECHECK_SECONDS` (2 с);
+запись через модуль (`_write_manifest`, удаления) сбрасывает кэш сразу (`invalidate_scan_cache`).
+
 `base_rule_titles` — плоский список (обратная совместимость, используется как OR-список в
-SQL); `base_rule_refs` — параллельный список с `kind`, нужен `app/detection/correlation.py`
+SQL); `base_rule_refs` — параллельный список с `kind` и `ruleset_path`, нужен `app/detection/correlation.py`
 (`active_hit_spec` различает, кому писать `rule_hits`-попадание: `store_events` — для "base",
 сама сработавшая корреляция — для "correlation", см. `docs/spec/correlation.md`). Правило с
 хотя бы одной неразрешённой ссылкой `correlation.rules` пропускается целиком — защитно, для

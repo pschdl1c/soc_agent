@@ -1,0 +1,48 @@
+title: Scheduled Task Creation Via Schtasks.EXE
+id: 3d32dbe5-e359-4a36-a413-9e8d530c78c8
+name: persist_schtasks_creation
+related:
+    -   id: 92626ddd-662c-49e3-ac59-f6535f12d189
+        type: derived
+status: test
+description: Detects the creation of scheduled tasks by user accounts via the "schtasks" utility.
+references:
+    - https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-create
+author: Florian Roth (Nextron Systems), ET, Claude
+date: '2019-01-16'
+modified: '2026-09-14'
+tags:
+    - attack.execution
+    - attack.persistence
+    - attack.privilege-escalation
+    - attack.t1053.005
+    - attack.s0111
+    - car.2013-08-001
+    - stp.1u
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection:
+        Image|endswith: \schtasks.exe
+        CommandLine|contains: ' /create '
+    filter_main_system_user:
+        User|contains:
+            - AUTHORI
+            - AUTORI
+    filter_optional_msoffice:
+        ParentImage:
+            - C:\Program Files\Microsoft Office\root\integration\integrator.exe
+            - C:\Program Files (x86)\Microsoft Office\root\integration\integrator.exe
+        Image:
+            - C:\Windows\System32\schtasks.exe
+            - C:\Windows\SysWOW64\schtasks.exe
+        CommandLine|contains: Microsoft\Office\Office Performance Monitor
+    condition: guard_logsource and (selection and not 1 of filter_main_* and not 1 of filter_optional_*)
+falsepositives:
+    - Administrative activity
+    - Software installation
+level: low

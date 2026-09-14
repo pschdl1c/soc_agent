@@ -1,0 +1,16 @@
+name: persist_run_key_susp_paths
+description: Подозрительные пути в значении Run-ключа (|contains по Details)
+values:
+  - :\Perflogs
+  - ':\ProgramData\'
+  - :\Windows\Temp
+  - :\Temp
+  - \AppData\Local\Temp
+  - \AppData\Roaming
+  - :\$Recycle.bin
+  - :\Users\Default
+  - :\Users\public
+  - '%temp%'
+  - '%tmp%'
+  - '%Public%'
+  - '%AppData%'

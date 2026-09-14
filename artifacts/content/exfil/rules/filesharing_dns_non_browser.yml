@@ -1,0 +1,34 @@
+title: DNS Query To File Sharing Service From Non-Browser Process
+id: 8ecd2a59-fd2d-48b9-82cd-a799c5c2dfb9
+name: exfil_filesharing_dns_non_browser
+related:
+    - id: 7b434893-c57d-4f41-908d-6a17bf1ae98f
+      type: similar
+status: experimental
+description: |
+    A process that is not a browser resolves a file sharing or paste service (value list common_filesharing_domains,
+    the same list SigmaHQ uses in its suspicious-location network rule). Command line tools and implants talk to these
+    services for payload staging and exfiltration; users reach them through browsers.
+references:
+    - https://lolbas-project.github.io/
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.exfiltration
+    - attack.t1567.002
+    - attack.command-and-control
+    - attack.t1102
+logsource:
+    product: windows
+    category: dns_query
+detection:
+    selection:
+        Channel: 'Microsoft-Windows-Sysmon/Operational'
+        EventID: 22
+        QueryName|endswith|expand: '%common_filesharing_domains%'
+    filter_main_browsers:
+        Image|endswith|expand: '%common_browser_images%'
+    condition: selection and not filter_main_browsers
+falsepositives:
+    - Desktop sync clients (Dropbox, MEGAsync) and developer tools pulling from GitHub
+level: low

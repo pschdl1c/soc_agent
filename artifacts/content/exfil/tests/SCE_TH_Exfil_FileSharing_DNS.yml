@@ -1,0 +1,12 @@
+scenario: SCE_TH_Exfil_FileSharing_DNS
+cases:
+  - name: positive_curl_resolves_transfer_sh
+    expect_incidents: [th_exfil_filesharing_dns]
+    events:
+      - event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\curl.exe', QueryName: transfer.sh, QueryStatus: "0"}
+  - name: negative_browser_resolves_pastebin
+    expect_incidents: []
+    events:
+      - event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', QueryName: pastebin.com, QueryStatus: "0"}
+lab:
+  - 'Resolve-DnsName transfer.sh; curl.exe -s -m 3 https://transfer.sh -o NUL'

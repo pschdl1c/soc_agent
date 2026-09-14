@@ -1,0 +1,28 @@
+title: SCE_TH_Exec_Script_Host_Burst
+id: 92215d15-b6af-4935-ada3-808b86e7d209
+name: sce_th_exec_script_host_burst
+status: experimental
+description: |
+    Hunting: three or more script files (js, jse, vbs, vbe, wsf ...) executed via wscript/cscript on
+    one host within 30 minutes - script-based droppers usually chain several stages.
+author: ET, Claude
+date: 2026-09-14
+tags:
+    - attack.execution
+    - attack.t1059.005
+    - attack.t1059.007
+correlation:
+    type: event_count
+    rules:
+        - exec_script_host_file
+    group-by:
+        - Computer
+    timespan: 30m
+    condition:
+        gte: 3
+    incident:
+        type: th_exec_script_host_burst
+        severity: low
+falsepositives:
+    - Logon scripts and administrative VBScript automation
+level: low

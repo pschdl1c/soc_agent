@@ -1,0 +1,48 @@
+title: Schtasks From Suspicious Folders
+id: 38dccb36-cb94-4310-b881-5c60e3953298
+name: persist_schtasks_suspicious_folder
+related:
+    -   id: 8a8379b8-780b-4dbf-b1e9-31c8d112fefb
+        type: derived
+status: test
+description: Detects scheduled task creations that have suspicious action command and folder combinations
+references:
+    - https://symantec-enterprise-blogs.security.com/blogs/threat-intelligence/lazarus-dream-job-chemical
+author: Florian Roth (Nextron Systems), ET, Claude
+date: '2022-04-15'
+modified: '2026-09-14'
+tags:
+    - attack.privilege-escalation
+    - attack.persistence
+    - attack.execution
+    - attack.t1053.005
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    guard_logsource:
+        Channel: Microsoft-Windows-Sysmon/Operational
+        EventID: 1
+    selection_img:
+        -   Image|endswith: \schtasks.exe
+        -   OriginalFileName: schtasks.exe
+    selection_create:
+        CommandLine|contains: ' /create '
+    selection_command:
+        CommandLine|contains:
+            - powershell
+            - pwsh
+            - 'cmd /c '
+            - 'cmd /k '
+            - 'cmd /r '
+            - 'cmd.exe /c '
+            - 'cmd.exe /k '
+            - 'cmd.exe /r '
+    selection_all_folders:
+        CommandLine|contains:
+            - C:\ProgramData\
+            - '%ProgramData%'
+    condition: guard_logsource and (all of selection_*)
+falsepositives:
+    - Unknown
+level: high
