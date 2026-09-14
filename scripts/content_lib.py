@@ -8,7 +8,7 @@ artifacts/content (git - источник правды) против живог�
       <domain>/rules/*.yml               # по одному базовому Sigma-правилу на файл
       <domain>/correlations/*.yml        # корреляции (агрегаторы, промежуточные звенья, SCE_)
       <domain>/tests/*.yml               # фикстуры для test_content.py
-      telemetry/                         # конфиги стенда (Sysmon, Fluent Bit), в SIEM не грузятся
+      telemetry/                         # конфиг Sysmon и схема полей стенда, в SIEM не грузятся
 
 Имя каталога домена = имя custom-рулсета в SIEM. Только stdlib (+PyYAML, уже зависимость проекта).
 """

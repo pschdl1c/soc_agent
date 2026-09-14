@@ -20,7 +20,8 @@
 и закоммичен (`45cb331`). Этап 4 (инциденты: сущности `incidents`/`investigations`, блок
 `correlation.incident`, ручки `/incidents*`, заглушка джобы вердиктов) реализован —
 `docs/spec/incidents.md`. **Текущая итерация — Этап 4.5, детект-контент** (§9 + дорожная карта):
-весь существующий контент тестовый и подлежит замене. AI-агента расследования ещё нет (этап 5).
+первая волна контента написана и проверена синтетикой (`artifacts/content/`); открытые задачи по
+движку, форвардеру, стенду и контенту — **`docs/NEXT_ITERATION.md`**. AI-агента расследования ещё нет (этап 5).
 
 ---
 
@@ -318,6 +319,13 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
     ожидаем и нормален, `O(H)`). Наполнение — чанками через `store.insert_correlation_hits`
     (генератор, не список в памяти) — 10⁷ строк голым списком кортежей исчерпывало бы память
     неприемлемо долго.
+  - `build_agent_installer.py` — собирает `dist/install-soc-agent.ps1`: установщик агента на
+    Windows-хост (`deploy/windows/install-agent.ps1`: аудит, Sysmon, Vector службой, самопроверка)
+    со встроенными `deploy/windows/vector.toml` и `artifacts/content/telemetry/sysmonconfig.xml`.
+    Vector заменил Fluent Bit (проверен на стенде 2026-09-15), см. `docs/guide/windows-agent.md`.
+  - `export_event_fields.py` — выгружает со стенда реальный набор полей по `Channel|EventID` в
+    `artifacts/content/telemetry/event_fields.json` (схема для синтетики `test_content.py`); ключи,
+    не встреченные в выгрузке, переносит из старого файла и помечает в `_legacy_keys`.
   - `deploy_content.py` / `test_content.py` / `content_lib.py` — детект-контент из
     `artifacts/content` (§9). Деплой через HTTP API (value lists → базовые правила → корреляции в
     топологическом порядке → `--prune` → main), идемпотентен. Прогон фикстур: временный источник на
@@ -636,6 +644,9 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
 Пишется ДО агента: агенту нужны настоящие инциденты, а не заглушечные. Соглашения по написанию
 контента — **§9**, читать целиком перед первым правилом.
 
+> **Следующая итерация — `docs/NEXT_ITERATION.md`**: полный список того, что починить в движке и
+> форвардере, проверить на стенде и доделать в контенте. Начинать работу с него.
+
 - ✅ Контент в git: `artifacts/content/<domain>/{rules,correlations,tests}` + `value_lists/` +
   `telemetry/`; деплой `scripts/deploy_content.py`, синтетические фикстуры `scripts/test_content.py`.
 - ✅ 11 доменов-рулсетов (`auth`, `recon`, `execution`, `persistence`, `privesc`, `credaccess`,
@@ -644,10 +655,12 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   зелёные на изолированном экземпляре, реплей реального фона стенда — без ложных `SCE_`.
 - ✅ Движок под контент: межрулсетные ссылки `correlation.rules` + подтягивание зависимостей,
   тихие informational-звенья цепочек, `TimeCreated` как время события, `neq` (см. §8).
-- ✅ Конфиг Sysmon (sysmon-modular balanced + свои include/exclude) и Fluent Bit с новыми каналами
-  и фильтром шума — `artifacts/content/telemetry/`.
-- ⬜ Применить телеметрию на стенде, замерить объём до/после, перегенерировать
-  `telemetry/event_fields.json`.
+- ✅ Конфиг Sysmon (sysmon-modular balanced + свои include/exclude) — `artifacts/content/telemetry/`.
+- ✅ Агент Vector вместо Fluent Bit + подключение хоста одним скриптом (`deploy/windows/`,
+  `scripts/build_agent_installer.py`, `docs/guide/windows-agent.md`): аудит, Sysmon, агент службой;
+  проверен на win10-lab (поля 7045/104/4648, время, недоступность SIEM, перезапуск). Схема полей
+  `telemetry/event_fields.json` перегенерирована со стенда (`scripts/export_event_fields.py`).
+- ⬜ Замерить объём событий на новой телеметрии, сверить конфиг Sysmon со списками утилит.
 - ⬜ Живой прогон сценариев на win10-lab (секции `lab:` фикстур), доводка фильтров по результату.
 - ⬜ Снести старый тестовый контент (рулсет `five-scenarios-v2` в Docker-экземпляре, файлы в корне
   `artifacts/content/`) и задеплоить новый в рабочий экземпляр.
@@ -669,8 +682,9 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   pentest-agent на ВМ с настроенным аудитом, подключённой в SIEM через форвардер
   (`POST /ingest/stream`, см. `docs/guide/forwarder.md`). Windows-половина стенда уже поднята
   и проверена от сети до корреляций — ранбук `docs/guide/windows-vm-lab.md` (Win10 в
-  VirtualBox: аудит по GUID подкатегорий, Sysmon, Fluent Bit с `Event_Data_As_Map`, известные
-  ограничения — `Provider_Name`, точность `event_time`). pentest-agent генерит атаки →
+  VirtualBox, хост подключается скриптом `install-soc-agent.ps1` — аудит, Sysmon, агент Vector,
+  `docs/guide/windows-agent.md`; известные ограничения — `Provider_Name`, время Sysmon 3).
+  pentest-agent генерит атаки →
   инциденты → soc-agent выносит вердикты → сверка. OTRF Security-Datasets остаются только для
   ОФЛАЙН-разработки корреляции/правил, НЕ для прогона агента.
 - **Human-in-the-loop:** аналитик подтверждает/отклоняет вердикт → данные для дообучения промптов.
@@ -747,17 +761,28 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   своё попадание в `rule_hits`, но алерта не создаёт (`correlation.evaluate_batch`). Раньше оно
   пропускалось целиком, и ссылающаяся на него цепочка молча не срабатывала. На этом держатся
   промежуточные звенья и агрегаторы тактик (§9).
-- **Время события — `TimeCreated` (Fluent Bit, `ДАТА ВРЕМЯ ±ЧЧММ`), `EventTime` — только фолбэк**
-  (`fields.TIME_FIELDS`, `timeutil.normalize_event_time` разбирает пробел перед смещением). `EventTime`
-  — время чтения журнала форвардером, на стенде отстаёт на 1–2 с и путал порядок в `temporal_ordered`.
-  Точность `TimeCreated` секундная: `_sequence_matches_order` считает попадания с равной меткой одной
-  ступенью (порядок внутри неё не проверяется) — не возвращай строгий построчный проход.
+- **Время события — `TimeCreated`, `EventTime` — только фолбэк** (`fields.TIME_FIELDS`). Агент Vector
+  шлёт `TimeCreated` ISO UTC с микросекундами (момент записи в журнал); `timeutil.normalize_event_time`
+  понимает и прежний формат Fluent Bit `ДАТА ВРЕМЯ ±ЧЧММ` (пробел перед смещением) — не убирай, на нём
+  старые данные и тесты. `EventTime` — время чтения журнала форвардером, отставал на 1–2 с и путал
+  порядок в `temporal_ordered`. `_sequence_matches_order` считает попадания с равной меткой одной
+  ступенью (порядок внутри неё не проверяется) — не возвращай строгий построчный проход: равные метки
+  дают и другие источники, и секундные форматы. У Sysmon 3 `TimeCreated` отстаёт от `UtcTime` самого
+  события на секунды (сетевые события пишутся пачками) — открытая задача `docs/NEXT_ITERATION.md` §2.
 - **Zircolite строит таблицу флаша из полей событий, и правило, упоминающее поле, которого нет НИ В
   ОДНОМ событии флаша, падает с «no such column» и молча не срабатывает.** Пустую строку Zircolite при
   flatten выбрасывает вместе с полем. На живом потоке это бьёт по полям, которые стек не доставляет
-  вовсе (`Provider_Name`; `ProcessName` у 4648; именованные поля 7045 и System 104 — у них только
-  `StringInserts`): такое правило мертво всегда. Синтетика в `scripts/test_content.py` поэтому
-  дополняет события реальным набором полей стенда (`artifacts/content/telemetry/event_fields*.json`).
+  вовсе (`Provider_Name` — агент шлёт `ProviderName`, `_` режется flatten-ом): такое правило мертво
+  всегда. Синтетика в `scripts/test_content.py` поэтому дополняет события реальным набором полей стенда
+  (`artifacts/content/telemetry/event_fields*.json`, выгрузка — `scripts/export_event_fields.py`).
+- **Формат событий Windows задаёт агент, а не сервер** (`deploy/windows/vector.toml`, VRL
+  `sigma_fields`): поля `EventData`/`UserData` — на верхний уровень под именами `<Data Name>`, системные —
+  в именах Fluent Bit (`EventID`, `Channel`, `Computer`, `ProviderName`, `EventRecordID`...), КРОМЕ
+  `ExecutionProcessID`/`ExecutionThreadID` (у Fluent Bit были `ProcessID`/`ThreadID` и перетирали
+  `ProcessId` Sysmon — колонки SQLite регистронезависимы). Поле данных, совпавшее с системным по имени,
+  получает префикс `EventData`/`UserData` (System 104: `UserDataChannel`). Вложенный `UserData` Vector
+  сам не разбирает — VRL парсит XML события (`include_xml = true`); не выключай, иначе 104/1102
+  приедут без данных. Меняешь набор полей — перегенерируй `event_fields.json`.
 - **ECS-lite колонки `events` (`user_name`/`src_ip`/`dst_ip`/`process`/`event_code`) теперь
   ЧИТАЮТСЯ** — это имена полей фильтра/группировки/сортировки (`filter_lang.ENTITY_COLUMNS`),
   единые для всех источников. Не удаляй их и не оборачивай в `CAST(... AS TEXT)` в новом коде:
@@ -1009,8 +1034,15 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   (имя блока не должно попадать под `selection*`/`filter*` оригинального condition).
 - Process-правила — ТОЛЬКО Sysmon EID 1 (поле `Image`). Близнецы под 4688 (`NewProcessName`) не
   заводим: один запуск даёт два события, `event_count` удваивается, `value_count` по `Image` 4688 не видит.
-- `Provider_Name` не доезжает (Fluent Bit шлёт `ProviderName`, `_` режется flatten-ом) — убирать, роль
-  играет guard. Поля `Initiated`/`DestinationIsIpv6` — числа (`Initiated: 1`, не `'true'`).
+- `Provider_Name` не доезжает (агент шлёт `ProviderName`, `_` режется flatten-ом) — убирать, роль
+  играет guard. Поля `Initiated`/`DestinationIsIpv6` — числа (`Initiated: 1`, не `'true'`): агент
+  переводит `"true"`/`"false"` в boolean, Zircolite хранит их как 1/0.
+- System 7045 (`ServiceName`/`ImagePath`/`StartType`/`AccountName`) и System 104 / Security 1102
+  (`SubjectUserName`, канал очищенного журнала — `UserDataChannel`) приходят с именованными полями
+  (раньше, на Fluent Bit, — только `StringInserts`). Правила на них можно писать; поле `Channel` у 104
+  — канал самой записи (`System`), не очищенного журнала.
+- Системный PID записи — `ExecutionProcessID`, не `ProcessID`; `ProcessId` в правиле — поле события
+  (Sysmon, 4624/4688/4648).
 - Стенд на русской Windows: SID вместо имён групп (`S-1-5-32-544`), `User|contains: [AUTHORI, AUTORI]`
   для SYSTEM, локализованные имена добавлять вторым значением.
 - Поле, которого стек не доставляет, делает правило мёртвым молча (§8, «no such column») — сверять
@@ -1114,8 +1146,11 @@ detection:
 
 ### Что реально доступно на стенде (ограничивает, какой контент вообще тестируем)
 
-Замер на `win10-lab` (Fluent Bit → `/ingest/stream`, каналы `Security`, Sysmon/Operational,
-PowerShell/Operational, System). Цифра «правил» — сколько записей `rules_windows_merged.json`
+Первый замер объёма — на `win10-lab` со старой телеметрией (Fluent Bit, конфиг Sysmon SwiftOnSecurity,
+каналы `Security`, Sysmon/Operational, PowerShell/Operational, System). С 2026-09-15 стенд на новой
+телеметрии (агент Vector, `telemetry/sysmonconfig.xml`, плюс Defender/WMI-Activity/TaskScheduler/
+Bits-Client) — колонка «приезжает» ниже обновлена по фактическим событиям, объём заново не замерялся
+(`docs/NEXT_ITERATION.md` §2). Цифра «правил» — сколько записей `rules_windows_merged.json`
 (4291 шт.) ссылается на этот EventID, как ориентир ценности:
 
 | EventID | приезжает | правил | замечание |
@@ -1125,11 +1160,16 @@ PowerShell/Operational, System). Цифра «правил» — сколько 
 | 4104 / 4103 | да | 166 / 33 | PowerShell ScriptBlock |
 | 4624 / 4625 | да | 15 / 5 | только с фильтрами выше |
 | Sysmon 22 / 12 / 3 | да, мало | 29 / 57 / 55 | DNS, реестр, сеть |
-| 4697 / 7045 | да, мало | 22 / 48 | установка служб |
-| Sysmon 7 / 10 / 17 / 18 / 23 | **НЕТ** | 114 / 25 / 19 / 19 / 13 | зарезаны конфигом SwiftOnSecurity; 10 (доступ к lsass) и 17/18 (named pipe, C2) нужны под adversarial-контур — включать точечно |
+| 4697 / 7045 | да, мало | 22 / 48 | установка служб; 7045 теперь с именованными полями |
+| System 104 / Security 1102 | да (104 проверен) | — | очистка журналов, поля из `UserData` |
+| Sysmon 7 / 10 / 16 / 17 / 26 / 29 | да (новый конфиг) | 114 / 25 / — / 19 / — / — | 10 — доступ к процессам (lsass), 17 — named pipe |
+| Sysmon 8 / 18 / 19–21 / 23 | не встречались | — / 19 / — / 13 | конфиг включает, на стенде ещё не было активности — проверить при живом прогоне |
+| Defender 5007, WMI-Activity 5857, Bits-Client | да | — | новые каналы |
 | 4657 | **НЕТ** | 268 | требует SACL на ветках реестра, на практике не настраивают; Sysmon 13 закрывает то же |
-| 4689 / 4673 / 4672 / 5379 | да, шумно | 0 / 1 / 0 / 3 | чистый шум, ~19% объёма; гасится двумя подкатегориями `auditpol` (см. ранбук) |
+| 4673 / 4674 / 5379 | не доезжают | 1 / — / 3 | чистый шум (было ~19% объёма): отсекается в агенте (`ignore_event_ids`) |
+| 4689 | нет | 0 | подкатегория выключена установщиком |
 
-Практический вывод: писать контент можно сразу по process/PowerShell/auth/registry; под
-lateral movement и credential access сначала расширить конфиг Sysmon (10/17/18), иначе правила
-будут заведомо мёртвыми.
+Практический вывод: process/PowerShell/auth/registry/services/log clearing — пиши контент; Sysmon
+10/17 доезжают, но FP-доводка правил на них — после живого прогона. Известная дыра: ProcessCreate
+Sysmon пишется не для всех утилит (`hostname.exe` только в 4688) — сверка конфига с value lists в
+`docs/NEXT_ITERATION.md` §2.

@@ -1,0 +1,136 @@
+# Агент soc_agent на Windows-хосте: Vector (windows_event_log) -> /ingest/stream.
+# Шаблон: install-agent.ps1 подставляет __DATA_DIR__, __LOG_DIR__, __SIEM_URL__, __TOKEN__ и кладёт результат в
+# C:\ProgramData\soc-agent\vector.toml (ACL: SYSTEM + Administrators - в файле токен).
+#
+# Контракт с сервером НЕ меняется: плоское JSON-событие, имена полей = имена <Data Name=...> из XML
+# события (ровно их ждут Sigma-правила), системные поля - в тех же именах, что слал Fluent Bit.
+# Отличия от Fluent Bit (намеренные, см. docs/guide/windows-agent.md):
+#   * ExecutionProcessID/ExecutionThreadID вместо ProcessID/ThreadID - иначе системный PID
+#     перетирал EventData-поле ProcessId (колонки SQLite регистронезависимы);
+#   * TimeCreated - ISO UTC с микросекундами (у Fluent Bit была секундная точность);
+#   * поле EventData/UserData, совпавшее по имени с системным, получает префикс
+#     EventData/UserData (System 104: Channel очищенного журнала -> UserDataChannel).
+
+data_dir = "__DATA_DIR__"
+
+[sources.winlog]
+type = "windows_event_log"
+# Defender - SCE_Evasion_Defender_Tampering (5001/5007), угрозы (1116/1117)
+# WMI-Activity - WMI-персистентность дополнительно к Sysmon 19-21
+# TaskScheduler, Bits-Client - контекст для расследования
+channels = [
+  "Security",
+  "System",
+  "Microsoft-Windows-Sysmon/Operational",
+  "Microsoft-Windows-PowerShell/Operational",
+  "Microsoft-Windows-Windows Defender/Operational",
+  "Microsoft-Windows-WMI-Activity/Operational",
+  "Microsoft-Windows-TaskScheduler/Operational",
+  "Microsoft-Windows-Bits-Client/Operational",
+]
+read_existing_events = false
+# Локализованный текст сообщения не нужен правилам и удваивает объём.
+render_message = false
+# XML нужен только для UserData: Vector разбирает там лишь <Data Name=...>, а у System 104 /
+# Security 1102 данные вложены (<UserData><LogFileCleared><SubjectUserName>) и приходят пустой картой.
+# Разбор - в sigma_fields, наружу поле xml не уходит.
+include_xml = true
+# Шум без ценности для детекта и расследования (замер на стенде - ~20% объёма):
+#   4673/4674 - использование конфиденциальных прав, 5379 - чтение Credential Manager.
+# Номера не пересекаются с EventID других каналов из списка выше.
+ignore_event_ids = [4673, 4674, 5379]
+
+[transforms.sigma_fields]
+type = "remap"
+inputs = ["winlog"]
+drop_on_error = false
+source = '''
+ts = .timestamp
+if !is_timestamp(ts) { ts = now() }
+
+out = compact({
+  "EventID": .event_id,
+  "Channel": .channel,
+  "Computer": .computer,
+  "ProviderName": .provider_name,
+  "ProviderGuid": .provider_guid,
+  "EventRecordID": .record_id,
+  "Level": .level_value,
+  "Task": .task,
+  "Opcode": .opcode,
+  "Keywords": .keywords,
+  "Version": .version,
+  "Qualifiers": .qualifiers,
+  "ActivityID": .activity_id,
+  "RelatedActivityID": .related_activity_id,
+  "UserID": .user_id,
+  "ExecutionProcessID": .process_id,
+  "ExecutionThreadID": .thread_id,
+  "TimeCreated": format_timestamp!(ts, format: "%Y-%m-%dT%H:%M:%S%.6fZ"),
+})
+system_names = map_values(keys(out)) -> |k| { downcase(k) }
+
+event_data = object(.event_data) ?? {}
+for_each(event_data) -> |name, value| {
+  key = name
+  if includes(system_names, downcase(name)) { key = "EventData" + name }
+  # Типизированные boolean-поля (Sysmon Initiated/DestinationIsIpv6) - как у Fluent Bit.
+  if value == "true" { value = true } else if value == "false" { value = false }
+  out = set!(out, [key], value)
+}
+
+# UserData: <Data Name=...> от Vector + вложенные элементы из XML (их Vector не разбирает).
+# Берём последний сегмент пути, как Zircolite делает для неотмапленных вложенных полей;
+# атрибуты (@xmlns) пропускаем.
+user_data = flatten(object(.user_data) ?? {})
+xml_text = string(.xml) ?? ""
+if contains(xml_text, "<UserData>") {
+  parsed, xml_err = parse_xml(xml_text, parse_bool: false, parse_null: false, parse_number: false)
+  if xml_err == null {
+    user_data = merge(user_data, flatten(object(parsed.Event.UserData) ?? {}))
+  }
+}
+for_each(user_data) -> |path, value| {
+  segments = split(path, ".")
+  name = string(segments[-1]) ?? path
+  if name == "text" && length(segments) > 1 { name = string(segments[-2]) ?? name }
+  if !starts_with(name, "@") {
+    key = name
+    if includes(system_names, downcase(name)) { key = "UserData" + name }
+    out = set!(out, [key], value)
+  }
+}
+
+# Классические провайдеры без имён у <Data> - позиционный массив, как у Fluent Bit.
+if length(event_data) == 0 && length(user_data) == 0 && exists(.string_inserts) {
+  out.StringInserts = .string_inserts
+}
+
+. = out
+'''
+
+[sinks.siem]
+type = "http"
+inputs = ["sigma_fields"]
+uri = "__SIEM_URL__/ingest/stream"
+method = "post"
+encoding.codec = "json"
+framing.method = "newline_delimited"
+auth.strategy = "bearer"
+auth.token = "__TOKEN__"
+batch.max_events = 500
+batch.timeout_secs = 2
+# Дисковый буфер: SIEM недоступен / хост перезагрузился - события не теряются.
+buffer.type = "disk"
+buffer.max_size = 536870912
+buffer.when_full = "block"
+
+# Собственные логи агента: у службы нет консоли, без этого диагностика пропадает.
+[sources.agent_logs]
+type = "internal_logs"
+
+[sinks.agent_log_file]
+type = "file"
+inputs = ["agent_logs"]
+path = "__LOG_DIR__/vector-%Y-%m-%d.log"
+encoding.codec = "text"

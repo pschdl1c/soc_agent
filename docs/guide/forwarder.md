@@ -2,8 +2,9 @@
 
 Мини-SIEM принимает события с Windows/Unix хостов по HTTP через один endpoint
 `POST /ingest/stream`. Endpoint **агностик к продукту** — подойдёт любой форвардер,
-умеющий слать JSON по HTTP с настраиваемым HTTP-заголовком (для токена): Fluent Bit, NXLog,
-Winlogbeat→Logstash, Vector, самописный скрипт, `curl`.
+умеющий слать JSON по HTTP с настраиваемым HTTP-заголовком (для токена): Vector, Fluent Bit,
+NXLog, Winlogbeat→Logstash, самописный скрипт, `curl`. Для Windows-хостов проект поставляет
+готовый установщик агента на Vector — [`windows-agent.md`](./windows-agent.md).
 
 ## Как это работает (кратко)
 
@@ -79,47 +80,47 @@ curl -X POST 'http://SIEM_HOST:8000/ingest/stream' \
 Через ≤ `SIEM_INGEST_FLUSH_INTERVAL` секунд события появятся в `/batches` под именем источника
 и во вкладке «События».
 
-## Fluent Bit (Windows и Linux)
+## Windows — агент Vector (рекомендуемый путь)
 
-Лёгкий, кроссплатформенный, нативный JSON, HTTP-output. Читает Windows Event Log и
-Linux auditd/syslog.
+Windows-хост подключается одним скриптом `install-soc-agent.ps1`: аудит, Sysmon и агент
+**Vector** (`windows_event_log` → VRL → `http`) службой `soc-agent`. Установка, формат событий,
+чек-лист проверки — [`windows-agent.md`](./windows-agent.md); стенд в VirtualBox —
+[`windows-vm-lab.md`](./windows-vm-lab.md).
 
-**Windows — Security/Sysmon → SIEM:**
-```ini
-[INPUT]
-    Name                    winevtlog
-    Channels                Security,Microsoft-Windows-Sysmon/Operational
-    Read_Existing_Events    false
-    Event_Data_As_Map       true
-    String_Inserts          false
-    Ignore_Missing_Channels true
-    DB                      C:\ProgramData\fluent-bit\winevtlog.sqlite
+Почему Vector: он разбирает XML события, и имена полей берутся из `<Data Name=...>` — ровно те,
+что ждут Sigma-правила, включая классические провайдеры (System 7045) и `UserData` (System 104,
+Security 1102). Fluent Bit `winevtlog` берёт имена из метаданных провайдера и для таких событий
+отдаёт позиционный `StringInserts` без имён — чинить пришлось бы Lua-фильтрами.
 
-[OUTPUT]
-    Name             http
-    Match            *
-    Host             SIEM_HOST
-    Port             8000
-    URI              /ingest/stream
-    Format           json_lines
-    Header           Authorization Bearer <TOKEN>
-    json_date_key    EventTime
-    json_date_format iso8601
+Ключевое из `deploy/windows/vector.toml`:
+
+```toml
+[sources.winlog]
+type = "windows_event_log"
+channels = ["Security", "System", "Microsoft-Windows-Sysmon/Operational", "..."]
+render_message = false
+include_xml = true                      # только ради разбора вложенного UserData
+ignore_event_ids = [4673, 4674, 5379]   # шум
+
+[transforms.sigma_fields]               # плоский JSON с именами Sigma, см. windows-agent.md
+type = "remap"
+
+[sinks.siem]
+type = "http"
+uri = "http://SIEM_HOST:8000/ingest/stream"
+encoding.codec = "json"
+framing.method = "newline_delimited"    # NDJSON
+auth.strategy = "bearer"
+auth.token = "<TOKEN>"
+buffer.type = "disk"                    # SIEM недоступен - события копятся и досылаются
 ```
 
-> **`Event_Data_As_Map true` обязателен, и он требует Fluent Bit ≥ 4.2.8 / 5.0.10.** Без него
-> `winevtlog` отдаёт `EventData` позиционным массивом `StringInserts` **без имён полей** — то
-> есть `CommandLine`, `Image`, `NewProcessName`, `TargetUserName` в событии не появляются
-> вообще, и Sigma-правила молча не срабатывают: события идут, алертов ноль. Вложенную карту
-> `EventData.CommandLine` Zircolite при flatten схлопывает до `CommandLine` — ровно к тому
-> имени, которое ждут правила.
->
-> Время события берётся из родного `TimeCreated` (`2026-09-07 08:00:39 +0300`, момент события
-> у источника, первым в `TIME_FIELDS`). `json_date_key EventTime` остаётся фолбэком: это момент
-> ЧТЕНИЯ журнала форвардером, он отстаёт на 1–2 с.
->
-> Полная пошаговая настройка Windows-стенда (аудит, Sysmon, сеть ВМ, проверка детекта) —
-> [`windows-vm-lab.md`](./windows-vm-lab.md).
+Время события — `TimeCreated` (ISO UTC с микросекундами, момент записи в журнал), первым в
+`TIME_FIELDS`.
+
+## Fluent Bit (Linux)
+
+Для Windows не используем (см. выше). На Linux — лёгкий вариант для auditd/syslog.
 
 **Linux — auditd/syslog → SIEM:**
 ```ini
@@ -170,7 +171,9 @@ Linux auditd/syslog.
   источника» выше); события без валидного токена отбрасываются с `401`. Токен хранится в БД
   только хэшем. **HTTPS** endpoint сам не терминирует — за пределами localhost ставьте перед
   сервисом reverse-proxy с TLS, иначе токен идёт по сети открытым.
-- **Надёжность доставки.** У форвардеров есть буфер/ретраи (Fluent Bit `storage`, NXLog buffer) —
-  включите их, чтобы не терять события при недоступности SIEM.
+- **Надёжность доставки.** У форвардеров есть буфер/ретраи (Vector `buffer.type = "disk"`, Fluent Bit
+  `storage`, NXLog buffer) — включите их, чтобы не терять события при недоступности SIEM. Агент
+  Vector из установщика это делает; проверено на стенде: 5 минут без SIEM — всё накопленное
+  доехало без потерь и дублей.
 - **Бэкпрешер.** При переполнении внутренней очереди endpoint вернёт `503` — форвардер должен
   ретраить. Тюньте `SIEM_INGEST_BATCH_SIZE` / `SIEM_INGEST_FLUSH_INTERVAL` под свой поток.
