@@ -18,6 +18,14 @@ cases:
     expect_incidents: []
     events:
       - event: {EventID: 10, Channel: Microsoft-Windows-Sysmon/Operational, SourceImage: 'C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.26080.3-0\MsMpEng.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1fffff', CallTrace: 'C:\Windows\SYSTEM32\ntdll.dll+9d204'}
+  - name: positive_unknown_tool_suspicious_access_flags
+    expect_incidents: [cred_lsass_dump]
+    events:
+      - event: {EventID: 10, Channel: Microsoft-Windows-Sysmon/Operational, SourceImage: 'C:\Users\Public\svc_helper.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1438', CallTrace: 'C:\Windows\SYSTEM32\ntdll.dll+9d204|C:\Windows\System32\KERNELBASE.dll+2c13e|UNKNOWN(00007FF6A1B21234)'}
+  - name: positive_tool_with_dump_in_name
+    expect_incidents: [cred_lsass_dump]
+    events:
+      - event: {EventID: 10, Channel: Microsoft-Windows-Sysmon/Operational, SourceImage: 'C:\Program Files\MemDumper\memdumper.exe', TargetImage: 'C:\Windows\system32\lsass.exe', GrantedAccess: '0x1fffff', CallTrace: 'C:\Windows\SYSTEM32\ntdll.dll+9d204'}
   - name: negative_procdump_other_process
     expect_incidents: []
     events:

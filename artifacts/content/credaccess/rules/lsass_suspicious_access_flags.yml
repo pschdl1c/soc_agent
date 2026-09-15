@@ -16,7 +16,7 @@ references:
     - https://web.archive.org/web/20230420013146/http://security-research.dyndns.org/pub/slides/FIRST2017/FIRST-2017_Tom-Ueltschi_Sysmon_FINAL_notes.pdf
 author: Florian Roth, Roberto Rodriguez, Dimitrios Slamaris, Mark Russinovich, Thomas Patzke, Teymur Kheirkhabarov, Sherif Eldeeb, James Dickenson, Aleksey Potapov, oscd.community, ET, Claude
 date: '2021-11-22'
-modified: '2026-09-14'
+modified: '2026-09-16'
 tags:
     - attack.credential-access
     - attack.t1003.001
@@ -31,8 +31,8 @@ detection:
     selection_target:
         TargetImage|endswith: \lsass.exe
     selection_access:
-        -   GrantedAccess|endswith|expand: '%cred_lsass_susp_access_flags_grantedaccess%'
-        -   GrantedAccess|startswith|expand: '%cred_lsass_susp_access_flags_grantedaccess2%'
+        -   GrantedAccess|endswith|expand: '%cred_lsass_read_access_suffixes%'
+        -   GrantedAccess|startswith|expand: '%cred_lsass_read_access_masks%'
     filter_main_generic:
         SourceImage|contains:
             - :\Program Files (x86)\

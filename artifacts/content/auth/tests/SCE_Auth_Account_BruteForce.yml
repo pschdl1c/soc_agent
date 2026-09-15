@@ -1,0 +1,42 @@
+scenario: SCE_Auth_Account_BruteForce
+cases:
+  - name: positive_console_guessing
+    expect_incidents: [auth_account_bruteforce]
+    events:
+      - repeat: 22
+        step: 5
+        event: {EventID: 4625, Channel: Security, LogonType: 2, IpAddress: "-", IpPort: "-", TargetUserName: admin, Status: "0xc000006d", SubStatus: "0xc000006a"}
+  - name: positive_network_logon_without_recorded_address
+    expect_incidents: [auth_account_bruteforce]
+    events:
+      - repeat: 20
+        step: 2
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: "-", TargetUserName: backup_svc, WorkstationName: "-"}
+  - name: negative_user_mistyping
+    expect_incidents: []
+    events:
+      - repeat: 5
+        step: 20
+        event: {EventID: 4625, Channel: Security, LogonType: 2, IpAddress: "-", TargetUserName: workstation_x}
+  - name: negative_failures_spread_over_accounts_below_spray
+    expect_incidents: []
+    events:
+      - repeat: 24
+        step: 5
+        vary:
+          TargetUserName: [alice, bob, carol, dave]
+        event: {EventID: 4625, Channel: Security, LogonType: 2, IpAddress: "-"}
+  - name: negative_service_logon_stale_password
+    expect_incidents: []
+    events:
+      - repeat: 30
+        step: 2
+        event: {EventID: 4625, Channel: Security, LogonType: 5, IpAddress: "-", TargetUserName: sql_svc}
+  - name: negative_network_failures_with_address
+    expect_incidents: [auth_bruteforce]
+    events:
+      - repeat: 25
+        step: 2
+        event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 203.0.113.30, TargetUserName: admin}
+lab:
+  - '1..22 | ForEach-Object { $p = ConvertTo-SecureString "Wrong$_" -AsPlainText -Force; try { Start-Process cmd.exe -Credential (New-Object pscredential "admin", $p) -ArgumentList "/c exit" -ErrorAction Stop } catch {} }'

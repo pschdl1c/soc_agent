@@ -1,0 +1,45 @@
+title: Failed Logon Without Source Address
+id: 7ac9df07-993d-4ef7-9402-16442092e1e2
+name: auth_failed_logon_no_address
+status: experimental
+description: |
+    Failed logon (4625) of a named account that carries no source address: interactive or unlock
+    attempts at the console, RunAs / LogonUser API calls by local tooling, network logons where
+    Windows did not record the client. Complements auth_failed_logon (which requires an address) -
+    one 4625 matches exactly one of the two, so host-wide counts do not double. Service and batch
+    logons (LogonType 4/5) are excluded: a service with a stale password retries forever.
+author: ET, Claude
+date: 2026-09-16
+tags:
+    - attack.credential-access
+    - attack.t1110
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        Channel: Security
+        EventID: 4625
+        LogonType:
+            - 2
+            - 3
+            - 7
+            - 8
+            - 10
+            - 11
+    # Windows пишет в 4625 адрес всегда, при его отсутствии - '-'. Ветку `IpAddress|exists: false`
+    # не заводим: SQL `NOT IpAddress = IpAddress` на NULL не бывает истинным, она мёртвая.
+    selection_no_address:
+        IpAddress:
+            - '-'
+            - ''
+    filter_main_no_account:
+        TargetUserName:
+            - '-'
+            - ''
+    filter_main_machine_account:
+        TargetUserName|endswith: '$'
+    condition: all of selection* and not 1 of filter_main_*
+falsepositives:
+    - Users mistyping passwords at the console
+level: informational

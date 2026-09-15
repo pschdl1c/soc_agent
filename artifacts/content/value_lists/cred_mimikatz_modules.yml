@@ -1,0 +1,13 @@
+name: cred_mimikatz_modules
+description: 'Модули Mimikatz вида модуль:: (|contains по CommandLine)'
+values:
+  - 'rpc::'
+  - 'token::'
+  - 'crypto::'
+  - 'dpapi::'
+  - 'sekurlsa::'
+  - 'kerberos::'
+  - 'lsadump::'
+  - 'privilege::'
+  - 'process::'
+  - 'vault::'

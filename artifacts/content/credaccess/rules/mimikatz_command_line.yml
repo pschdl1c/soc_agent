@@ -31,9 +31,9 @@ detection:
             - DumpCreds
             - mimikatz
     selection_function_names:
-        CommandLine|contains|expand: '%cred_mimikatz_cli_commandline%'
+        CommandLine|contains|expand: '%cred_mimikatz_rare_commands%'
     selection_module_names:
-        CommandLine|contains|expand: '%cred_mimikatz_cli_commandline2%'
+        CommandLine|contains|expand: '%cred_mimikatz_modules%'
     condition: guard_logsource and (1 of selection_*)
 falsepositives:
     - Unlikely

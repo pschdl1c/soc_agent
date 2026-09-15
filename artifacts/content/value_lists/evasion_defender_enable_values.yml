@@ -1,0 +1,11 @@
+name: evasion_defender_enable_values
+description: Параметры реестра Defender, выключающие защиту значением 0 (|endswith по TargetObject)
+values:
+  - \DisallowExploitProtectionOverride
+  - \Features\TamperProtection
+  - \MpEngine\MpEnablePus
+  - \PUAProtection
+  - \Signature Update\ForceUpdateFromMU
+  - \SpyNet\SpynetReporting
+  - \SpyNet\SubmitSamplesConsent
+  - \Windows Defender Exploit Guard\Controlled Folder Access\EnableControlledFolderAccess

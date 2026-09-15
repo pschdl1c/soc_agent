@@ -2,34 +2,33 @@ r"""
 Проверка стейтфул-корреляции (app/detection/correlation.py) через ПОТОКОВЫЙ ingest (/ingest/stream +
 IngestWorker, app/ingest_queue.py) - конкретно то, что раньше не работало: временное окно
 correlation-правила (`timespan: 5m`) шире одного micro-batch flush'а (SIEM_INGEST_FLUSH_INTERVAL,
-дефолт 5с). Скрипт шлёт 10 событий EventID=4625 (провал аутентификации) с одним IpAddress/
-TargetUserName НЕСКОЛЬКИМИ отдельными HTTP-запросами, специально разнесёнными по времени дольше
-flush_interval - события гарантированно попадают в РАЗНЫЕ батчи, и алерт должен появиться только
-если корреляция реально смотрит на уже сохранённые (постоянная таблица events/rule_hits, не
-in-memory Zircolite-БД одного батча) события, а не только на текущий батч.
+дефолт 5с). Скрипт шлёт 20 событий EventID=4625 (провал аутентификации) с одного IpAddress
+НЕСКОЛЬКИМИ отдельными HTTP-запросами, специально разнесёнными по времени дольше flush_interval -
+события гарантированно попадают в РАЗНЫЕ батчи, и инцидент должен появиться только если корреляция
+реально смотрит на уже сохранённые (постоянная таблица events/rule_hits, не in-memory Zircolite-БД
+одного батча) события, а не только на текущий батч.
 
-Только форвард событий - правило (`artifacts/content/windows_bruteforce.yml`) нужно ЗАГРУЗИТЬ И
-ДОБАВИТЬ В ОСНОВНОЙ РУЛСЕТ САМОСТОЯТЕЛЬНО (вкладка «Sigma-правила») ДО запуска - именно основной
-рулсет по умолчанию обрабатывает /ingest/stream (app/rules/main_ruleset.py). Скрипт этим не занимается
-и ничего не пишет в custom_rulesets.
+Правило - сценарий SCE_Auth_BruteForce детект-контента (artifacts/content/auth, 20 отказов с одного
+адреса за 5 минут -> инцидент auth_bruteforce). Контент должен быть задеплоен и включён в основной
+рулсет (scripts/deploy_content.py) - скрипт только шлёт события. Полная проверка контента на
+синтетике - scripts/test_content.py; этот скрипт - ручная проверка одного пути на живом сервере.
 
 Как пользоваться:
-    1. Убедись, что сервис запущен и правило уже в основном рулсете.
+    1. Убедись, что сервис запущен и контент задеплоен.
     2. Вкладка "Источник данных" -> "Создать источник" с именем correlation-stream-test (или
        своим, тогда передай его в --source). Сохрани показанный токен - /ingest/stream без
        него отвечает 401.
     3. python scripts/stream_correlation_test.py --token <токен_источника>
        (или SIEM_INGEST_TOKEN=<токен> python scripts/stream_correlation_test.py)
-       Отправит 10 событий EventID=4625 тремя отдельными запросами с паузами между ними дольше
-       flush_interval, дождётся флаша, поллит /alerts - ожидается алерт "Windows Brute Force -
-       Ten Failures By Source IP And Account" с event_count >= 10.
+       Отправит 20 событий тремя отдельными запросами с паузами дольше flush_interval, дождётся
+       флаша, поллит /incidents - ожидается инцидент auth_bruteforce по хосту прогона.
     4. python scripts/stream_correlation_test.py --token <токен> --negative
-       Контрольный прогон: те же 10 событий, но растянутые ЗА ПРЕДЕЛЫ 5-минутного timespan
-       (40с между событиями, итого 360с > 300с) - алерт с этим rule_title появляться НЕ должен.
+       Контрольный прогон: те же 20 событий, но с шагом 20с (любое 5-минутное окно накрывает
+       не больше 16) - инцидента появляться НЕ должно.
 
-Батчи оседают под меткой источника (его имя); host/ip/user рандомизируются на прогон, поэтому
-разные прогоны не мешают друг другу (проверка алерта фильтруется по host прогона). Удалить всё
-разом - DELETE /batches/{имя_источника} через вкладку "Источник данных".
+Хост и адрес рандомизируются на прогон, поэтому прогоны не мешают друг другу (проверка фильтрует
+инциденты по group_key прогона). Удалить всё разом - DELETE /batches/{имя_источника} через вкладку
+"Источник данных".
 """
 from __future__ import annotations
 
@@ -46,25 +45,25 @@ from uuid import uuid4
 
 DEFAULT_URL = "http://localhost:8000"
 SOURCE_LABEL = "correlation-stream-test"
-TARGET_RULE_TITLE = "Windows Brute Force - Ten Failures By Source IP And Account"
-
-_DOMAIN = "CORP"
-
-
-def _fmt(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+TARGET_INCIDENT_TYPE = "auth_bruteforce"
+EVENT_COUNT = 20
 
 
 def _event(host: str, ip: str, user: str, event_time: datetime) -> dict:
+    # Форма события агента Vector (deploy/windows/vector.toml): Computer, TimeCreated ISO UTC.
     return {
         "EventID": 4625,
         "Channel": "Security",
-        "EventTime": _fmt(event_time),
-        "Hostname": host,
+        "TimeCreated": event_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "Computer": host,
+        "LogonType": 3,
         "IpAddress": ip,
+        "IpPort": "0",
         "TargetUserName": user,
-        "TargetDomainName": _DOMAIN,
+        "TargetDomainName": host,
         "WorkstationName": "ATTACKER-PC",
+        "Status": "0xc000006d",
+        "SubStatus": "0xc000006a",
     }
 
 
@@ -119,7 +118,7 @@ def main() -> None:
                         help=f"имя источника, созданного в UI (default: {SOURCE_LABEL})")
     parser.add_argument(
         "--negative", action="store_true",
-        help="растянуть события ЗА ПРЕДЕЛЫ 5-минутного timespan - алерт не должен появиться",
+        help="растянуть события так, чтобы в 5-минутное окно не попало 20 - инцидента быть не должно",
     )
     args = parser.parse_args()
     if not args.token:
@@ -128,26 +127,18 @@ def main() -> None:
 
     interval = _flush_interval(url)
     pause = interval + 2.0  # с запасом, чтобы гарантированно попасть в РАЗНЫЙ flush
-    step = timedelta(seconds=40 if args.negative else 20)
+    step = timedelta(seconds=20 if args.negative else 12)
 
-    # IP/юзер/хост РАНДОМИЗИРУЮТСЯ на каждый прогон (не фиксированные константы) - иначе
-    # alerts.dedup_key = sha256(rule_id:host:main_entity) (см. app/detection/normalize.py, НЕ включает
-    # source_batch) коллизирует между прогонами скрипта и обычные (не-correlation) алерты просто
-    # инкрементят event_count у алерта ПЕРВОГО прогона вместо создания под новым source_batch -
-    # см. предупреждение в CLAUDE.md "При ручном тестировании alert-дедупликации". Сама
-    # корреляция при этом фактически срабатывает верно - но /alerts?source_batch=<новый прогон>
-    # ложно показывает пусто, потому что алерт остался приписан к source_batch ПЕРВОГО прогона.
     run_id = uuid4().hex[:8]
     source = args.source  # имя зарегистрированного источника (метку выдаёт сервис по токену)
     ip = f"203.0.113.{int(run_id[:2], 16) % 250 + 1}"
-    user = f"user-{run_id}"
-    host = f"WORKSTATION-{run_id}.corp.local"
-    base = datetime.now(timezone.utc)
-    events = [_event(host, ip, user, base + i * step) for i in range(10)]
+    host = f"WS-{run_id.upper()}"
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    events = [_event(host, ip, "administrator", base + i * step) for i in range(EVENT_COUNT)]
 
-    print(f"Отправляю 10 событий EventID=4625 (source={source!r}) тремя батчами, "
+    print(f"Отправляю {EVENT_COUNT} событий EventID=4625 (source={source!r}, host={host}) тремя батчами, "
           f"с паузой {pause:.1f}с (> flush_interval={interval:.1f}с) между ними:")
-    chunks = [events[0:4], events[4:7], events[7:10]]
+    chunks = [events[0:7], events[7:14], events[14:]]
     for i, chunk in enumerate(chunks):
         print(f"Батч {i + 1}/{len(chunks)} ({len(chunk)} событий)")
         _post_stream(url, args.token, chunk)
@@ -156,38 +147,34 @@ def main() -> None:
 
     _wait_for_flush(url)
 
-    print("\nПоллю /alerts...")
+    print("\nПоллю /incidents...")
+    query = urllib.parse.urlencode({"source_batch": source, "incident_type": TARGET_INCIDENT_TYPE, "limit": 500})
     t0 = time.monotonic()
-    alerts: list[dict] = []
-    # source_batch теперь общий для всех прогонов этого источника - изолируем прогон по host
-    # (рандомизирован выше), иначе stale-алерт от прошлого позитивного прогона сломал бы --negative.
+    hit: list[dict] = []
     while time.monotonic() - t0 < 20.0:
-        # /alerts отдаёт обёртку {alerts, total, limit, offset}
-        alerts = _get_json(url, f"/alerts?{urllib.parse.urlencode({'source_batch': source})}")["alerts"]
-        if any(a.get("rule_title") == TARGET_RULE_TITLE and a.get("host") == host for a in alerts):
+        incidents = _get_json(url, f"/incidents?{query}")["incidents"]
+        hit = [i for i in incidents if (i.get("group_key") or {}).get("Computer") == host]
+        if hit:
             break
         time.sleep(1.5)
 
-    hit = [a for a in alerts if a.get("rule_title") == TARGET_RULE_TITLE and a.get("host") == host]
     if args.negative:
         if hit:
-            print(f"\nFAIL: алерт появился, хотя события растянуты за пределы timespan: {hit}")
+            print(f"\nFAIL: инцидент появился, хотя в 5-минутное окно не попадает 20 событий: {hit}")
             sys.exit(1)
-        print(f"\nOK: алерт '{TARGET_RULE_TITLE}' НЕ появился (события за пределами 5-минутного окна).")
+        print(f"\nOK: инцидент {TARGET_INCIDENT_TYPE} по {host} НЕ появился.")
         return
 
     if not hit:
         print(
-            f"\nFAIL: алерт '{TARGET_RULE_TITLE}' не появился. Все алерты source_batch={source}:\n"
-            + "\n".join(f"  - {a.get('rule_title')} event_count={a.get('event_count')}" for a in alerts)
-            + "\n\nПроверь, что правило windows_bruteforce.yml загружено И добавлено в основной "
-            "рулсет (вкладка «Sigma-правила»)."
+            f"\nFAIL: инцидент {TARGET_INCIDENT_TYPE} по {host} не появился. Проверь, что детект-контент "
+            "задеплоен и рулсет auth включён в основной рулсет (scripts/deploy_content.py)."
         )
         sys.exit(1)
 
-    a = hit[0]
-    print(f"\nOK: '{a.get('rule_title')}' event_count={a.get('event_count')} host={a.get('host')} "
-          f"engine={a.get('engine')} source_batch={source}")
+    inc = hit[0]
+    print(f"\nOK: {inc.get('incident_type')} [{inc.get('severity')}] group_key={inc.get('group_key')} "
+          f"alert_count={inc.get('alert_count')} source_batch={source}")
 
 
 if __name__ == "__main__":

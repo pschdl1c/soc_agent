@@ -1,4 +1,4 @@
-title: Eventlog Cleared - System Channel Notice
+title: Eventlog Cleared
 id: 542d1243-06c4-4562-8384-c619052bec4d
 name: evasion_system_log_cleared
 related:
@@ -6,15 +6,15 @@ related:
       type: derived
 status: experimental
 description: |
-    Event 104 in the System channel: an event log was cleared. Adapted for the SIEM: the original keys on
-    Provider_Name and on the Channel value from UserData (the name of the cleared log). On the Fluent Bit stack the
-    first does not arrive and the second collides with the record's own Channel ("System"), so the rule matches every
-    104 in System - which log was cleared is left to the analyst in the raw event.
+    One of the Windows event logs has been cleared (System 104). Adapted for the SIEM: Provider_Name is replaced by the
+    Channel/EventID guard (104 in System is written only by the Eventlog provider); the name of the cleared log arrives
+    from UserData as UserDataChannel, because the record's own Channel ("System") occupies the field name. Core logs
+    are covered by "Important Windows Eventlog Cleared".
 references:
-    - https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-1102
+    - https://twitter.com/deviouspolack/status/832535435960209408
 author: Florian Roth (Nextron Systems), ET, Claude
 date: 2017-01-10
-modified: 2026-09-14
+modified: 2026-09-16
 tags:
     - attack.defense-impairment
     - attack.t1685.005
@@ -26,7 +26,15 @@ detection:
     selection:
         Channel: System
         EventID: 104
-    condition: selection
+    filter_main_covered:
+        UserDataChannel:
+            - Microsoft-Windows-PowerShell/Operational
+            - Microsoft-Windows-Sysmon/Operational
+            - PowerShellCore/Operational
+            - Security
+            - System
+            - Windows PowerShell
+    condition: selection and not 1 of filter_main_*
 falsepositives:
     - Rollout of log collection agents (the setup routine often includes a reset of the local Eventlog)
     - System provisioning (system reset before the golden image creation)

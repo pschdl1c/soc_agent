@@ -16,6 +16,27 @@ cases:
     expect_incidents: []
     events:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wevtutil.exe', OriginalFileName: wevtutil.exe, CommandLine: 'wevtutil qe Security /c:5 /f:text', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_104_core_log
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 104, Channel: System, UserDataChannel: Microsoft-Windows-Sysmon/Operational, SubjectUserName: admin, SubjectDomainName: LAB}
+  - name: positive_104_other_log
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 104, Channel: System, UserDataChannel: Microsoft-Windows-TaskScheduler/Operational, SubjectUserName: admin, SubjectDomainName: LAB}
+  - name: positive_wevtutil_disable_channel
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wevtutil.exe', OriginalFileName: wevtutil.exe, CommandLine: 'wevtutil sl Microsoft-Windows-Sysmon/Operational /e:false', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_wevtutil_resize_and_disable
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wevtutil.exe', OriginalFileName: wevtutil.exe, CommandLine: 'wevtutil sl Security /ms:1048576 /rt:false', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_wevtutil_set_log_size
+    # смена настроек журнала - в детекте, в т.ч. от установщика агента: TP/FP разбирает агент расследования
+    expect_incidents: [evasion_log_cleared]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wevtutil.exe', OriginalFileName: wevtutil.exe, CommandLine: '"C:\Windows\system32\wevtutil.exe" sl Microsoft-Windows-Sysmon/Operational /ms:209715200', ParentImage: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'}
 lab:
   - 'wevtutil cl "Windows PowerShell"'
   - 'Снимок ВМ перед: wevtutil cl Security уничтожит историю аудита стенда'

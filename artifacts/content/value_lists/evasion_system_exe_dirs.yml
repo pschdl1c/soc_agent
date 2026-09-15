@@ -1,0 +1,11 @@
+name: evasion_system_exe_dirs
+description: Системные каталоги, откуда законно запускаются бинарники из evasion_system_exe_names (|startswith по Image)
+values:
+  - C:\$WINDOWS.~BT\
+  - C:\$WinREAgent\
+  - C:\Windows\SoftwareDistribution\
+  - C:\Windows\System32\
+  - C:\Windows\SystemTemp\
+  - C:\Windows\SysWOW64\
+  - C:\Windows\uus\
+  - C:\Windows\WinSxS\

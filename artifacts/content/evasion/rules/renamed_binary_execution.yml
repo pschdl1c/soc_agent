@@ -27,9 +27,9 @@ detection:
         Channel: Microsoft-Windows-Sysmon/Operational
         EventID: 1
     selection:
-        OriginalFileName|expand: '%evasion_renamed_binary_originalfilename%'
+        OriginalFileName|expand: '%evasion_rename_target_ofn%'
     filter:
-        Image|endswith|expand: '%evasion_renamed_binary_image%'
+        Image|endswith|expand: '%evasion_rename_target_images%'
     condition: guard_logsource and (selection and not filter)
 falsepositives:
     - Custom applications use renamed binaries adding slight change to binary name. Typically this is easy to spot and add to whitelist

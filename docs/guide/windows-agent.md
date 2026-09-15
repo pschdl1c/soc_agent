@@ -111,7 +111,9 @@ win10-lab (Windows 10 22H2, VirtualBox), Vector 0.58.0, SIEM на хосте. К
 22/26/29 `TimeCreated` совпадает с `UtcTime` до миллисекунды, у Security/System время записи без изменений). Установка агента
 даёт известные ложные срабатывания от собственных действий установщика: инциденты
 `SCE_Evasion_Telemetry_Tampering` (`sysmon -c`) и `SCE_Evasion_Log_Cleared` (`wevtutil sl` — размеры
-журналов), алерты «Audit Policy Tampering Via Auditpol» (`auditpol /set ... /success:disable`).
+журналов), алерты «Audit Policy Tampering Via Auditpol» (`auditpol /set ... /success:disable`). В контенте
+они намеренно не исключаются: изменение аудита и Sysmon на хосте должно доходить до инцидента, отделять
+плановую установку от атаки — задача агента расследования (CLAUDE.md §9).
 
 Остановка старой службы при переустановке: `sc stop` → ожидание 60 с → завершение процесса службы.
 `Stop-Service` здесь не годится — на зависшей остановке Vector он падал с «Ошибка при остановке службы»

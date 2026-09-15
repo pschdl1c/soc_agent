@@ -4,9 +4,11 @@ name: auth_host_failed_logon_burst
 status: experimental
 description: |
     Intermediate link for the killchain ruleset: 10 or more failed logons against the host within 5
-    minutes, regardless of the source address.
+    minutes, regardless of the source address (failures with and without an address are counted
+    together, one 4625 matches only one of the two base rules).
 author: ET, Claude
 date: 2026-09-14
+modified: 2026-09-16
 tags:
     - attack.credential-access
     - attack.t1110
@@ -14,6 +16,7 @@ correlation:
     type: event_count
     rules:
         - auth_failed_logon
+        - auth_failed_logon_no_address
     group-by:
         - Computer
     timespan: 5m

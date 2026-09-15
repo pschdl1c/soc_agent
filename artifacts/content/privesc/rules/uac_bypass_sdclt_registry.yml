@@ -5,13 +5,16 @@ related:
     -   id: 5b872a46-3b90-45c1-8419-f675db8053aa
         type: derived
 status: test
-description: Detects the pattern of UAC Bypass using registry key manipulation of sdclt.exe (e.g. UACMe 53)
+description: |
+    Detects the pattern of UAC Bypass using registry key manipulation of sdclt.exe (e.g. UACMe 53)
+    Adapted for the SIEM: Sysmon reports writes to HKCU\Software\Classes as HKU\<SID>_Classes\..., so the key suffix starts
+    at "Classes\" - the original "Software\Classes\" suffix never matched Sysmon 13.
 references:
     - https://enigma0x3.net/2017/03/17/fileless-uac-bypass-using-sdclt-exe/
     - https://github.com/hfiref0x/UACME
 author: Omer Yampel, Christian Burkard (Nextron Systems), ET, Claude
 date: '2017-03-17'
-modified: '2026-09-14'
+modified: '2026-09-16'
 tags:
     - attack.privilege-escalation
     - attack.t1548.002
@@ -24,9 +27,9 @@ detection:
         Channel: Microsoft-Windows-Sysmon/Operational
         EventID: 13
     selection1:
-        TargetObject|endswith: Software\Classes\exefile\shell\runas\command\isolatedCommand
+        TargetObject|endswith: Classes\exefile\shell\runas\command\isolatedCommand
     selection2:
-        TargetObject|endswith: Software\Classes\Folder\shell\open\command\SymbolicLinkValue
+        TargetObject|endswith: Classes\Folder\shell\open\command\SymbolicLinkValue
         Details|re: -1[0-9]{3}\\Software\\Classes\\
     condition: guard_logsource and (1 of selection*)
 falsepositives:

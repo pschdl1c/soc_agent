@@ -36,7 +36,7 @@ detection:
     selection_parent:
         ParentImage|endswith: \wbem\WmiPrvSE.exe
     selection_children_1:
-        Image|endswith|expand: '%lateral_wmiprvse_susp_child_image%'
+        Image|endswith|expand: '%lateral_wmi_susp_child_images%'
     selection_children_2:
         Image|endswith: \cmd.exe
         CommandLine|contains:

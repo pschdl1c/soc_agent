@@ -12,6 +12,14 @@ cases:
     expect_incidents: [privesc_getsystem]
     events:
       - event: {EventID: 17, Channel: Microsoft-Windows-Sysmon/Operational, EventType: CreatePipe, Image: 'C:\Users\Public\cp.exe', PipeName: '\coerced\pipe\spoolss'}
+  - name: positive_coercedpotato_exec
+    expect_incidents: [privesc_getsystem]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\CoercedPotato.exe', CommandLine: 'CoercedPotato.exe -p C:\Windows\System32\cmd.exe --exploitId 1', ParentImage: 'C:\Windows\System32\cmd.exe', User: 'NT SERVICE\MSSQLSERVER'}
+  - name: positive_localpotato_exec
+    expect_incidents: [privesc_getsystem]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\victim\lp.exe', CommandLine: 'lp.exe -i C:\Users\victim\evil.dll -o Windows\System32\SprintCSP.dll', ParentImage: 'C:\Windows\System32\cmd.exe'}
   - name: negative_services_child_mpcmdrun
     expect_incidents: []
     events:

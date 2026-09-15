@@ -26,7 +26,7 @@ detection:
     selection:
         TargetImage|endswith: \lsass.exe
         SourceImage|contains: dump
-        GrantedAccess|endswith|expand: '%cred_lsass_access_dump_keyword_grantedaccess%'
+        GrantedAccess|endswith|expand: '%cred_lsass_dump_tool_access_suffixes%'
     condition: guard_logsource and (selection)
 falsepositives:
     - Rare programs that contain the word dump in their name and access lsass

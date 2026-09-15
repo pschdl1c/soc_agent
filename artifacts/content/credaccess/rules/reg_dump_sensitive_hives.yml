@@ -50,7 +50,7 @@ detection:
             - hkey_loca˪_machine
             - hkey_˪oca˪_machine
     selection_cli_hive:
-        CommandLine|contains|expand: '%cred_reg_dump_hives_commandline%'
+        CommandLine|contains|expand: '%cred_sensitive_hive_names%'
     condition: guard_logsource and (all of selection_*)
 falsepositives:
     - Dumping hives for legitimate purpouse i.e. backup or forensic investigation

@@ -1,0 +1,15 @@
+name: exfil_cli_recon_payloads
+description: Команды сбора сведений о системе и чтения файлов, чей вывод отправляют POST-запросом (|contains по CommandLine)
+values:
+  - Get-Content
+  - GetBytes
+  - hostname
+  - ifconfig
+  - ipconfig
+  - netstat
+  - nltest
+  - qprocess
+  - systeminfo
+  - tasklist
+  - ToBase64String
+  - whoami

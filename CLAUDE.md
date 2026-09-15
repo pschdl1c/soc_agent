@@ -19,11 +19,11 @@
 Этап A дорожной карты (§7, движок сценарной корреляции) реализован, проверен на живом сервере
 и закоммичен (`45cb331`). Этап 4 (инциденты: сущности `incidents`/`investigations`, блок
 `correlation.incident`, ручки `/incidents*`, заглушка джобы вердиктов) реализован —
-`docs/spec/incidents.md`. **Текущий этап — 4.5, детект-контент** (§9 + дорожная карта §7): первая
-волна контента написана и проверена синтетикой (`artifacts/content/`), движок доведён под контент,
-телеметрия стенда переведена на эталоны (агент Vector, Sysmon в exclude-режиме ProcessCreate, аудит по
-базовой линии Microsoft) и проверена на win10-lab; открытые задачи — в §7 «Этап 4.5». AI-агента
-расследования ещё нет (этап 5).
+`docs/spec/incidents.md`. **Этап 4.5, детект-контент** (§9 + дорожная карта §7) закрыт по синтетике
+2026-09-16: контент (`artifacts/content/`) покрыт фикстурами на 100% базовых правил, задеплоен в
+Docker-экземпляр; телеметрия стенда — на эталонах (агент Vector, Sysmon в exclude-режиме ProcessCreate,
+аудит по базовой линии Microsoft). Остаётся живой прогон сценариев на win10-lab — по решению
+пользователя, отдельно (§7 «Этап 4.5»). AI-агента расследования ещё нет (этап 5).
 
 ---
 
@@ -313,14 +313,12 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
     через `/ingest/stream`, ждёт флаша `IngestWorker` (поллит `/health?detailed=true` →
     `queue_size`), затем поллит `/alerts?source_batch=...` и печатает сработавшие правила —
     ожидается и builtin-алерт (напр. «HackTool - Mimikatz Execution - Sysmon»), и кастомный.
-  - `stream_correlation_test.py` — проверка стейтфул-корреляции (`app/detection/correlation.py`) именно
-    через `/ingest/stream`: **только форвард событий**, правило (`artifacts/content/
-    windows_bruteforce.yml`) нужно загрузить и добавить в основной рулсет САМОСТОЯТЕЛЬНО через
-    вкладку «Sigma-правила» ДО запуска — скрипт ничего не пишет в `custom_rulesets`. Шлёт 10
-    событий `EventID=4625` ТРЕМЯ отдельными HTTP-запросами с паузой дольше `flush_interval`
-    (гарантированно разные flush'и — то, что раньше не работало) и ждёт алерт
-    `event_count=10, engine=correlation`. Флаг `--negative` — контрольный прогон с событиями за
-    пределами 5-минутного `timespan` (алерт НЕ должен появиться).
+  - `stream_correlation_test.py` — ручная проверка стейтфул-корреляции (`app/detection/correlation.py`)
+    через `/ingest/stream` на живом сервере: **только форвард событий**, детект-контент должен быть
+    задеплоен (`deploy_content.py`). Шлёт 20 событий `EventID=4625` с одного адреса ТРЕМЯ отдельными
+    HTTP-запросами с паузой дольше `flush_interval` (гарантированно разные flush'и) и ждёт инцидент
+    `auth_bruteforce` (сценарий `SCE_Auth_BruteForce`). Флаг `--negative` — те же 20 событий с шагом
+    20с, в 5-минутное окно попадает не больше 16 (инцидента быть не должно).
   - `bench_correlation.py` (Этап A) — бенчмарк масштабируемости коррелятора, только stdlib +
     `app.store`, без HTTP-слоя и без новых зависимостей. Наполняет временную БД синтетическими
     строками `rule_hits` (10⁵/10⁶/10⁷ по умолчанию) при фиксированной плотности попаданий
@@ -339,11 +337,23 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
     не встреченные в выгрузке, переносит из старого файла и помечает в `_legacy_keys`.
   - `deploy_content.py` / `test_content.py` / `content_lib.py` — детект-контент из
     `artifacts/content` (§9). Деплой через HTTP API (value lists → базовые правила → корреляции в
-    топологическом порядке → `--prune` → main), идемпотентен. Прогон фикстур: временный источник на
+    топологическом порядке → `--prune` → main), идемпотентен. `--prune` (при полном деплое) удаляет и
+    value lists, которых нет в git, — только в пространстве имён контента (префиксы, которые носят
+    списки в git: `cred_`, `exec_`, `common_`...). Прогон фикстур: временный источник на
     кейс, события дополняются реальными полями стенда (`telemetry/event_fields*.json`), ожидание флаша —
-    по маркерным событиям служебного источника, проверка ТОЧНОГО набора `incident_type`. Гонять на
+    по маркерным событиям служебного источника, проверка ТОЧНОГО набора `incident_type`. `--coverage` —
+    правила, не сработавшие ни в одном кейсе (базовые — по алертам, инцидентные — по инцидентам; тихие
+    звенья через API не видны), код выхода 2 при дырах. Гонять на
     изолированном экземпляре (`SIEM_DB_PATH`/`SIEM_CUSTOM_RULESETS_DIR`/`SIEM_VALUE_LISTS_DIR`,
     свой порт).
+  - `deploy_content.ps1` / `deploy_content.sh` — тот же `deploy_content.py` без Python на хосте: запуск в
+    одноразовом контейнере из образа `soc_agent:latest` (репозиторий смонтирован read-only, `localhost` в
+    адресе подменяется на `host.docker.internal`). Своей логики не несут — только запуск.
+  - `content/` — инструменты автора контента (не часть деплоя): `sigma_find.py` — поиск кандидатов в
+    клоне SigmaHQ (`--sigma-repo`/`SIGMA_REPO`: по EventID, категории, тегу, подстроке; уже
+    адаптированные помечены `*`), `adapt_sigma.py` — черновик адаптации правила SigmaHQ по §9 (guard,
+    без `Provider_Name`, новый UUID + `related: derived`, авторство, вынос перечислений в value list),
+    `new_correlation.py` — заготовка correlation-файла в стиле контента (сохраняет `id` существующего).
 
 ---
 
@@ -650,7 +660,7 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   `pivot_by_entity`, `lookup_mitre` (`app/kb.py:get_technique`/`enrich_techniques` — осталось
   обернуть) — пишутся вместе с агентом на Этапе 5.
 
-### Этап 4.5 — Детект-контент 🎯 ТЕКУЩИЙ ЭТАП 🟡
+### Этап 4.5 — Детект-контент ✅ (по синтетике; живой прогон — отдельно)
 
 Пишется ДО агента: агенту нужны настоящие инциденты, а не заглушечные. Соглашения по написанию
 контента — **§9**, читать целиком перед первым правилом. Стенд и его результаты —
@@ -659,9 +669,10 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
 - ✅ Контент в git: `artifacts/content/<domain>/{rules,correlations,tests}` + `value_lists/` +
   `telemetry/`; деплой `scripts/deploy_content.py`, синтетические фикстуры `scripts/test_content.py`.
 - ✅ 11 доменов-рулсетов (`auth`, `recon`, `execution`, `persistence`, `privesc`, `credaccess`,
-  `evasion`, `lateral`, `exfil`, `impact`, `killchain`): 49 сценариев (`SCE_`/`SCE_TH_`), 128 базовых
-  правил (в основном адаптированный SigmaHQ), 69 корреляций, 44 value list; 165/165 кейсов фикстур
-  зелёные на изолированном экземпляре, реплей реального фона стенда — без ложных `SCE_`.
+  `evasion`, `lateral`, `exfil`, `impact`, `killchain`): 49 сценариев с инцидентом (из них 14 `SCE_TH_`),
+  131 базовое правило (в основном адаптированный SigmaHQ), 71 корреляция (22 тихих звена), 46 value
+  lists; 49 фикстур, 221/221 кейс зелёный на изолированном экземпляре и на Docker-образе,
+  `test_content.py --coverage` — 0 непокрытых правил (2026-09-16).
 - ✅ Движок под контент: межрулсетные ссылки `correlation.rules` + подтягивание зависимостей,
   тихие informational-звенья цепочек, `TimeCreated` как время события, `neq` (см. §8).
 - ✅ Агент Vector вместо Fluent Bit + подключение хоста одним скриптом (`deploy/windows/`,
@@ -677,35 +688,33 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   exclude-режиме (все 75 утилит process-правил пишутся), аудит — базовая линия Microsoft, 4103 выключен.
   Замер простоя: ~1500 событий/ч, без алертов, фильтрация не нужна. Схема полей
   `telemetry/event_fields.json` слита со стендом.
-- ⬜ Живой прогон сценариев на win10-lab (секции `lab:` фикстур), волнами; перед деструктивными
+- ✅ Доводка по синтетике (2026-09-16): покрытие всех базовых правил фикстурами (скрипт покрытия
+  `test_content.py --coverage`), в т.ч. агрегаторы privesc/lateral в `killchain`. Исправлена логика, не
+  шум: двойной счёт одного события в двух правилах сценария (GoTo Opener ↔ LogMeIn по `Company`,
+  `findstr cpassword` ↔ поиск паролей), `New-Service` из `powershell -c` всегда «подозрительный»,
+  `HKU\<SID>_Classes` вместо `Software\Classes` у sdclt (правило не сработало бы на Sysmon), неполный
+  частный диапазон `172.16/12` в фильтре LOLBIN. System 104 разделён по очищенному каналу
+  (`UserDataChannel`): «Important Windows Eventlog Cleared» / «Eventlog Cleared». Добавлены сценарии без
+  адреса источника: `SCE_Auth_Account_BruteForce`, `SCE_Auth_Local_PasswordSpray`.
+- ✅ Решено не делать: близнецы правил на System 7045 (одна установка службы пишет и 4697, и 7045 —
+  двойной счёт; недостающее из SigmaHQ добавлено на 4697 — CobaltStrike Service Installations);
+  корреляция учётки 4720 `TargetSid` ↔ 4732 `MemberSid` — сценарий ключуется по `Computer`, алиасы полей в
+  движок не тащим; исключения под FP (в т.ч. действия установщика агента: `wevtutil sl`, `sysmon -c`,
+  `auditpol`) — разбор TP/FP задача агента Этапа 5 (§9).
+- ✅ Value lists с осмысленными именами и русскими описаниями (25 автосозданных переименованы).
+- ✅ Инструменты адаптации SigmaHQ — `scripts/content/` (`sigma_find.py`, `adapt_sigma.py`,
+  `new_correlation.py`).
+- ✅ Развёртывание (2026-09-16): Docker-образ пересобран, volumes `siem_db`/`siem_custom_rulesets`/
+  `siem_value_lists` пересозданы с нуля, контент задеплоен (`deploy_content.py --prune`), старый
+  тестовый контент из корня `artifacts/content/` удалён, `stream_correlation_test.py` переведён на
+  `SCE_Auth_BruteForce`.
+- ⬜ Живой прогон сценариев на win10-lab (секции `lab:` фикстур) — когда решит пользователь, волнами; перед деструктивными
   (impact, очистка журналов, credaccess) — снимок ВМ; для `lateral` нужен второй хост, для
   `SCE_Exec_Office_Child_Network` — Office. Результат — в `windows-vm-lab.md`. Заодно проверить EID 10
   к lsass, 17/18, 19–21, архивы и файлы-записки, и подтвердить поля: `_legacy_keys` в
   `event_fields.json` (PowerShell 4100, Sysmon 8, Security 1100/4647/4662) и весь
   `event_fields_manual.json` — выгрузку `export_event_fields.py` сливать, а не перезаписывать (скрипт
   берёт только события текущей БД).
-- ⬜ Доводка ложных срабатываний по живому прогону: `cred_lsass_susp_access_flags` (EID 10 от AV),
-  `persist_autorun_currentversion`, `persist_task_created_4698`, `exec_lolbin_outbound_connection`,
-  `evasion_sysmon_config_change`; известные FP от самого установщика агента — `windows-agent.md`.
-- ⬜ Правила SigmaHQ на System 7045 (PsExec service, getsystem, RMM, CobaltStrike); вернуть фильтр по
-  очищенному каналу (`UserDataChannel`) в `evasion_system_log_cleared`.
-- ⬜ Покрытие базовых правил фикстурами: в группах «любое из» позитив есть лишь у 1–3 правил — скрипт
-  покрытия + фикстуры. Дыры: RMM (LogMeIn, NetSupport, SimpleHelp, UltraViewer, GoToAssist),
-  `cred_lsass_susp_access_flags`, `cred_lsass_access_dump_keyword`, `evasion_sysmon_driver_unload`,
-  `evasion_eventlog_disabled_registry`, `evasion_defender_config_tamper`, `privesc_*potato*_exec`,
-  `privesc_uac_sdclt_*`, `privesc_uac_computerdefaults`, `exfil_rar_password`, `exfil_winzip_password`,
-  `exfil_dns_mega`, `exfil_cli_data_exfiltration`, `impact_service_tampering`, агрегаторы
-  `privesc_host_privilege_escalation` и `lateral_host_inbound` в `killchain`.
-- ⬜ Value lists: осмысленные имена и русские описания у автосозданных (`*_commandline2`, `*_image2`,
-  английские заглушки); переименование = правка ссылок + пересборка.
-- ⬜ Отложенные сценарии: брутфорс/спрей по учётке без IP, корреляция учётки 4720 (`TargetSid`) ↔ 4732
-  (`MemberSid`) — нужен алиас полей или нормализация на входе.
-- ⬜ Инструменты адаптации SigmaHQ (`adapt2.py`, `corrgen.py`, индекс SigmaHQ) жили во временном каталоге
-  сессии — перенести в `scripts/content/` или переписать, если обновление из апстрима планируется.
-- ⬜ Развёртывание: пересобрать Docker-образ (`docker compose build && docker compose up -d`), удалить
-  старый тестовый контент (рулсет `five-scenarios-v2` в Docker-экземпляре, файлы в корне
-  `artifacts/content/`), задеплоить новый (`deploy_content.py --prune`, перед этим `test_content.py` на
-  изолированном экземпляре); `siem.db` пересоздать — новая таблица `incident_alerts`, миграций нет.
 
 ### Этап 5 — AI-агент расследования 🎯 главная цель ⬜
 - **Стек:** агент на **LangGraph**; «мозги» — любой **OpenAI-совместимый** провайдер через
@@ -1074,11 +1083,21 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
 топологическом порядке → `--prune` → включение в main). Правка контента через UI-редактор — песочница,
 следующий деплой её перезапишет. Проверка: изолированный экземпляр (`SIEM_DB_PATH`,
 `SIEM_CUSTOM_RULESETS_DIR`, `SIEM_VALUE_LISTS_DIR`, отдельный порт) → деплой → `scripts/test_content.py`.
-Ожидание в фикстуре ТОЧНОЕ: лишний инцидент — такой же FAIL, как недостающий.
+Ожидание в фикстуре ТОЧНОЕ: лишний инцидент — такой же FAIL, как недостающий. Каждое базовое правило
+обязано сработать хотя бы в одном кейсе — `scripts/test_content.py --coverage` (0 непокрытых — условие
+готовности контента). Новый кандидат из SigmaHQ — `scripts/content/sigma_find.py` +
+`scripts/content/adapt_sigma.py`, заготовка корреляции — `scripts/content/new_correlation.py`.
 
-Старый тестовый контент (рулсет `five-scenarios-v2`, файлы в корне `artifacts/content/`) писался как
-проверка механики корреляции — **не тащи его паттерны**: шесть базовых правил на один `EventID=4625`,
-безгуардовые `SELECT * FROM logs WHERE EventID=4624`.
+Старый тестовый контент (шесть базовых правил на один `EventID=4625`, безгуардовые
+`SELECT * FROM logs WHERE EventID=4624`) удалён 2026-09-16 — **не возвращай его паттерны**.
+
+### Исключения под ложные срабатывания не пишем
+
+Фильтр в правиле — только исправление логики (правило не сработает на реальном формате поля, одно
+событие засчитывается сценарию дважды, неполный уже существующий фильтр). Легитимную активность, которая
+выглядит как атака, — установку агента (`wevtutil sl`, `sysmon -c`, `auditpol`), процессы AV,
+администраторские действия — **в контенте не вырезаем**: она должна доходить до инцидента, TP/FP
+разбирает агент расследования (Этап 5). Решено пользователем 2026-09-16.
 
 ### Именование и авторство
 
@@ -1103,8 +1122,23 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   переводит `"true"`/`"false"` в boolean, Zircolite хранит их как 1/0.
 - System 7045 (`ServiceName`/`ImagePath`/`StartType`/`AccountName`) и System 104 / Security 1102
   (`SubjectUserName`, канал очищенного журнала — `UserDataChannel`) приходят с именованными полями
-  (раньше, на Fluent Bit, — только `StringInserts`). Правила на них можно писать; поле `Channel` у 104
-  — канал самой записи (`System`), не очищенного журнала.
+  (раньше, на Fluent Bit, — только `StringInserts`). Поле `Channel` у 104 — канал самой записи
+  (`System`), не очищенного журнала.
+- Установка службы — правила ТОЛЬКО на Security 4697 (есть `SubjectUserName` — кто ставил). Близнецов
+  на System 7045 не заводим по той же причине, что и 4688: одна установка пишет оба события, и
+  `temporal gte: 2` взводился бы одной службой.
+- Реестр: запись в `HKCU\Software\Classes` Sysmon показывает как `HKU\<SID>_Classes\...` — суффикс
+  ключа в правиле начинать с `Classes\`, а не `Software\Classes\` (иначе правило мёртвое).
+- Отсутствие поля — `Field: null` (компилируется в `Field IS NULL`, работает), а не `Field|exists: false`:
+  тот компилируется в `NOT Field = Field`, что на NULL не истина, — такая ветка никогда не срабатывает.
+  `Field|exists: true` (`Field = Field`) работает правильно. Windows пишет «пусто» как `'-'` — чаще нужен
+  фильтр по значению, а не по отсутствию.
+- Группы «любое из» в одном сценарии: одно событие не должно матчиться двумя правилами группы (общий
+  `Company` у разных продуктов одного вендора, подстрока одного шаблона внутри другого) — иначе
+  `temporal gte: 2` / `event_count gte: 2` взводится одним событием. Проверяется негативным кейсом
+  «одно событие — нет инцидента».
+- Связка по полям с разными именами (4720 `TargetSid` ↔ 4732 `MemberSid`) не выражается: алиасов
+  полей в движке нет и не будет — ключуй по общему полю (`Computer`).
 - Системный PID записи — `ExecutionProcessID`, не `ProcessID`; `ProcessId` в правиле — поле события
   (Sysmon, 4624/4688/4648).
 - Стенд на русской Windows: SID вместо имён групп (`S-1-5-32-544`), `User|contains: [AUTHORI, AUTORI]`
@@ -1134,7 +1168,10 @@ B1..B3». Такие группы собираются тихими коррел
 
 ### Value lists — для перечислений, но без значимых пробелов
 
-Перечни от ~8 значений (или переиспользуемые) выносятся в value list `<домен>_<смысл>`. **Сервер
+Перечни от ~8 значений (или переиспользуемые) выносятся в value list `<префикс домена>_<смысл>`
+(`cred_lsass_read_access_masks`, не `..._grantedaccess2`) с русским описанием, в котором указано, как
+список применяется (`|endswith по Image`). Автоимена `adapt_sigma.py --auto-vl` переименовать до
+коммита. **Сервер
 обрезает пробелы по краям значений** — значение вроде `' -nop '`, `'cmd '`, `' JAB'` в списке молча
 расширит правило; такие перечни остаются inline (`scripts/content_lib.py` отказывается деплоить
 список с краевыми пробелами).

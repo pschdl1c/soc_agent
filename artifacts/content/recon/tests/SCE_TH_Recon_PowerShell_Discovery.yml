@@ -11,6 +11,17 @@ cases:
             - 'Write-Output $env:UserName'
             - 'Get-LocalGroupMember -Group Administrators | ft'
         event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockId: "${guid1}", MessageNumber: 1, MessageTotal: 1}
+  - name: positive_software_virtualization_security_products
+    expect_incidents: [th_recon_powershell_discovery]
+    events:
+      - repeat: 3
+        step: 30
+        vary:
+          ScriptBlockText:
+            - 'Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* | Select-Object DisplayName, DisplayVersion | Format-Table -AutoSize'
+            - 'Get-WmiObject -Query "select * from Win32_ComputerSystem" | Select-Object Manufacturer, Model'
+            - 'Get-Process | Where-Object { $_.Description -like "*virus*" -or $_.Company -like "*kaspersky*" }'
+        event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, MessageNumber: 1, MessageTotal: 1}
   - name: negative_two_techniques_repeated
     expect_incidents: []
     events:

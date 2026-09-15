@@ -16,6 +16,18 @@ cases:
     expect_incidents: []
     events:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\auditpol.exe', OriginalFileName: AUDITPOL.EXE, CommandLine: 'auditpol /get /category:*', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_fltmc_unload_sysmon_driver
+    expect_incidents: [evasion_telemetry_tampering]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\fltMC.exe', OriginalFileName: fltMC.exe, CommandLine: 'fltmc unload SysmonDrv', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_eventlog_channel_disabled_registry
+    expect_incidents: [evasion_telemetry_tampering]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\regedit.exe', TargetObject: 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-PowerShell/Operational\Enabled', Details: 'DWORD (0x00000000)'}
+  - name: negative_eventlog_channel_enabled_registry
+    expect_incidents: []
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\regedit.exe', TargetObject: 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WINEVT\Channels\Microsoft-Windows-PowerShell/Operational\Enabled', Details: 'DWORD (0x00000001)'}
 lab:
   - 'Штатное обновление конфига Sysmon (Шаг 3) само даст этот инцидент - это ожидаемый TP-по-факту'
   - 'auditpol /backup /file:C:\Users\Public\ap.csv; auditpol /remove /allusers; auditpol /restore /file:C:\Users\Public\ap.csv'

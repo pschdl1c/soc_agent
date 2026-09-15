@@ -15,6 +15,31 @@ cases:
       - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.51, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
       - at: 5
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\PSEXESVC.exe', OriginalFileName: psexesvc.exe, ParentImage: 'C:\Windows\System32\services.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+  - name: positive_logon_then_impacket_service
+    # 4697 после сетевого входа - заодно hunting "удалённая установка службы"
+    expect_incidents: [lateral_psexec_inbound, th_lateral_remote_service_task]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.54, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 4
+        event: {EventID: 4697, Channel: Security, ServiceName: WyTnBQMs, ServiceFileName: '%systemroot%\aBcDeFgH.exe', ServiceType: '0x10', ServiceStartType: 3, ServiceAccount: LocalSystem, SubjectUserName: admin}
+  - name: positive_logon_then_cobaltstrike_service
+    expect_incidents: [lateral_psexec_inbound, th_lateral_remote_service_task]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.55, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 3
+        event: {EventID: 4697, Channel: Security, ServiceName: 7f3a2b1, ServiceFileName: '\\10.0.2.55\ADMIN$\7f3a2b1.exe', ServiceType: '0x10', ServiceStartType: 3, ServiceAccount: LocalSystem, SubjectUserName: admin}
+  - name: positive_logon_then_psexec_pipe_from_temp
+    expect_incidents: [lateral_psexec_inbound]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.56, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 6
+        event: {EventID: 18, Channel: Microsoft-Windows-Sysmon/Operational, EventType: ConnectPipe, PipeName: '\PSEXESVC', Image: 'C:\Windows\Temp\PsExec64.exe', User: 'LAB\admin'}
+  - name: negative_windows_service_after_logon
+    expect_incidents: []
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.57, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 4
+        event: {EventID: 4697, Channel: Security, ServiceName: MpKsl6025883b, ServiceFileName: 'C:\ProgramData\Microsoft\Windows Defender\Definition Updates\{3868DEC1-0138-419E-A34F-B075C973F643}\MpKslDrv.sys', ServiceType: '0x1', ServiceStartType: 3}
   - name: negative_network_logon_only
     expect_incidents: []
     events:

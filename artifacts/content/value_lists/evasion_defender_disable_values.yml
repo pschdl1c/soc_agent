@@ -1,0 +1,14 @@
+name: evasion_defender_disable_values
+description: Параметры реестра Defender, выключающие защиту значением 1 (|endswith по TargetObject)
+values:
+  - \DisableAntiSpyware
+  - \DisableAntiVirus
+  - \DisableBehaviorMonitoring
+  - \DisableBlockAtFirstSeen
+  - \DisableEnhancedNotifications
+  - \DisableIntrusionPreventionSystem
+  - \DisableIOAVProtection
+  - \DisableOnAccessProtection
+  - \DisableRealtimeMonitoring
+  - \DisableScanOnRealtimeEnable
+  - \DisableScriptScanning

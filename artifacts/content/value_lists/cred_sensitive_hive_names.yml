@@ -1,0 +1,11 @@
+name: cred_sensitive_hive_names
+description: Кусты реестра SAM, SYSTEM, SECURITY, в т.ч. с подменой символа на ˢ (|contains по CommandLine)
+values:
+  - \system
+  - \sam
+  - \security
+  - \ˢystem
+  - \syˢtem
+  - \ˢyˢtem
+  - \ˢam
+  - \ˢecurity

@@ -22,6 +22,26 @@ cases:
     expect_incidents: []
     events:
       - event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Get-MpPreference | Select-Object ExclusionPath'}
+  - name: positive_registry_disable_antispyware_policy
+    expect_incidents: [evasion_defender_tampering]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\DisableAntiSpyware', Details: 'DWORD (0x00000001)'}
+  - name: positive_registry_tamper_protection_off
+    expect_incidents: [evasion_defender_tampering]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\regedit.exe', TargetObject: 'HKLM\SOFTWARE\Microsoft\Windows Defender\Features\TamperProtection', Details: 'DWORD (0x00000000)'}
+  - name: positive_cli_disable_realtime_monitoring
+    expect_incidents: [evasion_defender_tampering]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell.exe Set-MpPreference -DisableRealtimeMonitoring $true', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_5007_antispyware_disabled
+    expect_incidents: [evasion_defender_tampering]
+    events:
+      - event: {EventID: 5007, Channel: Microsoft-Windows-Windows Defender/Operational, OldValue: 'HKLM\SOFTWARE\Microsoft\Windows Defender\DisableAntiSpyware = 0x0', NewValue: 'HKLM\SOFTWARE\Microsoft\Windows Defender\DisableAntiSpyware = 0x1'}
+  - name: negative_registry_realtime_monitoring_enabled
+    expect_incidents: []
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.25080.5-0\MsMpEng.exe', TargetObject: 'HKLM\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection\DisableRealtimeMonitoring', Details: 'DWORD (0x00000000)'}
 lab:
   - 'Add-MpPreference -ExclusionPath C:\Users\Public\lab-excl'
   - 'Remove-MpPreference -ExclusionPath C:\Users\Public\lab-excl'

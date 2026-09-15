@@ -1,0 +1,11 @@
+name: lateral_wmi_susp_child_images
+description: Подозрительные дочерние процессы WmiPrvSE - удалённое выполнение через WMI (|endswith по Image)
+values:
+  - \certutil.exe
+  - \cscript.exe
+  - \mshta.exe
+  - \msiexec.exe
+  - \regsvr32.exe
+  - \rundll32.exe
+  - \verclsid.exe
+  - \wscript.exe

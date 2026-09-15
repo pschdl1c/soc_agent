@@ -26,9 +26,9 @@ detection:
         Channel: Microsoft-Windows-Sysmon/Operational
         EventID: 1
     selection:
-        Image|endswith|expand: '%evasion_system_exe_location_anomaly_image%'
+        Image|endswith|expand: '%evasion_system_exe_names%'
     filter_main_generic:
-        Image|startswith|expand: '%evasion_system_exe_location_anomaly_image2%'
+        Image|startswith|expand: '%evasion_system_exe_dirs%'
     filter_optional_system32:
         Image|contains: \SystemRoot\System32\
     filter_main_powershell:

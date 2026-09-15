@@ -29,7 +29,7 @@ detection:
         -   Image|endswith: \curl.exe
         -   OriginalFileName: curl.exe
     selection_cli_domain:
-        CommandLine|contains|expand: '%exfil_curl_upload_filesharing_commandline%'
+        CommandLine|contains|expand: '%exfil_upload_services%'
     selection_cli_flags:
         -   CommandLine|contains:
                 - ' --form'

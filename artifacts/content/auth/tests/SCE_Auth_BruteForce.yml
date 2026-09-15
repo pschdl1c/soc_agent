@@ -20,7 +20,8 @@ cases:
         step: 20
         event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 203.0.113.10, TargetUserName: administrator}
   - name: negative_local_failures_without_address
-    expect_incidents: []
+    # 30 отказов без адреса - это SCE_Auth_Account_BruteForce, а не сетевой брутфорс
+    expect_incidents: [auth_account_bruteforce]
     events:
       - repeat: 30
         step: 2

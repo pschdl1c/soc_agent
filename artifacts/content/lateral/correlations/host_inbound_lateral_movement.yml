@@ -15,6 +15,7 @@ correlation:
     rules:
         - lateral_psexesvc_execution
         - lateral_impacket_psexec_service_4697
+        - lateral_cobaltstrike_service_4697
         - lateral_wmiprvse_susp_child
         - lateral_winrm_session_host
     group-by:

@@ -14,6 +14,18 @@ cases:
       - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001_Classes\mscfile\shell\open\command', Details: 'cmd.exe /c C:\Users\Public\p.exe'}
       - at: 4
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', CommandLine: 'cmd.exe /c C:\Users\Public\p.exe', ParentImage: 'C:\Windows\System32\eventvwr.exe', IntegrityLevel: High}
+  - name: positive_sdclt_isolatedcommand_hijack
+    expect_incidents: [privesc_uac_bypass]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001_Classes\exefile\shell\runas\command\isolatedCommand', Details: 'C:\Users\Public\p.exe'}
+      - at: 3
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\sdclt.exe', OriginalFileName: sdclt.exe, CommandLine: '"C:\Windows\System32\sdclt.exe" /KickOffElev', ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High, User: 'LAB\victim'}
+  - name: positive_computerdefaults_after_ms_settings_hijack
+    expect_incidents: [privesc_uac_bypass]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Users\Public\launcher.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001_Classes\ms-settings\shell\open\command\(Default)', Details: 'C:\Users\Public\p.exe'}
+      - at: 2
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\ComputerDefaults.exe', OriginalFileName: ComputerDefaults.exe, CommandLine: '"C:\Windows\System32\ComputerDefaults.exe"', ParentImage: 'C:\Users\Public\launcher.exe', IntegrityLevel: High, User: 'LAB\victim'}
   - name: negative_hijack_without_trigger
     expect_incidents: []
     events:

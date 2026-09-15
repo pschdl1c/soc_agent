@@ -1,0 +1,29 @@
+title: SCE_Auth_Account_BruteForce
+id: c6eb3083-2452-45de-b08f-0261714d531d
+name: sce_auth_account_bruteforce
+status: experimental
+description: |
+    Password guessing of one account without a source address: 20 or more failed logons of the
+    same account on a host within 5 minutes, none of them carrying a client address (console,
+    RunAs / LogonUser based tooling). Guessing from a network address is SCE_Auth_BruteForce.
+author: ET, Claude
+date: 2026-09-16
+tags:
+    - attack.credential-access
+    - attack.t1110.001
+correlation:
+    type: event_count
+    rules:
+        - auth_failed_logon_no_address
+    group-by:
+        - Computer
+        - TargetUserName
+    timespan: 5m
+    condition:
+        gte: 20
+    incident:
+        type: auth_account_bruteforce
+        severity: medium
+falsepositives:
+    - Script or scheduled job running under a user whose password was changed
+level: medium

@@ -8,6 +8,10 @@ cases:
     expect_incidents: [privesc_enumeration_tooling]
     events:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\Public\a.exe', CommandLine: 'a.exe audit ModifiableServiceBinaries UnquotedServicePath', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_seatbelt_groups
+    expect_incidents: [privesc_enumeration_tooling]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\sb.exe', CommandLine: 'sb.exe -group=system -outputfile=C:\Tools\out.txt', ParentImage: 'C:\Windows\System32\cmd.exe'}
   - name: negative_service_query
     expect_incidents: []
     events:

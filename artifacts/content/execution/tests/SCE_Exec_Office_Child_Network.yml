@@ -24,6 +24,12 @@ cases:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', OriginalFileName: Cmd.Exe, ParentImage: 'C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE', ProcessGuid: "${guid1}"}
       - at: 3
         event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\cmd.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 10.0.2.2, DestinationPort: 445}
+  - name: negative_private_destination_172_range
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, ParentImage: 'C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE', ProcessGuid: "${guid1}"}
+      - at: 3
+        event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 172.20.14.5, DestinationPort: 443}
   - name: negative_powershell_from_explorer
     expect_incidents: []
     events:

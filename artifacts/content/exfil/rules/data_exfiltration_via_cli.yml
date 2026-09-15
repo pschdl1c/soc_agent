@@ -55,7 +55,7 @@ detection:
         -   CommandLine|re:
                 - net\s+view
                 - sc\s+query
-        -   CommandLine|contains|expand: '%exfil_cli_data_exfiltration_commandline%'
+        -   CommandLine|contains|expand: '%exfil_cli_recon_payloads%'
         -   CommandLine|contains|all:
                 - 'type '
                 - ' > '

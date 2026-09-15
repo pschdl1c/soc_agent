@@ -57,7 +57,7 @@ detection:
             - 'disablerealtimemonitoring '
             - 'DisableRealtimeMonitoring '
     selection_encoded_direct:
-        CommandLine|contains|expand: '%evasion_defender_disable_feature_cli_commandline%'
+        CommandLine|contains|expand: '%evasion_defender_disable_options_b64%'
     condition: guard_logsource and (all of selection_cli_* or 1 of selection_encoded_*)
 falsepositives:
     - Possible administrative activity

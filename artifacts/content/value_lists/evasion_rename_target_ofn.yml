@@ -1,0 +1,14 @@
+name: evasion_rename_target_ofn
+description: OriginalFileName бинарников из evasion_rename_target_images
+values:
+  - Cmd.Exe
+  - CONHOST.EXE
+  - 7z.exe
+  - 7za.exe
+  - 7zr.exe
+  - WinRAR.exe
+  - wevtutil.exe
+  - net.exe
+  - net1.exe
+  - netsh.exe
+  - InstallUtil.exe

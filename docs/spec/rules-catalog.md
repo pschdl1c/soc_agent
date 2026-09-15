@@ -104,8 +104,8 @@ SQL-строка вместо dict, что валит компиляцию Zirco
 Только для custom. Читает `*.sigmacorr` напрямую (`yaml.safe_load_all`, без pySigma).
 Строит общий индекс `name`/`id` → `{"title": <str>, "kind": "base"|"correlation"}` — **и по
 `*.yml`/`*.yaml` (`kind="base"`), И по `*.sigmacorr` (`kind="correlation"`)**. Вторая категория
-нужна для ЦЕПОЧЕК (`correlation.rules` ссылается на другую correlation, форма
-`artifacts/content/auth_after_brutforce.yml`) — без неё ссылка correlation → correlation
+нужна для ЦЕПОЧЕК (`correlation.rules` ссылается на другую correlation, напр.
+`artifacts/content/auth/correlations/sce_auth_bruteforce_success.yml`) — без неё ссылка correlation → correlation
 никогда не резолвится, и вся зависимая correlation-запись (включая её собственные корректные
 base-ссылки) молча пропадает целиком (Этап A дорожной карты — прежде это «глушило» все
 `temporal_ordered`-правила в контенте). Для каждого correlation-документа с `title` и словарём

@@ -35,6 +35,12 @@ r"""
 ${guidN} (стабильный в пределах кейса GUID вида {XXXXXXXX-...}), ${rand} (случайный хвост кейса).
 Автоматически добавляются Computer (если не задан), TimeCreated/EventTime по смещению.
 Проверка точная: лишний инцидент - такой же FAIL, как недостающий (ловит пересечения сценариев).
+
+--coverage (только при прогоне всех фикстур, без --domain/--scenario) дополнительно печатает правила
+контента, которые НЕ сработали ни в одном кейсе: базовые - по алертам, инцидентные корреляции - по
+инцидентам, прочие не-informational - по алертам engine=correlation. Тихие звенья (informational без
+incident) через API не наблюдаемы - их покрытие косвенное, через взведённые ими сценарии. Код выхода
+при непокрытых правилах - 2 (если все кейсы PASS).
 """
 from __future__ import annotations
 
@@ -51,7 +57,7 @@ from typing import Any
 
 import yaml
 
-from content_lib import CONTENT_DIR, Api, ApiError, domain_dirs
+from content_lib import CONTENT_DIR, Api, ApiError, domain_dirs, load_content
 
 _VAR_RE = re.compile(r"\$\{(host|i|rand|guid\d+)\}")
 
@@ -86,6 +92,7 @@ class Case:
     token: str = ""
     actual: set[str] = field(default_factory=set)
     titles: list[str] = field(default_factory=list)
+    alert_titles: set[str] = field(default_factory=set)
 
     @property
     def label(self) -> str:
@@ -146,6 +153,24 @@ def _load_cases(content_dir: Path, domains: set[str] | None, scenarios: set[str]
     return cases
 
 
+def _report_coverage(content_dir: Path, cases: list[Case]) -> list[str]:
+    """Правила контента, не сработавшие ни в одном кейсе (см. --coverage в докстринге модуля)."""
+    fired = set().union(*(c.alert_titles for c in cases), *(set(c.titles) for c in cases))
+    uncovered: list[str] = []
+    silent = 0
+    for rule in load_content(content_dir).rules:
+        corr = rule.doc.get("correlation") or {}
+        if rule.kind == "correlation" and not corr.get("incident") and rule.doc.get("level") == "informational":
+            silent += 1
+            continue
+        if rule.title not in fired:
+            uncovered.append(f"{rule.domain}/{rule.kind}: {rule.title}")
+    print(f"\nПокрытие: не сработали {len(uncovered)} правил (тихих звеньев вне учёта: {silent})")
+    for line in sorted(uncovered):
+        print(f"  - {line}")
+    return uncovered
+
+
 def _post_events(api: Api, token: str, events: list[dict[str, Any]]) -> None:
     body = "\n".join(json.dumps(e, ensure_ascii=False) for e in events).encode("utf-8")
     api.request("POST", "/ingest/stream", raw=body, headers={
@@ -180,9 +205,13 @@ def main() -> None:
     parser.add_argument("--domain", action="append")
     parser.add_argument("--scenario", action="append")
     parser.add_argument("--keep", action="store_true", help="не удалять источники/события после прогона")
+    parser.add_argument("--coverage", action="store_true", help="отчёт о правилах, не сработавших ни в одном кейсе")
     args = parser.parse_args()
+    if args.coverage and (args.domain or args.scenario):
+        parser.error("--coverage имеет смысл только на полном прогоне (без --domain/--scenario)")
 
     api = Api(args.url)
+    exit_code = 0
     cases = _load_cases(args.content, set(args.domain or []) or None, set(args.scenario or []) or None)
     if not cases:
         print("Нет фикстур под фильтр")
@@ -221,13 +250,18 @@ def main() -> None:
             failed += not ok
             mark = "PASS" if ok else "FAIL"
             print(f"[{mark}] {case.label}")
+            if not ok or args.coverage:
+                alerts = api.get("/alerts", source_batch=case.source_name, limit=500)["alerts"]
+                case.alert_titles = {a["rule_title"] for a in alerts}
             if not ok:
                 print(f"        ожидалось: {sorted(case.expect)}")
                 print(f"        получено:  {sorted(case.actual)}  ({', '.join(case.titles)})")
-                alerts = api.get("/alerts", source_batch=case.source_name, limit=500)["alerts"]
-                seen = sorted({a["rule_title"] for a in alerts})
-                print(f"        алерты:    {seen}")
+                print(f"        алерты:    {sorted(case.alert_titles)}")
         print(f"\nИтого: {len(cases) - failed}/{len(cases)} PASS")
+        if args.coverage:
+            uncovered = _report_coverage(args.content, cases)
+            if uncovered and not failed:
+                exit_code = 2
     except (ApiError, RuntimeError) as exc:
         print(f"\nОШИБКА: {exc}", file=sys.stderr)
         failed = 1
@@ -241,7 +275,7 @@ def main() -> None:
                     api.request(method, path)
                 except ApiError:
                     pass
-    sys.exit(1 if failed else 0)
+    sys.exit(1 if failed else exit_code)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ correlation:
         - lateral_psexesvc_child_system
         - lateral_psexec_pipe
         - lateral_impacket_psexec_service_4697
+        - lateral_cobaltstrike_service_4697
         - auth_successful_remote_logon
     group-by:
         - Computer

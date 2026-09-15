@@ -1,0 +1,12 @@
+name: cred_lsass_dump_cli_keywords
+description: Имена файлов дампа lsass в командной строке (|contains по CommandLine)
+values:
+  - lsass.dmp
+  - lsass.zip
+  - lsass.rar
+  - Andrew.dmp
+  - Coredump.dmp
+  - NotLSASS.zip
+  - lsass_2
+  - lsassdump
+  - lsassdmp

@@ -1,0 +1,14 @@
+name: cred_mimikatz_rare_commands
+description: 'Редкие команды Mimikatz вида ::имя (|contains по CommandLine)'
+values:
+  - ::aadcookie
+  - ::detours
+  - ::memssp
+  - ::mflt
+  - ::ncroutemon
+  - ::ngcsign
+  - ::printnightmare
+  - ::skeleton
+  - ::preshutdown
+  - ::mstsc
+  - ::multirdp

@@ -53,7 +53,7 @@ RULE_TITLE = "Bench Failed Auth"
 GROUP_FIELD = "IpAddress"
 WINDOW_KEY_VALUE = "10.0.0.1"
 BACKLOG_KEY_VALUE = "10.0.0.99"  # намеренно другой IP - двойная защита от false positive в самом бенчмарке
-TIMESPAN_SECONDS = 300  # 5m - как у windows_bruteforce.yml
+TIMESPAN_SECONDS = 300  # 5m - как у SCE_Auth_BruteForce (artifacts/content/auth)
 
 
 def _iso(dt: datetime) -> str:

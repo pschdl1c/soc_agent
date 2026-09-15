@@ -1,0 +1,16 @@
+name: exfil_upload_services
+description: Файлообменники и paste-сервисы для выгрузки через curl (|contains по CommandLine)
+values:
+  - 0x0.st
+  - bashupload.com
+  - chunk.io
+  - file.io
+  - filebin.net
+  - pastebin
+  - send.firefox.com
+  - temp.sh
+  - transfer.sh
+  - ufile.io
+  - uploadfiles.io
+  - wetransfer.com
+  - x0.at

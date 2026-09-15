@@ -25,7 +25,7 @@ detection:
         EventID: 1
     selection:
         ParentImage|endswith: \wsmprovhost.exe
-        Image|endswith|expand: '%lateral_winrm_susp_child_image%'
+        Image|endswith|expand: '%lateral_winrm_susp_child_images%'
     condition: guard_logsource and (selection)
 falsepositives:
     - Legitimate WinRM usage

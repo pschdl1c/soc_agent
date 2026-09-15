@@ -33,7 +33,7 @@ detection:
         Channel: Microsoft-Windows-Sysmon/Operational
         EventID: 11
     selection_1:
-        TargetFilename|endswith|expand: '%cred_lsass_dump_files_targetfilename%'
+        TargetFilename|endswith|expand: '%cred_lsass_dump_file_names%'
     selection_2:
         TargetFilename|contains:
             - \lsass_2

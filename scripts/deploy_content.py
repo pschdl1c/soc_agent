@@ -8,7 +8,11 @@ r"""
   3. корреляции             - в топологическом порядке (сервер проверяет ссылки на сохранении,
                               межрулсетные ссылки разрешены - поэтому все базовые правила раньше)
   4. --prune                - удалить из рулсетов доменов правила, которых нет в git
-                              (сначала корреляции, потом базовые; force - удаляется весь хвост)
+                              (сначала корреляции, потом базовые; force - удаляется весь хвост),
+                              затем value lists контента, которых нет в git (только имена с
+                              префиксом, который носят списки в git - cred_, exec_, common_...;
+                              списки с другими именами, заведённые руками в UI, не
+                              трогаются; список, на который ещё ссылается правило, - 409, пропуск)
   5. main                   - включить рулсеты доменов в основной рулсет целиком (--no-main - нет)
 
 Правило, переехавшее в другой домен (тот же id, другой рулсет), удаляется из старого рулсета и
@@ -16,15 +20,28 @@ r"""
 
     uv run python scripts/deploy_content.py                       # всё, в http://localhost:8000
     uv run python scripts/deploy_content.py http://localhost:8001 --domain auth --prune
+
+Без Python на хосте - обёртки scripts/deploy_content.ps1 / scripts/deploy_content.sh (тот же скрипт в
+одноразовом контейнере из образа soc_agent).
 """
 from __future__ import annotations
 
 import argparse
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
-from content_lib import CONTENT_DIR, Api, ApiError, ContentRule, custom_rulesets_by_name, load_content, ruleset_rule_ids, topo_correlations
+from content_lib import (
+    CONTENT_DIR,
+    Api,
+    ApiError,
+    ContentRule,
+    custom_rulesets_by_name,
+    load_content,
+    ruleset_rule_ids,
+    topo_correlations,
+)
 
 
 def _sync_value_lists(api: Api, lists: list[dict]) -> None:
@@ -98,6 +115,22 @@ class Deployer:
             self.api.request("DELETE", f"/rules/custom/{rid}", params={"ruleset": path, "force": "true"})
             print(f"  - {path}: {rid}")
 
+    def prune_value_lists(self, content_names: set[str]) -> None:
+        # Пространство имён контента - префиксы, которые реально носят списки в git (cred_, exec_, persist_,
+        # common_...): имя домена с ними не совпадает (credaccess -> cred_).
+        prefixes = tuple({n.split("_", 1)[0] + "_" for n in content_names})
+        for vl in self.api.get("/value-lists"):
+            name = vl["name"]
+            if name in content_names or not name.startswith(prefixes):
+                continue
+            try:
+                self.api.request("DELETE", f"/value-lists/{name}")
+                print(f"  - список {name}")
+            except ApiError as exc:
+                if exc.status != 409:
+                    raise
+                print(f"  ! список {name} не удалён - на него ссылаются правила вне контента")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -126,12 +159,17 @@ def main() -> None:
         if args.prune:
             print("Prune:")
             dep.prune({r.id for r in content.rules}, content.domains)
+            if not args.domain:  # списки глобальные - чистим только при полном деплое
+                dep.prune_value_lists({vl["name"] for vl in content.value_lists})
         if not args.no_main:
             for domain in content.domains:
                 api.request("POST", "/main-ruleset/rulesets", body={"ruleset": dep.rulesets[domain], "include": True})
             print(f"В основном рулсете: {', '.join(content.domains)}")
     except ApiError as exc:
         print(f"\nОШИБКА: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as exc:
+        print(f"\nОШИБКА: SIEM {args.url} недоступен: {exc.reason}", file=sys.stderr)
         sys.exit(1)
     print(
         f"\nГотово за {time.monotonic() - t0:.1f}с: создано {dep.created}, обновлено {dep.updated}, "

@@ -14,6 +14,12 @@ cases:
         event: {EventID: 11, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\inst.exe', TargetFilename: 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\agent.lnk'}
       - at: 120
         event: {EventID: 20, Channel: Microsoft-Windows-Sysmon/Operational, Operation: Created, Name: '"ToolConsumer"', Type: 'Command Line', Destination: 'C:\Tools\agent.exe'}
+  - name: positive_powershell_new_service_and_task
+    expect_incidents: [persist_multiple_mechanisms]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -c New-Service -Name MaintSvc -BinaryPathName C:\Tools\maintsvc.exe -StartupType Automatic', User: 'LAB\admin'}
+      - at: 900
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', OriginalFileName: schtasks.exe, CommandLine: 'schtasks /create /tn Maint /tr C:\Tools\maint.exe /sc daily /st 03:00', User: 'LAB\admin'}
   - name: negative_same_mechanism_twice
     expect_incidents: []
     events:

@@ -1,0 +1,11 @@
+name: cred_lsass_dump_file_names
+description: Имена файлов дампа lsass известных инструментов (|endswith по TargetFilename)
+values:
+  - \Andrew.dmp
+  - \Coredump.dmp
+  - \lsass.dmp
+  - \lsass.rar
+  - \lsass.zip
+  - \NotLSASS.zip
+  - \PPLBlade.dmp
+  - \rustive.dmp

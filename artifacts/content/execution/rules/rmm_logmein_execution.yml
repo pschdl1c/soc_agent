@@ -9,11 +9,13 @@ description: |
     An adversary may use legitimate desktop support and remote access software, such as Team Viewer, Go2Assist, LogMein, AmmyyAdmin, etc, to establish an interactive command and control channel to target systems within networks.
     These services are commonly used as legitimate technical support software, and may be allowed by application control within a target environment.
     Remote access tools like VNC, Ammyy, and Teamviewer are used frequently when compared with other legitimate software commonly used by adversaries. (Citation: Symantec Living off the Land)
+    Adapted for the SIEM: GoTo Opener (also signed "LogMeIn, Inc.") is left to "Remote Access Tool - GoToAssist Execution" - one
+    start must not count as two indicators in SCE_Exec_Remote_Access_Tool.
 references:
     - https://github.com/redcanaryco/atomic-red-team/blob/f339e7da7d05f6057fdfcdd3742bfcf365fee2a9/atomics/T1219/T1219.md#atomic-test-3---logmein-files-detected-test-on-windows
 author: frack113, ET, Claude
 date: '2022-02-11'
-modified: '2026-09-14'
+modified: '2026-09-16'
 tags:
     - attack.command-and-control
     - attack.t1219.002
@@ -28,7 +30,10 @@ detection:
         -   Description: LMIGuardianSvc
         -   Product: LMIGuardianSvc
         -   Company: LogMeIn, Inc.
-    condition: guard_logsource and (selection)
+    filter_main_gotoopener:
+        -   Description: GoTo Opener
+        -   Product: GoTo Opener
+    condition: guard_logsource and (selection and not 1 of filter_main_*)
 falsepositives:
     - Legitimate use
 level: medium

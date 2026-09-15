@@ -15,6 +15,7 @@ correlation:
     rules:
         - evasion_security_log_cleared
         - evasion_system_log_cleared
+        - evasion_system_important_log_cleared
         - evasion_eventlog_clear_cli
         - evasion_clear_eventlog_ps
         - evasion_defender_rtp_disabled

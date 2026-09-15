@@ -12,6 +12,16 @@ cases:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wbadmin.exe', OriginalFileName: WBADMIN.EXE, CommandLine: 'wbadmin delete backup -keepVersions:0 -quiet', ParentImage: 'C:\Windows\System32\cmd.exe'}
       - at: 30
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\ReAgentc.exe', OriginalFileName: reagentc.exe, CommandLine: 'reagentc.exe /disable', ParentImage: 'C:\Windows\System32\cmd.exe'}
+  - name: positive_backup_service_stop_and_backup_deletion
+    expect_incidents: [impact_ransomware_preparation]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\net.exe', OriginalFileName: net.exe, CommandLine: 'net stop "Veeam Backup Service" /y', ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High}
+      - at: 45
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\wbadmin.exe', OriginalFileName: WBADMIN.EXE, CommandLine: 'wbadmin delete backup -version:09/01/2026-10:00 -quiet', ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High}
+  - name: negative_single_backup_service_stop
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\net.exe', OriginalFileName: net.exe, CommandLine: 'net stop "Veeam Backup Service" /y', ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High}
   - name: negative_shadow_deletion_process_and_scriptblock_count_once
     # один приём (удаление теневых копий) виден и в Sysmon 1, и в 4104 - это не "два разных действия"
     expect_incidents: [impact_shadow_copy_deletion]

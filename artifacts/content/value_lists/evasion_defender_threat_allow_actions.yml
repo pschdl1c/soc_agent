@@ -1,0 +1,11 @@
+name: evasion_defender_threat_allow_actions
+description: Действие Allow для уровней угроз Defender (|contains по ScriptBlockText)
+values:
+  - HighThreatDefaultAction Allow
+  - htdefac Allow
+  - LowThreatDefaultAction Allow
+  - ltdefac Allow
+  - ModerateThreatDefaultAction Allow
+  - mtdefac Allow
+  - SevereThreatDefaultAction Allow
+  - stdefac Allow

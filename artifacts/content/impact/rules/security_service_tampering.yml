@@ -35,8 +35,8 @@ detection:
         Channel: Microsoft-Windows-Sysmon/Operational
         EventID: 1
     selection_tools_img:
-        -   OriginalFileName|expand: '%impact_service_tampering_originalfilename%'
-        -   Image|endswith|expand: '%impact_service_tampering_image%'
+        -   OriginalFileName|expand: '%impact_service_control_ofn%'
+        -   Image|endswith|expand: '%impact_service_control_images%'
     selection_tools_cli:
         -   CommandLine|contains:
                 - ' delete '
@@ -49,7 +49,7 @@ detection:
                 - config
                 - start=disabled
     selection_services:
-        CommandLine|contains|expand: '%impact_service_tampering_commandline%'
+        CommandLine|contains|expand: '%impact_security_backup_services%'
     condition: guard_logsource and (all of selection_*)
 falsepositives:
     - Administrators or tools shutting down the services due to upgrade or removal purposes. If you experience some false positive, please consider adding filters to the parent process launching this command and not removing the entry

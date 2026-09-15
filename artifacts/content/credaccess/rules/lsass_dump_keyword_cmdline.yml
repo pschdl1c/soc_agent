@@ -29,7 +29,7 @@ detection:
         Channel: Microsoft-Windows-Sysmon/Operational
         EventID: 1
     selection:
-        -   CommandLine|contains|expand: '%cred_lsass_dump_keyword_cli_commandline%'
+        -   CommandLine|contains|expand: '%cred_lsass_dump_cli_keywords%'
         -   CommandLine|contains|all:
                 - lsass
                 - .dmp

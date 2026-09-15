@@ -7,13 +7,17 @@ related:
     -   id: 17a1be64-8d88-40bf-b5ff-a4f7a50ebcc8
         type: derived
 status: test
-description: Detects creation of a new service via "sc" command or the powershell "new-service" cmdlet with suspicious binary paths
+description: |
+    Detects creation of a new service via "sc" command or the powershell "new-service" cmdlet with suspicious binary paths
+    Adapted for the SIEM: for New-Service the "powershell" keyword is not used - the cmdlet is normally started as
+    "powershell -c New-Service ...", so the word is in the command line of the process itself and says nothing about the
+    service binary. A service running PowerShell is still caught on install by "PowerShell Scripts Installed as Services - Security".
 references:
     - https://github.com/redcanaryco/atomic-red-team/blob/f339e7da7d05f6057fdfcdd3742bfcf365fee2a9/atomics/T1543.003/T1543.003.md
     - https://web.archive.org/web/20180331144337/https://www.fireeye.com/blog/threat-research/2018/03/sanny-malware-delivery-method-updated-in-recently-observed-attacks.html
 author: Nasreddine Bencherchali (Nextron Systems), ET, Claude
 date: '2022-07-14'
-modified: '2026-09-14'
+modified: '2026-09-16'
 tags:
     - attack.persistence
     - attack.privilege-escalation
@@ -34,9 +38,10 @@ detection:
         CommandLine|contains|all:
             - New-Service
             - -BinaryPathName
-    susp_binpath:
+    susp_binpath_powershell:
+        CommandLine|contains: powershell
+    susp_binpath_other:
         CommandLine|contains:
-            - powershell
             - mshta
             - wscript
             - cscript
@@ -53,7 +58,7 @@ detection:
             - \Microsoft\Windows\Start Menu\Programs\Startup\
             - C:\Windows\TEMP\
             - \AppData\Local\Temp
-    condition: guard_logsource and (1 of selection* and susp_binpath)
+    condition: guard_logsource and ((selection_sc and 1 of susp_binpath_*) or (selection_posh and susp_binpath_other))
 falsepositives:
     - Unlikely
 level: high

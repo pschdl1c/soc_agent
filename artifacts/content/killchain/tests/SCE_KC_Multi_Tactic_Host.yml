@@ -14,6 +14,17 @@ cases:
         event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Invoke-Mimikatz -Command "sekurlsa::logonpasswords"'}
       - at: 5400
         event: {EventID: 1102, Channel: Security, SubjectUserName: admin}
+  - name: positive_lateral_privesc_impact
+    # агрегаторы Host Inbound Lateral Movement и Host Privilege Escalation Activity - иначе не покрыты фикстурами
+    expect_incidents: [kc_multi_tactic_host, lateral_psexec_inbound, privesc_getsystem]
+    events:
+      - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.90, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
+      - at: 3
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\PSEXESVC.exe', OriginalFileName: psexesvc.exe, CommandLine: 'C:\Windows\PSEXESVC.exe', ParentImage: 'C:\Windows\System32\services.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+      - at: 1200
+        event: {EventID: 4697, Channel: Security, ServiceName: 'abcdefgh', ServiceFileName: 'cmd.exe /c echo abcdefgh > \\.\pipe\abcdefgh', ServiceType: '0x10', ServiceStartType: 3, SubjectUserName: admin}
+      - at: 3600
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\bcdedit.exe', OriginalFileName: bcdedit.exe, CommandLine: 'bcdedit /set {default} recoveryenabled no', ParentImage: 'C:\Windows\System32\cmd.exe', IntegrityLevel: High}
   - name: negative_two_tactics
     expect_incidents: [cred_mimikatz, evasion_log_cleared]
     events:

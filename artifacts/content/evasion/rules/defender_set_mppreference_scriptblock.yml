@@ -29,11 +29,11 @@ detection:
     selection_options_disabling_preference:
         ScriptBlockText|contains: Set-MpPreference
     selection_options_disabling_function:
-        ScriptBlockText|contains|expand: '%evasion_defender_set_mp_ps_scriptblocktext%'
+        ScriptBlockText|contains|expand: '%evasion_defender_disable_switches%'
     selection_other_default_actions_allow:
         ScriptBlockText|contains: Set-MpPreference
     selection_other_default_actions_func:
-        ScriptBlockText|contains|expand: '%evasion_defender_set_mp_ps_scriptblocktext2%'
+        ScriptBlockText|contains|expand: '%evasion_defender_threat_allow_actions%'
     condition: guard_logsource and (all of selection_options_disabling_* or all of selection_other_default_actions_*)
 falsepositives:
     - Legitimate PowerShell scripts that disable Windows Defender for troubleshooting purposes. Must be investigated.

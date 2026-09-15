@@ -14,6 +14,29 @@ cases:
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files (x86)\ScreenConnect Client\ScreenConnect.ClientService.exe', Product: ScreenConnect, Description: ScreenConnect Service}
       - at: 31
         event: {EventID: 4697, Channel: Security, ServiceName: 'AnyDesk', ServiceFileName: 'C:\Program Files (x86)\AnyDesk\AnyDesk.exe'}
+  - name: positive_netsupport_and_ultraviewer
+    expect_incidents: [exec_remote_access_tool]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\ProgramData\nsm\PCICFGUI.EXE', OriginalFileName: PCICFGUI.EXE, Product: NetSupport Remote Control, Company: NetSupport Ltd, Description: NetSupport Client Configurator}
+      - at: 120
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files (x86)\UltraViewer\UltraViewer_Desktop.exe', OriginalFileName: UltraViewer_Desktop.exe, Product: UltraViewer, Company: 'DucFabulous Co,ltd'}
+  - name: positive_simplehelp_and_logmein
+    expect_incidents: [exec_remote_access_tool]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\ProgramData\JWrapper-Remote Access\JWAppsSharedConfig\SimpleService.exe', Product: SimpleService}
+      - at: 300
+        event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files (x86)\LogMeIn\x64\LMIGuardianSvc.exe', Description: LMIGuardianSvc, Product: LMIGuardianSvc, Company: 'LogMeIn, Inc.'}
+  - name: positive_gotoassist_and_rmm_dns
+    expect_incidents: [exec_remote_access_tool]
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\victim\Downloads\GoTo Opener.exe', Description: GoTo Opener, Product: GoTo Opener, Company: 'LogMeIn, Inc.'}
+      - at: 15
+        event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\victim\Downloads\GoTo Opener.exe', QueryName: relay-8f3a.net.anydesk.com, QueryStatus: "0"}
+  - name: negative_single_goto_opener_start
+    # у GoTo Opener Company = LogMeIn, Inc.: один запуск не должен давать два индикатора
+    expect_incidents: []
+    events:
+      - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Users\victim\Downloads\GoTo Opener.exe', Description: GoTo Opener, Product: GoTo Opener, Company: 'LogMeIn, Inc.'}
   - name: negative_single_indicator_repeated
     expect_incidents: []
     events:

@@ -45,7 +45,7 @@ micro-batch И независимо от размера БД.
 ## Поддержанные типы
 
 `event_count`, `value_count`, `temporal`, `temporal_ordered` — включая цепочки (correlation
-ссылается на другую correlation, форма `artifacts/content/auth_after_brutforce.yml`).
+ссылается на другую correlation, напр. `artifacts/content/auth/correlations/sce_auth_bruteforce_success.yml`).
 «Расширенные» condition-выражения (`temporal_extended`/`temporal_ordered_extended`, напр.
 `condition: {expression: "rule_a and rule_b"}`) не поддержаны — отклоняются явной ошибкой при
 сохранении правила (`app/rules/rules_catalog.py:_validate_correlation_doc`), не тихой
@@ -156,7 +156,7 @@ best-effort в исходном порядке.
 `*.sigmacorr` (`kind="correlation"`) — раньше индекс строился ТОЛЬКО по `*.yml`/`*.yaml`, из-за
 чего ссылка correlation → correlation никогда не резолвилась, и вся correlation-запись
 (включая её собственные корректные base-ссылки) молча пропускалась целиком (это ровно то, что
-раньше «глушило» все три `temporal_ordered`-правила `auth_after_brutforce.yml`).
+раньше «глушило» все `temporal_ordered`-цепочки тогдашнего тестового контента).
 
 `active_hit_spec(ruleset_path) -> dict[str, set[str]]` — названия БАЗОВЫХ (`kind="base"`)
 правил → набор полей для `group_json`. Ссылки `kind="correlation"` сюда НЕ попадают — когда
@@ -306,14 +306,15 @@ best-effort в исходном порядке.
 структурные и функциональные границы (практическая версия — `docs/guide/correlation-rules-guide.md`
 §«Ограничения»):
 
-- **Ссылка `correlation.rules` резолвится ТОЛЬКО внутри одной директории custom-рулсета.**
-  `rules_catalog._load_correlation_rules_uncached` строит индекс `name`/`id` → `title` через
-  `target_dir.glob(...)` — только файлы САМОЙ этой директории. На builtin-правила (`Zircolite/
-  rules/*.json`, другая директория) сослаться нельзя вообще; на правило из ДРУГОГО
-  custom-рулсета — тоже нельзя, даже если оба включены в основной рулсет. Нужный селектор
-  приходится продублировать как свой `.yml` в той же папке, что и корреляция (см. `windows_
-  bruteforce.yml`/`auth_after_brutforce.yml` — они заводят собственные базовые правила, а не
-  ссылаются на built-in).
+- **Ссылка `correlation.rules` резолвится только по своим (custom) рулсетам.** Индекс
+  `rules_catalog.build_ref_index` строится по всем custom-рулсетам (межрулсетные ссылки — норма,
+  зависимости подтягиваются в прогон `with_dependencies`); на builtin-правила (`Zircolite/rules/
+  *.json`) сослаться нельзя. Нужный селектор заводится своим базовым правилом (детект-контент
+  `artifacts/content` так и устроен — CLAUDE.md §9).
+- **Одно поле ключа — одно имя.** `group-by` сравнивает значения поля с одним и тем же именем у
+  всех ссылок; алиасов полей (`correlation.aliases` Sigma) нет. Если нужная связка лежит в полях
+  с разными именами (4720 `TargetSid` ↔ 4732 `MemberSid`), корреляция ключуется по общему полю
+  (`Computer`) — осознанное упрощение, не повод усложнять движок.
 - **Одна корреляция — один `source_batch`.** Все запросы к `rule_hits` в `store.py` фильтруют
   по конкретному `source_batch`; корреляция между событиями двух РАЗНЫХ зарегистрированных
   источников невозможна (вынесено в план Этапа B).
