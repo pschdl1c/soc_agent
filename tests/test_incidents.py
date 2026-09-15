@@ -216,6 +216,27 @@ def test_informational_marked_rule_still_fires(store, monkeypatch):
     assert store.list_incidents(source_batch="b1")[0]["severity"] == "medium"
 
 
+def test_incident_carries_rule_description(store, monkeypatch):
+    """description correlation-правила ложится в инцидент снимком (колонка "Описание" в UI) и
+    обновляется на повторном срабатывании в том же бакете."""
+    events = _events("Failed Auth", 10, {"IpAddress": "10.0.0.3"}, "2024-01-01T00:00:00")
+    _ingest(store, events, "b1", "Failed Auth", {"IpAddress"})
+    corr = _corr("BF", ["Failed Auth"], "event_count", ["IpAddress"], "1h", {"gte": 10}, incident=_INC)
+    corr["description"] = "  Много неудачных входов с одного адреса.\nПодбор пароля.  "
+    _active(monkeypatch, [corr])
+    correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": events})
+
+    inc = store.list_incidents(source_batch="b1")[0]
+    assert inc["description"] == "Много неудачных входов с одного адреса.\nПодбор пароля."
+    assert store.get_incident(inc["incident_id"])["description"] == inc["description"]
+
+    corr["description"] = "Переписанное описание."
+    more = _events("Failed Auth", 10, {"IpAddress": "10.0.0.3"}, "2024-01-01T00:20:00")
+    _ingest(store, more, "b1", "Failed Auth", {"IpAddress"})
+    correlation.evaluate_batch(store, "rs", "b1", {"Failed Auth": more})
+    assert store.list_incidents(source_batch="b1")[0]["description"] == "Переписанное описание."
+
+
 # ------------------------------------------------------------------ store: upsert / link / enqueue
 
 

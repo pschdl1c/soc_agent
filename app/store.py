@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     dedup_key TEXT NOT NULL UNIQUE,
     incident_type TEXT NOT NULL,
     title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     severity TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'new',
     source_batch TEXT NOT NULL,
@@ -1459,13 +1460,13 @@ class Store:
                     cur.execute(
                         """
                         UPDATE incidents SET
-                            severity = ?, title = ?, window_start = ?, window_end = ?,
+                            severity = ?, title = ?, description = ?, window_start = ?, window_end = ?,
                             member_rule_titles = ?, mitre_techniques = ?, entities = ?,
                             sample_events = ?, updated_at = ?
                         WHERE dedup_key = ?
                         """,
                         (
-                            severity, inc.title, window_start, window_end,
+                            severity, inc.title, inc.description, window_start, window_end,
                             json.dumps(inc.member_rule_titles), json.dumps(inc.mitre_techniques),
                             json.dumps(inc.entities.model_dump()),
                             json.dumps(inc.sample_events, default=str), now, inc.dedup_key,
@@ -1476,14 +1477,14 @@ class Store:
                     cur.execute(
                         """
                         INSERT INTO incidents (
-                            incident_id, dedup_key, incident_type, title, severity, status,
+                            incident_id, dedup_key, incident_type, title, description, severity, status,
                             source_batch, ruleset_path, correlation_rule_id, correlation_rule_title,
                             group_key, member_rule_titles, window_start, window_end, window_bucket,
                             alert_count, mitre_techniques, entities, sample_events, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            inc.incident_id, inc.dedup_key, inc.incident_type, inc.title,
+                            inc.incident_id, inc.dedup_key, inc.incident_type, inc.title, inc.description,
                             inc.severity.value, inc.status, inc.source_batch, inc.ruleset_path,
                             inc.correlation_rule_id, inc.correlation_rule_title,
                             json.dumps(inc.group_key), json.dumps(inc.member_rule_titles),

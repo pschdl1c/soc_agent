@@ -298,12 +298,24 @@ def paginate_rules(
     in_main_fn: Callable[[str], bool] | None = None,
     level: list[str] | None = None,
     status: list[str] | None = None,
+    ruleset_path: str | None = None,
+    kind: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Подстрока по title/description (регистронезависимо) + сортировка + пагинация над УЖЕ
+    """Подстрока по title/description/name (регистронезависимо) + сортировка + пагинация над УЖЕ
     готовым списком правил - переиспользуется search_rules (по ruleset_path) и main.py напрямую
     для просмотра "Основного рулсета" (виртуальный список из main_ruleset.resolve_with_sources,
     не привязан к одному ruleset_path, поэтому не проходит через load_rules). level сортируется
     по рангу серьёзности (LEVEL_ORDER), не по алфавиту.
+
+    name (Sigma `name`, ключ ссылок correlation.rules) в .manifest.json не хранится - строки
+    дополняются им из скана YAML (_rule_names) по паре (рулсет строки, id). Рулсет строки -
+    source_ruleset (просмотр main), иначе ruleset_path. У builtin name нет.
+
+    kind - фильтр по виду правила (мультиселект «Тип» в UI, как level/status): "base"
+    (обычное Sigma-правило), "correlation" (корреляция БЕЗ инцидента - промежуточные звенья
+    и агрегаторы), "incident" (сценарное правило, блок correlation.incident). None/пустой
+    список - фильтр не применяется. Виды НЕ вложены друг в друга: сценарное правило в
+    "correlation" не попадает (бейдж у него один - inc).
 
     level/status - фильтр по метадате правила (мультиселект в UI): непустой список значений,
     правило проходит, если его level/status (регистронезависимо) входит в список. None/пустой
@@ -312,11 +324,16 @@ def paginate_rules(
     only_ids/in_main_fn - точки интеграции с "основным рулсетом" (app/rules/main_ruleset.py),
     передаются СНАРУЖИ (main.py) предикатами/множеством id, а не импортом main_ruleset -
     этот модуль ничего не знает про main ruleset (см. докстринг модуля)."""
+    names = _rule_names()
+    if names:
+        rules = [_with_name(r, names, ruleset_path) for r in rules]
     if q:
         needle = q.strip().lower()
         rules = [
             r for r in rules
-            if needle in str(r.get("title", "")).lower() or needle in str(r.get("description", "")).lower()
+            if needle in str(r.get("title", "")).lower()
+            or needle in str(r.get("description", "")).lower()
+            or needle in str(r.get("name") or "").lower()
         ]
     if level:
         allowed = {v.lower() for v in level}
@@ -324,13 +341,16 @@ def paginate_rules(
     if status:
         allowed = {v.lower() for v in status}
         rules = [r for r in rules if str(r.get("status", "")).lower() in allowed]
+    if kind:
+        allowed = set(kind)
+        rules = [r for r in rules if _rule_kind(r) in allowed]
     if only_ids is not None:
         rules = [r for r in rules if r.get("id") in only_ids]
     reverse = (sort_dir or "asc").lower() == "desc"
     if sort_by == "level":
         rules = sorted(rules, key=lambda r: LEVEL_ORDER.get(r.get("level", "informational"), 99), reverse=reverse)
-    elif sort_by in ("title", "author", "status"):
-        rules = sorted(rules, key=lambda r: str(r.get(sort_by, "")).lower(), reverse=reverse)
+    elif sort_by in ("title", "name", "author", "status"):
+        rules = sorted(rules, key=lambda r: str(r.get(sort_by) or "").lower(), reverse=reverse)
     total = len(rules)
     page = rules[offset:offset + limit]
     if in_main_fn:
@@ -349,11 +369,44 @@ def search_rules(
     in_main_fn: Callable[[str], bool] | None = None,
     level: list[str] | None = None,
     status: list[str] | None = None,
+    kind: list[str] | None = None,
 ) -> dict[str, Any]:
     return paginate_rules(
         load_rules(ruleset_path), q, sort_by, sort_dir, limit, offset, only_ids, in_main_fn,
-        level=level, status=status,
+        level=level, status=status, ruleset_path=ruleset_path, kind=kind,
     )
+
+
+def _rule_kind(rule: dict[str, Any]) -> str:
+    """Вид правила для фильтра «Тип» - те же три взаимоисключающих значения, что и бейджи в UI."""
+    if rule.get("incident"):
+        return "incident"
+    if rule.get("correlation"):
+        return "correlation"
+    return "base"
+
+
+def _rule_names() -> dict[tuple[str, str], str]:
+    """(ruleset_path, id) -> Sigma name по всем своим правилам. Ключ - пара, а не голый id:
+    неизменённое правило SigmaHQ может носить тот же id, что и запись встроенного рулсета.
+    Id записи манифеста - это id из YAML, у correlation без id: - имя файла, поэтому
+    кладутся оба."""
+    names: dict[tuple[str, str], str] = {}
+    for entry in _scan_custom_rules()[1]:
+        if not entry["name"]:
+            continue
+        for key in (entry["id"], entry["rule_id"]):
+            if key:
+                names[(entry["ruleset_path"], key)] = entry["name"]
+    return names
+
+
+def _with_name(
+    rule: dict[str, Any], names: dict[tuple[str, str], str], ruleset_path: str | None
+) -> dict[str, Any]:
+    """Копия строки с name - строки берутся из кэша манифеста, мутировать их нельзя."""
+    name = names.get((rule.get("source_ruleset") or ruleset_path or "", rule.get("id") or ""))
+    return {**rule, "name": name} if name else rule
 
 
 def get_rule(ruleset_path: str, rule_id: str) -> dict[str, Any] | None:

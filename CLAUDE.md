@@ -172,7 +172,9 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   ТОЛЬКО помеченным `correlation.incident` correlation-правилом (вместо `engine="correlation"`
   алерта). Дедуп по `dedup_key = sha256(source_batch:incident_type:group_values:window_bucket)[:16]`
   — источник + фиксированный бакет по `timespan` правила: повтор в бакете → UPDATE, разрыв больше
-  `timespan` → новый инцидент, ДРУГОЙ источник → всегда другой инцидент (см. §8). Поля: `incident_type`/`title`/`severity`/`status` (`new → investigating →
+  `timespan` → новый инцидент, ДРУГОЙ источник → всегда другой инцидент (см. §8). Поля: `incident_type`/`title`/`description` (снимок `description`
+  сработавшего correlation-правила — колонка «Описание» в UI; `title` по умолчанию равен названию
+  правила, поэтому раньше колонка дублировала соседнюю)/`severity`/`status` (`new → investigating →
   closed`)/`source_batch`/`ruleset_path`/`correlation_rule_*`/`group_key`/`member_rule_titles`/
   `window_*`/`alert_count`/`mitre_techniques`/`entities`/`sample_events`. Member-алерты —
   таблица связей `incident_alerts(incident_id, alert_id)`, many-to-many: два сценария на одних
@@ -205,7 +207,7 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
 | GET | `/events` · `/events/{id}` | Список / карточка сырого события. Фильтры: `source_batch`, `only_matched`, `time_from/to`; `query` — строка мини-языка фильтра (`app/filter_lang.py`: and/or/not, скобки, спецполя `rule`/`is_matched`), при синтаксической ошибке `400` с текстом и позицией; `group_cond` — drill-in по группе (всегда AND, отдельно от `query`; неизвестный оператор/пустое поле → `400`, а не молчаливый пропуск условия — фильтр обязан только сужать); `time_from`/`time_to` приводятся к канонической форме (`app/timeutil.py`), верхняя граница ВКЛЮЧАЮЩАЯ (`time_to=…T21:01:30` накрывает `…T21:01:30.113`); сортировка `sort_by`/`sort_dir` (в т.ч. по любому полю raw_json); `fields=A,B` — кастом-колонки. Отдельного параметра фильтра по хосту нет — выражается через `query` (напр. `Hostname contains "..."`). |
 | GET | `/events/group` | Агрегаторы для панели группировки: `group_by=<field>` (включая спецполя `rule`/`is_matched`) + те же фильтры (`query` и т.п.) → `[{value, count}]` по убыванию (фильтр применяется до группировки; `rule` — многозначное поле, разворачивается через `LEFT JOIN json_each`). |
 | GET | `/rulesets` | Каталог рулсетов (builtin + все именованные custom + одна виртуальная запись «main», основной рулсет) — `[{path, category, name, rule_count, size_bytes, deletable, main_status}]`. `main_status` — `full`\|`partial`\|`none`, состав основного рулсета внутри ЭТОГО рулсета (см. `app/rules/main_ruleset.py`). `path` — то же значение, что подставляется в `ruleset` у `/ingest/file`·`/ingest/upload` (в т.ч. `"main"`). |
-| GET | `/rulesets/rules` · `/rulesets/rule` | Список правил рулсета (`ruleset=<path>`, поиск `q` по title/description, `only_main=true` — только правила, входящие в основной рулсет, сортировка `sort_by=level`\|`title`\|`author`\|`status`, пагинация; каждая строка списка несёт `in_main`) / карточка одного правила. Для custom-рулсета карточка дополнительно содержит `yaml_text` (исходный Sigma YAML) — у builtin его нет и не было никогда, хранится только уже скомпилированный SQL. |
+| GET | `/rulesets/rules` · `/rulesets/rule` | Список правил рулсета (`ruleset=<path>`, поиск `q` по title/description/name, `only_main=true` — только правила, входящие в основной рулсет, сортировка `sort_by=level`\|`title`\|`name`\|`author`\|`status`, `kind` — мультиселект вида правила CSV-списком, как `level`/`status` (`base`\|`correlation`\|`incident`; виды взаимоисключающие — сценарное, т.е. с `correlation.incident`, в `correlation` не попадает; неизвестное значение — 400), пагинация; каждая строка списка несёт `in_main` и, у своих правил, `name` — Sigma `name` в манифест не пишется, подмешивается из скана YAML по паре (рулсет, id), `rules_catalog._rule_names`) / карточка одного правила. Для custom-рулсета карточка дополнительно содержит `yaml_text` (исходный Sigma YAML) — у builtin его нет и не было никогда, хранится только уже скомпилированный SQL. |
 | POST | `/rulesets/upload` | Загрузка рулсета — сырой Sigma YAML (`.yml`/`.yaml`, можно multi-document — несколько правил в одном файле). Тело — multipart: `file` + (`ruleset` — существующий свой рулсет, ИЛИ `new_ruleset_name` — создать новый; ровно один из двух). Встроенные рулсеты как цель отклоняются (`400`). |
 | DELETE | `/rulesets` | Удаление именованного custom-рулсета целиком (`?ruleset=<path>`); встроенные рулсеты не удаляются (`404`). Чистит ссылки на него в основном рулсете (`main_ruleset.on_ruleset_deleted`). |
 | POST | `/rules/custom` | Компиляция и сохранение НОВОГО своего правила: тело `{yaml_text, ruleset?, new_ruleset_name?}` — сырой Sigma YAML одного правила + существующий/новый целевой custom-рулсет (ровно один из двух), валидируется и компилируется через `RulesetHandler` (`400` с текстом ошибки, ничего не пишется на диск). Ответ дополнительно содержит `ruleset_path` — куда правило попало. |
@@ -566,15 +568,18 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   кавычке внутри YAML — ловили `SyntaxError: Invalid or unexpected token` именно на этом.
   Удаление — для custom-рулсетов и своих правил (встроенные — read-only). Списки `ruleset` в формах ingest
   («Источник данных») и сам селектор рулсета вкладки Sigma-правила заполняются из одного
-  каталога, плюс пункт «⭐ Основной рулсет» первым во ВСЕХ трёх (`rulesetOptionsHtml(catalog,
-  {includeMain:true})` теперь без исключения для sigma-select).
+  каталога, плюс пункт «Основной рулсет» первым во ВСЕХ трёх (`rulesetOptionsHtml(catalog,
+  {includeMain:true})` теперь без исключения для sigma-select). Он же — ЗНАЧЕНИЕ ПО УМОЛЧАНИЮ
+  селектора вкладки при первой загрузке страницы (раньше открывался built-in
+  `rules_windows_merged.json`): браузинг начинается с того, что реально исполняется на потоковом
+  ingest, built-in нужен только для разовых прогонов файлов.
   **Основной рулсет** (main, см. `app/rules/main_ruleset.py` выше) собирается прямо тут: отдельная
   колонка в таблице правил с кнопкой `+`/`✓` на каждую строку (`toggleRuleInMain`, работает для
   ЛЮБОГО открытого рулсета — builtin или custom), кнопка «добавить рулсет целиком» рядом с
   селектором (`toggleCurrentRulesetInMain`, статус из `entry.main_status`), toggle switch
   «Только основной рулсет» (`#sigma-only-main-toggle`) фильтрует уже открытый список до
   входящих в main (`only_main=true` у `/rulesets/rules`; выключен и снят, когда сам main выбран
-  в селекторе — там и так только он). Выбор «⭐ Основной рулсет» в селекторе — такой же пункт,
+  в селекторе — там и так только он). Выбор «Основной рулсет» в селекторе — такой же пункт,
   как любой другой: показывает виртуальный список, собранный сразу из НЕСКОЛЬКИХ реальных
   рулсетов (`GET /rulesets/rules?ruleset=main` → `main_ruleset.resolve_with_sources()`); каждая
   строка несёт `source_ruleset` — по нему (не по значению селектора) идут клик по правилу и

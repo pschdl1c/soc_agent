@@ -255,6 +255,10 @@
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   td { padding: 8px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12px; }
+  /* Длинный текст в ячейке (описание инцидента) - одна строка с эллипсисом, полный текст в
+     title. Без max-width колонка растягивала бы таблицу до горизонтальной прокрутки:
+     описания правил - несколько предложений. */
+  td.cell-clamp { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   tr.data-row { cursor: pointer; }
   tr.data-row:hover td { background: var(--surface-2); }
   tr.selected td { background: #1a2230; }
@@ -478,6 +482,9 @@
 
   .detail-panel h3 { margin: 0 0 4px 0; font-size: 14px; }
   .detail-panel .muted { color: var(--muted); font-size: 12px; }
+  /* Описание инцидента в карточке - обычный абзац (переносится), в отличие от ячейки таблицы.
+     Цвет/размер берёт от .muted (тот же тон, что и строка "правило · type:" под ним). */
+  .incident-desc { margin: 6px 0 2px 0; line-height: 1.45; }
 
   /* Компактные таблицы внутри detail-панелей (карточка инцидента: member-алерты, связанные
      события, история). table-layout:fixed ОБЯЗАТЕЛЕН - под auto-раскладку колонка вроде
@@ -1082,6 +1089,10 @@
             <button type="button" class="ghost" id="sigma-status-btn" onclick="event.stopPropagation(); toggleSigmaFacetPopover('status')">Статус: все &#9662;</button>
             <div class="filter-popover" id="sigma-status-popover" style="display:none;" onclick="event.stopPropagation()"></div>
           </div>
+          <div class="filter-multiselect" id="sigma-kind-filter">
+            <button type="button" class="ghost" id="sigma-kind-btn" onclick="event.stopPropagation(); toggleSigmaFacetPopover('kind')" title="Вид правила: базовое / корреляция без инцидента / сценарное (заводит инцидент)">Тип: все &#9662;</button>
+            <div class="filter-popover" id="sigma-kind-popover" style="display:none;" onclick="event.stopPropagation()"></div>
+          </div>
           <button type="button" class="ghost" onclick="loadSigmaRules(0)">Обновить</button>
           <button type="button" class="ghost" onclick="clearSigmaFilters()">Сбросить</button>
         </div>
@@ -1297,7 +1308,7 @@ level: medium"></textarea>
                 <input type="text" id="vl-name" placeholder="hacktool_binaries" style="width:100%; margin-top:4px;">
               </div>
               <label style="font-size:12px;">Описание:</label>
-              <input type="text" id="vl-description" style="width:100%; margin:4px 0 10px 0;" readonly>
+              <textarea id="vl-description" style="width:100%; min-height:70px; margin:4px 0 10px 0;" readonly></textarea>
               <label style="font-size:12px;">Значения (по одному в строке):</label>
               <textarea id="vl-values" style="min-height:220px; font-family:var(--mono);" readonly></textarea>
               <div class="row" style="margin-top:10px;">
@@ -1581,9 +1592,10 @@ const ALERT_GROUP_COLUMNS = [
 
 // sort_by у GET /incidents: created_at/updated_at/alert_count/status/severity (см. app/main.py).
 // incident_type/title сервер не сортирует - соответствующие колонки key:null.
-// "Инцидент" = correlation_rule_title (само сработавшее правило, напр. "T5 - Suspicious Domain
-// Queried By Multiple Hosts"), "Описание" = incident.title из YAML (напр. "Один и тот же
-// C2-домен запрошен с нескольких хостов") - две разные вещи: правило может быть одно, а
+// "Инцидент" = correlation_rule_title (само сработавшее правило, напр. "SCE_Persist_Multiple_
+// Mechanisms"), "Описание" = description ТОГО ЖЕ правила, снимок в incidents.description
+// (см. incidentDescription: раньше тут был incident.title, а он по умолчанию равен названию
+// правила - колонка дублировала соседнюю).
 // incident_type (слаг, см. correlation.incident.type) - смысловая категория поверх него, не
 // показывается отдельной колонкой (остаётся доступен через фильтр "Тип:" и подзаголовок в
 // детейл-панели), чтобы не дублировать то же самое, что уже несёт "Инцидент"/"Описание".
@@ -1605,6 +1617,7 @@ const SIGMA_COLUMNS = [
   { key: null, id: "in_main", label: "" },
   { key: null, label: "" },
   { key: "title", label: "Правило" },
+  { key: "name", label: "Name" },
   { key: "level", label: "Уровень" },
   { key: "status", label: "Статус" },
   { key: "author", label: "Автор" },
@@ -2636,7 +2649,7 @@ async function loadValueLists() {
     body.innerHTML = rows.map(r => `
       <tr class="data-row ${r.name === vlCurrent ? "selected" : ""}" onclick="vlSelect('${r.name}')">
         <td>${escapeHtml(r.name)}</td>
-        <td style="font-family:var(--sans);">${escapeHtml(r.description || "")}</td>
+        <td class="cell-clamp" style="font-family:var(--sans);" title="${attr(r.description || "")}">${escapeHtml(r.description || "") || '<span class="muted">—</span>'}</td>
         <td>${r.value_count}</td>
         <td>${r.used_by_count}</td>
         <td>${escapeHtml((r.updated_at || "").replace("T", " ").slice(0, 19))}</td>
@@ -3153,6 +3166,16 @@ function toggleMemberGroup(id, row) {
 
 // ---------- Incidents (Этап 4) ----------
 
+// "Описание" инцидента - description сработавшего correlation-правила (снимок в incidents.description).
+// Переводы строк схлопываются: в контенте описания пишутся блочным скаляром в несколько строк.
+// Фолбэк на title - только если тот РЕАЛЬНО отличается от названия правила (incident.title из
+// YAML); иначе колонка дублировала бы соседнюю "Инцидент", как было до появления description.
+function incidentDescription(inc) {
+  const desc = (inc.description || "").replace(/\s+/g, " ").trim();
+  if (desc) return desc;
+  return inc.title && inc.title !== inc.correlation_rule_title ? inc.title : "";
+}
+
 function verdictBadge(v) {
   if (!v) return '<span class="muted">—</span>';
   return `<span class="badge badge-${v.toLowerCase()}">${escapeHtml(v)}</span>`;
@@ -3197,7 +3220,7 @@ async function loadIncidents(offset = 0) {
       <tr class="data-row" data-id="${i.incident_id}" onclick="selectIncident('${i.incident_id}')">
         <td>${sevBar(i.severity)}</td>
         <td>${escapeHtml(i.correlation_rule_title)}</td>
-        <td>${escapeHtml(i.title)}</td>
+        <td class="cell-clamp" title="${attr(incidentDescription(i))}">${escapeHtml(incidentDescription(i)) || '<span class="muted">—</span>'}</td>
         <td title="${attr(groupKeyText(i.group_key))}">${escapeHtml(groupKeyText(i.group_key)) || '<span class="muted">—</span>'}</td>
         <td>${i.alert_count}</td>
         <td><span class="badge badge-${i.status}">${i.status}</span></td>
@@ -3245,6 +3268,7 @@ async function selectIncident(id) {
     const memberRows = memberAlertGroupsHtml(inc.member_alerts || [], inc.incident_id);
     content.innerHTML = `
       <h3>${sevBar(inc.severity)}${escapeHtml(inc.correlation_rule_title || "—")}</h3>
+      ${incidentDescription(inc) ? `<p class="muted incident-desc">${escapeHtml(incidentDescription(inc))}</p>` : ""}
       <p class="muted">${escapeHtml(inc.title) || "без описания"} · type: ${escapeHtml(inc.incident_type)}</p>
       ${mitre.tacticsHtml ? `<div style="margin:8px 0 2px 0;">${mitre.tacticsHtml}</div>` : ""}
       <div style="margin:4px 0 10px 0;">${mitre.techniquesHtml}</div>
@@ -3558,7 +3582,7 @@ function rulesetOptionsHtml(catalog, opts) {
   if (opts.includeMain) {
     const mainEntry = catalog.find(r => r.category === "main");
     if (mainEntry) {
-      html += `<option value="${attr(mainEntry.path)}">⭐ ${escapeHtml(mainEntry.name)} (${mainEntry.rule_count})</option>`;
+      html += `<option value="${attr(mainEntry.path)}">${escapeHtml(mainEntry.name)} (${mainEntry.rule_count})</option>`;
     }
   }
   html += ["builtin", "custom"].map(cat => {
@@ -3600,13 +3624,13 @@ async function refreshRulesetOptions() {
   if (prevSigma && rulesetCatalog.some(r => r.path === prevSigma)) {
     sigmaSelect.value = prevSigma;
   } else {
-    const browsable = rulesetCatalog.filter(r => r.category !== "main");
-    if (browsable.length) {
-      // Первая загрузка (ничего ещё не выбрано) - по умолчанию открываем merged built-in,
-      // если он есть, иначе первый доступный, чтобы таблица не была пустой сразу при открытии вкладки.
-      const defaultEntry = browsable.find(r => r.path.endsWith("rules_windows_merged.json")) || browsable[0];
-      sigmaSelect.value = defaultEntry.path;
-    }
+    // Первая загрузка (ничего ещё не выбрано) - открываем "Основной рулсет": то, что реально
+    // исполняется на потоковом ingest. Встроенные рулсеты нужны только для разовых прогонов
+    // файлов, начинать браузинг с них смысла нет.
+    const mainEntry = rulesetCatalog.find(r => r.category === "main");
+    const fallback = rulesetCatalog.find(r => r.category !== "main");
+    const defaultEntry = mainEntry || fallback;
+    if (defaultEntry) sigmaSelect.value = defaultEntry.path;
   }
 
   const customOnly = rulesetCatalog.filter(r => r.category === "custom");
@@ -3660,23 +3684,31 @@ function updateSigmaRulesetMeta() {
   if (wrap) wrap.style.opacity = isMainView ? "0.5" : "1";
 }
 
-// ---------- Фильтр по метадате (уровень/статус) - мультиселект-поповер ----------
+// ---------- Фильтр по метадате (уровень/статус/тип) - мультиселект-поповер ----------
 // Значения захардкожены (уровень - весь LEVEL_ORDER из rules_catalog.py, статус - полный
-// набор из Sigma-спеки), а не собираются динамически из текущего рулсета - список должен
-// быть стабильным при переключении рулсета/поиске, а не "прыгать" вместе с результатами.
+// набор из Sigma-спеки, тип - виды правил, см. kind у /rulesets/rules), а не собираются
+// динамически из текущего рулсета - список должен быть стабильным при переключении
+// рулсета/поиске, а не "прыгать" вместе с результатами.
 const SIGMA_FACETS = {
   level: ["critical", "high", "medium", "low", "informational"],
   status: ["stable", "test", "experimental", "deprecated", "unsupported"],
+  kind: ["base", "correlation", "incident"],
 };
-const SIGMA_FACET_TITLES = { level: "Уровень", status: "Статус" };
-let sigmaFacetSelected = { level: new Set(), status: new Set() };
-let sigmaFacetOpen = null; // "level" | "status" | null
+const SIGMA_FACET_TITLES = { level: "Уровень", status: "Статус", kind: "Тип" };
+// Подписи вместо сырых значений - только там, где значение само по себе непонятно.
+const SIGMA_FACET_LABELS = { kind: { base: "базовые", correlation: "корреляции", incident: "сценарные" } };
+let sigmaFacetSelected = { level: new Set(), status: new Set(), kind: new Set() };
+let sigmaFacetOpen = null; // "level" | "status" | "kind" | null
+
+function sigmaFacetValueLabel(facet, value) {
+  return (SIGMA_FACET_LABELS[facet] || {})[value] || value;
+}
 
 function sigmaFacetButtonLabel(facet) {
   const sel = sigmaFacetSelected[facet];
   const title = SIGMA_FACET_TITLES[facet];
   if (sel.size === 0) return `${title}: все`;
-  if (sel.size <= 2) return `${title}: ${[...sel].join(", ")}`;
+  if (sel.size <= 2) return `${title}: ${[...sel].map(v => sigmaFacetValueLabel(facet, v)).join(", ")}`;
   return `${title}: ${sel.size}`;
 }
 
@@ -3690,14 +3722,14 @@ function renderSigmaFacetPopover(facet) {
   pop.innerHTML = SIGMA_FACETS[facet].map(v => `
     <label class="facet-option">
       <input type="checkbox" value="${escapeAttr(v)}" ${sel.has(v) ? "checked" : ""} onchange="toggleSigmaFacetValue('${facet}','${escapeAttr(v)}', this.checked)">
-      ${escapeHtml(v)}
+      ${escapeHtml(sigmaFacetValueLabel(facet, v))}
     </label>
   `).join("") + `<div class="facet-actions"><button type="button" class="ghost" onclick="clearSigmaFacet('${facet}')">Сбросить</button></div>`;
 }
 
 function toggleSigmaFacetPopover(facet) {
   const wasOpen = sigmaFacetOpen === facet;
-  ["level", "status"].forEach(f => { document.getElementById(`sigma-${f}-popover`).style.display = "none"; });
+  Object.keys(SIGMA_FACETS).forEach(f => { document.getElementById(`sigma-${f}-popover`).style.display = "none"; });
   if (wasOpen) { sigmaFacetOpen = null; return; }
   renderSigmaFacetPopover(facet);
   document.getElementById(`sigma-${facet}-popover`).style.display = "block";
@@ -3724,13 +3756,15 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// "корреляция"/"инцидент" рядом с названием правила - оба поля уже есть в ответе
+// "correlation"/"inc" рядом с названием правила - оба поля уже есть в ответе
 // /rulesets/rules (см. rules_catalog: correlation - псевдо-скомпилированная запись .sigmacorr,
 // incident - булев бейдж наличия блока correlation.incident).
 function ruleKindBadges(r) {
   let out = "";
-  if (r.correlation) out += ' <span class="badge badge-correlation" title="Correlation-правило: считает скользящее окно по срабатываниям других правил">корреляция</span>';
-  if (r.incident) out += ' <span class="badge badge-incident" title="При срабатывании заводит инцидент вместо обычного алерта">инцидент</span>';
+  // Сценарное правило (заводит инцидент) - всегда correlation, второй бейдж рядом ничего не
+  // добавляет: показываем только inc.
+  if (r.incident) out += ' <span class="badge badge-incident" title="Сценарное correlation-правило: при срабатывании заводит инцидент вместо обычного алерта">inc</span>';
+  else if (r.correlation) out += ' <span class="badge badge-correlation" title="Correlation-правило: считает скользящее окно по срабатываниям других правил">correlation</span>';
   // Только в просмотре «Основного рулсета»: правило в main не добавлено, но исполняется, потому что
   // на него ссылается включённая корреляция (rules_catalog.with_dependencies).
   if (r.via_dependency) {
@@ -3767,6 +3801,7 @@ async function loadSigmaRules(offset) {
   if (q) params.set("q", q);
   const onlyMain = document.getElementById("sigma-only-main-toggle").checked;
   if (onlyMain) params.set("only_main", "true");
+  if (sigmaFacetSelected.kind.size) params.set("kind", [...sigmaFacetSelected.kind].join(","));
   if (sigmaFacetSelected.level.size) params.set("level", [...sigmaFacetSelected.level].join(","));
   if (sigmaFacetSelected.status.size) params.set("status", [...sigmaFacetSelected.status].join(","));
   sortParams(sigmaSort, params);
@@ -3796,6 +3831,7 @@ async function loadSigmaRules(offset) {
             : `<button type="button" class="in-main-btn${r.in_main ? " active" : ""}" title="${r.in_main ? "Убрать из основного рулсета" : "Добавить в основной рулсет"}" onclick="event.stopPropagation(); toggleRuleInMain('${escapeAttr(rowRuleset)}','${escapeAttr(r.id || "")}', ${r.in_main ? "false" : "true"})">${r.in_main ? "✓" : "+"}</button>`}</td>
           <td>${sevBar(r.level)}</td>
           <td>${escapeHtml(r.title || "")}${ruleKindBadges(r)}</td>
+          <td>${r.name ? escapeHtml(r.name) : '<span style="color:var(--muted);">—</span>'}</td>
           <td>${escapeHtml(r.level || "")}</td>
           <td>${escapeHtml(r.status || "")}</td>
           <td>${escapeHtml(r.author || "")}</td>
@@ -3825,8 +3861,10 @@ function clearSigmaFilters() {
   document.getElementById("sigma-only-main-toggle").checked = false;
   sigmaFacetSelected.level.clear();
   sigmaFacetSelected.status.clear();
+  sigmaFacetSelected.kind.clear();
   renderSigmaFacetButton("level");
   renderSigmaFacetButton("status");
+  renderSigmaFacetButton("kind");
   loadSigmaRules(0);
 }
 

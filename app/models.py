@@ -131,6 +131,10 @@ class Incident(BaseModel):
     dedup_key: str
     incident_type: str  # slug из correlation.incident.type
     title: str
+    # description сработавшего correlation-правила - СНИМОК на момент срабатывания, не ссылка:
+    # правило могут переписать или удалить, а инцидент остаётся единицей работы агента и должен
+    # объяснять сам себя. В UI это колонка "Описание" вкладки Инциденты и абзац в карточке.
+    description: str = ""
     severity: Severity
     status: IncidentStatus = "new"  # см. IncidentStatus - единственный источник правды
     source_batch: str

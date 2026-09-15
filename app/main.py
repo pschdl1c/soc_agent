@@ -971,6 +971,12 @@ def get_rulesets() -> list[dict]:
     return entries
 
 
+# Виды правил для мультиселекта «Тип» вкладки «Sigma-правила»: обычное / корреляция без
+# инцидента / сценарное (correlation.incident). Приезжает CSV в одном параметре, как level
+# и status; неизвестное значение - 400, а не молчаливый показ всех правил.
+RULE_KINDS = {"base", "correlation", "incident"}
+
+
 @app.get("/rulesets/rules")
 def get_ruleset_rules(
     ruleset: str,
@@ -982,12 +988,19 @@ def get_ruleset_rules(
     only_main: bool = False,
     level: str | None = None,
     status: str | None = None,
+    kind: str | None = None,
 ) -> dict:
     _check_paging(limit, offset)
     # Мультиселект фильтра приезжает как CSV в одном query-параметре (level=critical,high),
     # а не повторяющимся ключом - проще на фронте собирать из чекбоксов в поповере.
     level_list = [v for v in level.split(",") if v] if level else None
     status_list = [v for v in status.split(",") if v] if status else None
+    kind_list = [v for v in kind.split(",") if v] if kind else None
+    if kind_list and not RULE_KINDS.issuperset(kind_list):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Недопустимый kind: {kind}. Допустимо: {', '.join(sorted(RULE_KINDS))}",
+        )
     if ruleset == main_ruleset.MAIN_RULESET_ID:
         # Просмотр "Основного рулсета" как отдельного пункта селектора - виртуальный список,
         # собранный из НЕСКОЛЬКИХ реальных рулсетов сразу (не проходит через load_rules).
@@ -1001,6 +1014,7 @@ def get_ruleset_rules(
         ]
         return rules_catalog.paginate_rules(
             rules, q, sort_by, sort_dir, limit, offset, level=level_list, status=status_list,
+            kind=kind_list,
         )
     try:
         base_rules = rules_catalog.load_rules(ruleset)
@@ -1009,7 +1023,7 @@ def get_ruleset_rules(
         only_ids = {r.get("id") for r in base_rules if in_main_fn(r.get("id"))} if only_main else None
         return rules_catalog.search_rules(
             ruleset, q, sort_by, sort_dir, limit, offset, only_ids=only_ids, in_main_fn=in_main_fn,
-            level=level_list, status=status_list,
+            level=level_list, status=status_list, kind=kind_list,
         )
     except CatalogError as exc:
         raise _catalog_http(exc)

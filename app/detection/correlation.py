@@ -517,6 +517,9 @@ def _build_incident(
         dedup_key=dedup_key,
         incident_type=incident_spec["type"],
         title=incident_spec.get("title") or corr["title"],
+        # Снимок description correlation-правила - "Описание" инцидента в UI. Правило могут
+        # переписать/удалить, инцидент остаётся, поэтому копируем, а не ссылаемся.
+        description=str(corr.get("description") or "").strip(),
         severity=Severity.from_zircolite(sev),
         source_batch=source_batch,
         ruleset_path=corr.get("ruleset_path", ""),
