@@ -7,7 +7,8 @@
 # Отличия от Fluent Bit (намеренные, см. docs/guide/windows-agent.md):
 #   * ExecutionProcessID/ExecutionThreadID вместо ProcessID/ThreadID - иначе системный PID
 #     перетирал EventData-поле ProcessId (колонки SQLite регистронезависимы);
-#   * TimeCreated - ISO UTC с микросекундами (у Fluent Bit была секундная точность);
+#   * TimeCreated - ISO UTC с микросекундами (у Fluent Bit была секундная точность); у Sysmon - из
+#     UtcTime события (запись в журнал у Sysmon 3 отстаёт на секунды);
 #   * поле EventData/UserData, совпавшее по имени с системным, получает префикс
 #     EventData/UserData (System 104: Channel очищенного журнала -> UserDataChannel).
 
@@ -71,6 +72,20 @@ out = compact({
 system_names = map_values(keys(out)) -> |k| { downcase(k) }
 
 event_data = object(.event_data) ?? {}
+
+# Sysmon: время события - UtcTime самого события, а не момент записи в журнал. У Sysmon 3 запись идёт
+# пачками и TimeCreated отстаёт на секунды - в temporal_ordered это путало порядок шагов. UtcTime -
+# "YYYY-MM-DD HH:MM:SS.mmm" по UTC; не разобрался - остаётся TimeCreated записи.
+if .channel == "Microsoft-Windows-Sysmon/Operational" {
+  utc_raw = string(event_data.UtcTime) ?? ""
+  if utc_raw != "" {
+    utc_ts, utc_err = parse_timestamp(utc_raw, format: "%Y-%m-%d %H:%M:%S%.f", timezone: "UTC")
+    if utc_err == null {
+      out.TimeCreated = format_timestamp!(utc_ts, format: "%Y-%m-%dT%H:%M:%S%.6fZ")
+    }
+  }
+}
+
 for_each(event_data) -> |name, value| {
   key = name
   if includes(system_names, downcase(name)) { key = "EventData" + name }

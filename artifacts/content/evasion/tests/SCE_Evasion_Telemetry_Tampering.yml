@@ -11,7 +11,7 @@ cases:
   - name: positive_sysmon_config_change_16
     expect_incidents: [evasion_telemetry_tampering]
     events:
-      - event: {EventID: 16, Channel: Microsoft-Windows-Sysmon/Operational, Configuration: 'C:\Users\Public\empty.xml', ConfigurationFileHash: 'SHA256=00'}
+      - event: {EventID: 16, Channel: Microsoft-Windows-Sysmon/Operational, Configuration: 'C:\Users\Public\empty.xml', SHA256: '00'}
   - name: negative_auditpol_get
     expect_incidents: []
     events:

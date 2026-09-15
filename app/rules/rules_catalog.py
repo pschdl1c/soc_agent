@@ -393,8 +393,8 @@ def get_rule(ruleset_path: str, rule_id: str) -> dict[str, Any] | None:
 _scan_cache_lock = threading.Lock()
 _scan_cache: tuple[tuple[int, float], list[dict[str, Any]]] | None = None
 # Сама сигнатура - glob + stat всех файлов всех рулсетов (~10 мс на полторы сотни правил), а
-# зовётся скан на КАЖДОМ шаге резолва: resolve_for/active_hit_spec/evaluate_batch на каждый источник
-# флаша, внутри - по разу на каждую активную корреляцию. Без паузы между проверками резолв main
+# зовётся скан внутри резолва по разу на каждую активную корреляцию (сам резолв main_ruleset.resolve_for
+# считается один раз на флаш, app/main.py:_process_batch). Без паузы между проверками резолв main
 # стоил ~0.5 с и флаш с десятком источников не укладывался в свой интервал. Поэтому сигнатура
 # перепроверяется не чаще раза в _SCAN_RECHECK_SECONDS; запись через этот модуль сбрасывает кэш
 # сразу (invalidate_scan_cache), правка файлов мимо API подхватывается с этой задержкой.
@@ -616,8 +616,10 @@ def with_dependencies(pairs: list[tuple[str, dict[str, Any]]]) -> list[tuple[str
     обе стороны (выключить базовое, удалить рулсет, добавить корреляцию раньше базы), а итог один
     и тот же. Подтянутые правила - копии с via_dependency=True (не мутируем кэш манифестов): их
     можно показать отдельно в составе main. Их собственные алерты при этом появляются как у любого
-    исполняемого правила - это цена работающей корреляции."""
+    исполняемого правила - это цена работающей корреляции. required_by - названия корреляций,
+    которые потянули правило (подсказка к бейджу «зависимость» в UI)."""
     present = {(src, rule.get("id")) for src, rule in pairs}
+    deps: dict[tuple[str, Any], dict[str, Any]] = {}
     out = list(pairs)
     queue = [(src, rule) for src, rule in pairs if rule.get("correlation")]
     # По одному чтению на рулсет за вызов: корреляций и ссылок десятки, а load_* на каждой итерации
@@ -645,10 +647,15 @@ def with_dependencies(pairs: list[tuple[str, dict[str, Any]]]) -> list[tuple[str
                 rules_by_src[dep_src] = by_title
             for dep in rules_by_src[dep_src].get(ref["title"], []):
                 key = (dep_src, dep.get("id"))
+                if key in deps:
+                    if corr.get("title") not in deps[key]["required_by"]:
+                        deps[key]["required_by"].append(corr.get("title"))
+                    continue
                 if key in present:
                     continue
                 present.add(key)
-                dep_rule = {**dep, "via_dependency": True}
+                dep_rule = {**dep, "via_dependency": True, "required_by": [corr.get("title")]}
+                deps[key] = dep_rule
                 out.append((dep_src, dep_rule))
                 if dep.get("correlation"):
                     queue.append((dep_src, dep_rule))

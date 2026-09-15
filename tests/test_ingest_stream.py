@@ -117,3 +117,29 @@ def test_process_events_skips_non_dict_and_keeps_the_rest(main_module, monkeypat
 
     assert [e["EventID"] for e in written] == [1, 2]
     assert result.events_processed == 2
+
+
+def test_process_events_resolves_rules_once_per_flush(main_module, monkeypatch):
+    """Состав основного рулсета резолвится ОДИН раз на флаш, сколько бы источников в нём ни было:
+    раньше отдельно для движка, для active_hit_spec и для evaluate_batch на КАЖДЫЙ источник
+    (3 + N раз)."""
+    from app.rules import main_ruleset
+
+    rule = {
+        "title": "Resolve Once Test", "id": "resolve-once-0001", "level": "informational",
+        "tags": [], "rule": ["SELECT * FROM logs WHERE EventID=1"], "channel": [], "eventid": [],
+    }
+    calls = 0
+
+    def fake_resolve_with_sources():
+        nonlocal calls
+        calls += 1
+        return [("custom_rulesets/fake", rule)]
+
+    monkeypatch.setattr(main_ruleset, "resolve_with_sources", fake_resolve_with_sources)
+
+    tagged = [({"EventID": 1, "Computer": f"HOST-{s}"}, f"resolve-once-{s}") for s in "abc"]
+    result = main_module._process_events(tagged)
+
+    assert result.rules_matched == 1
+    assert calls == 1

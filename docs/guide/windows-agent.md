@@ -71,7 +71,9 @@ powershell -ExecutionPolicy Bypass -File C:\tools\install-soc-agent.ps1 -SiemUrl
   - `ExecutionProcessID`/`ExecutionThreadID` вместо `ProcessID`/`ThreadID`. Раньше системный PID
     конфликтовал с полем `ProcessId` Sysmon: колонки SQLite регистронезависимы.
   - `TimeCreated` — ISO UTC с микросекундами (`2026-09-15T08:00:39.123456Z`). У Fluent Bit была
-    секундная точность.
+    секундная точность. **У Sysmon** `TimeCreated` берётся из `UtcTime` самого события: момент записи
+    в журнал у Sysmon 3 отстаёт на секунды (сетевые события пишутся пачками) и путал порядок шагов в
+    `temporal_ordered`. Если `UtcTime` не разобрался — остаётся время записи.
   - Поле данных, совпавшее по имени с системным, получает префикс `EventData`/`UserData`. В System 104
     канал очищенного журнала приходит как `UserDataChannel`.
   - Строки `"true"`/`"false"` в данных превращаются в JSON boolean (Sysmon `Initiated`), как было
@@ -103,9 +105,18 @@ win10-lab (Windows 10 22H2, VirtualBox), Vector 0.58.0, SIEM на хосте. К
 | Недоступность SIEM | SIEM выключен 5 мин, в ВМ `hostname`/`whoami` | 156 событий доехали за 5 с после старта, без потерь и дублей |
 | Простой | ВМ без активности | условно закрыто; в логе агента видно срабатывание страховки из исправления #25194 (`Speculative timeout pull recovered events`) |
 
-Попутно найдено (задачи в `docs/NEXT_ITERATION.md` §2): `hostname.exe` Sysmon 1 не пишет (конфиг
-Sysmon), у Sysmon 3 `TimeCreated` отстаёт от `UtcTime` события на секунды. Установка агента
-взводит `SCE_Evasion_Telemetry_Tampering` (смена конфига Sysmon) — известное ложное срабатывание.
+Попутно найдено: `hostname.exe` Sysmon 1 не пишет (конфиг Sysmon; закрыто 2026-09-15, см.
+`docs/guide/windows-vm-lab.md` §3), у Sysmon 3 `TimeCreated` отстаёт от `UtcTime` события на секунды (исправлено в агенте:
+у Sysmon время берётся из `UtcTime`; проверено на стенде 2026-09-15 — у Sysmon 1/3/7/8/10/11/12/13/17/
+22/26/29 `TimeCreated` совпадает с `UtcTime` до миллисекунды, у Security/System время записи без изменений). Установка агента
+даёт известные ложные срабатывания от собственных действий установщика: инциденты
+`SCE_Evasion_Telemetry_Tampering` (`sysmon -c`) и `SCE_Evasion_Log_Cleared` (`wevtutil sl` — размеры
+журналов), алерты «Audit Policy Tampering Via Auditpol» (`auditpol /set ... /success:disable`).
+
+Остановка старой службы при переустановке: `sc stop` → ожидание 60 с → завершение процесса службы.
+`Stop-Service` здесь не годится — на зависшей остановке Vector он падал с «Ошибка при остановке службы»
+и обрывал установку, оставляя хост без агента (стенд, 2026-09-15). Дисковый буфер и позиция чтения
+журнала переживают завершение процесса, возможны единичные повторы последних событий.
 
 После любого изменения набора полей (конфиг агента, каналы, Sysmon) — перегенерировать схему для
 синтетики контента:

@@ -305,6 +305,15 @@ def _active_correlation_rules(ruleset_path: str | None) -> list[dict[str, Any]]:
         pairs = main_ruleset.resolve_for(ruleset_path)
     except rules_catalog.CatalogError:
         return []
+    return correlation_rules_from_pairs(pairs)
+
+
+def correlation_rules_from_pairs(pairs: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Активные correlation-правила из УЖЕ вычисленного main_ruleset.resolve_for(...). Нужна
+    app/main.py:_process_batch: резолв считается ОДИН раз на флаш и отдаётся и движку, и
+    active_hit_spec/evaluate_batch (параметр corr_rules) - иначе он повторялся бы 2 + N раз
+    (N - источников во флаше), и движок с корреляциями могли увидеть разный состав правил, если
+    контент поменяли посреди флаша."""
     # Один источник правды для main и custom-пути: что исполняется (включая межрулсетные
     # зависимости, см. rules_catalog.with_dependencies) - то и считается.
     active_ids_by_ruleset: dict[str, set[str]] = {}
@@ -322,7 +331,9 @@ def _active_correlation_rules(ruleset_path: str | None) -> list[dict[str, Any]]:
     return result
 
 
-def active_hit_spec(ruleset_path: str | None) -> dict[str, set[str]]:
+def active_hit_spec(
+    ruleset_path: str | None, corr_rules: list[dict[str, Any]] | None = None,
+) -> dict[str, set[str]]:
     """Названия БАЗОВЫХ (не-correlation) Sigma-правил -> набор полей, которые нужно
     денормализовать в rule_hits.group_json для срабатываний этих правил (см.
     app/store.py:store_events, вызывается app/main.py ДО store_events). Поле = объединение
@@ -332,9 +343,14 @@ def active_hit_spec(ruleset_path: str | None) -> dict[str, set[str]]:
     Ссылки на ДРУГИЕ correlation-правила (цепочки, "kind"="correlation") сюда НЕ попадают -
     когда сама корреляция срабатывает, evaluate_batch пишет её rule_hits-запись НАПРЯМУЮ
     (store.insert_correlation_hits) со ВСЕМИ её собственными group-by полями, hit_spec для
-    этого не нужен (см. докстринг модуля про цепочки)."""
+    этого не нужен (см. докстринг модуля про цепочки).
+
+    corr_rules - уже вычисленные активные корреляции (correlation_rules_from_pairs); None -
+    резолвим сами по ruleset_path."""
+    if corr_rules is None:
+        corr_rules = _active_correlation_rules(ruleset_path)
     spec: dict[str, set[str]] = {}
-    for corr in _active_correlation_rules(ruleset_path):
+    for corr in corr_rules:
         if corr.get("type") not in _EVAL_TYPES:
             continue
         group_by = corr.get("group_by") or []
@@ -701,6 +717,7 @@ def evaluate_batch(
     source_batch: str,
     matched_events_by_title: dict[str, list[dict[str, Any]]],
     link_specs_out: list[dict[str, Any]] | None = None,
+    corr_rules: list[dict[str, Any]] | None = None,
 ) -> int:
     """Точка входа, зовётся из app/main.py:_process_batch после каждого store.store_events(...)
     (т.е. после каждого flush ingest-воркера). matched_events_by_title - {rule_title: [сырые
@@ -716,10 +733,15 @@ def evaluate_batch(
     app/main.py:_process_batch по этим записям ПОСЛЕ store.upsert_alerts (и после
     store.link_events_to_alerts - события этого же батча уже должны знать свой alert_id)
     привязывает уже сохранённые алерты к инциденту - раньше, внутри evaluate_batch, алертов
-    zircolite текущего flush ещё нет в БД."""
+    zircolite текущего flush ещё нет в БД.
+
+    corr_rules (необязателен) - уже вычисленные активные корреляции флаша (см.
+    correlation_rules_from_pairs); None - резолвим сами по ruleset_path."""
     if not ruleset_path or not matched_events_by_title:
         return 0
-    corr_rules = [c for c in _active_correlation_rules(ruleset_path) if c.get("type") in _EVAL_TYPES]
+    if corr_rules is None:
+        corr_rules = _active_correlation_rules(ruleset_path)
+    corr_rules = [c for c in corr_rules if c.get("type") in _EVAL_TYPES]
     if not corr_rules:
         return 0
     corr_rules = _topo_order(corr_rules)

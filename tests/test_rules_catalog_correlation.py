@@ -307,6 +307,7 @@ def test_with_dependencies_pulls_base_rules_of_other_ruleset():
     assert set(by_title) == {"Bruteforce By Name", "Failed Auth"}
     src, dep = by_title["Failed Auth"]
     assert src == auth and dep["via_dependency"] is True
+    assert dep["required_by"] == ["Bruteforce By Name"]
     assert not by_title["Bruteforce By Name"][1].get("via_dependency")
 
 

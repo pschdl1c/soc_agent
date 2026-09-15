@@ -41,12 +41,13 @@ lifespan: `ingest_worker.start()` при старте, `ingest_worker.stop()` п
 ### `_process_batch(events_path, input_type, ruleset_path, source_label) -> IngestResponse`
 
 1. Выбор способа получения правил по `ruleset_path`:
-   - `"main"` → `main_ruleset.resolve()` → `engine.run_batch_with_rules(...)`.
-   - `custom_rulesets/*` → `rules_catalog.load_rules(...)` → `engine.run_batch_with_rules(...)`
-     (`CatalogError` → HTTP 400).
-   - иначе (builtin или `None`) → `engine.run_batch(..., ruleset_path=ruleset_path)`.
+   - `"main"` или `custom_rulesets/*` → `pairs = main_ruleset.resolve_for(ruleset_path)` (вместе с
+     межрулсетными зависимостями; `CatalogError` → HTTP 400/404) → `engine.run_batch_with_rules(...)`;
+     `corr_rules = correlation.correlation_rules_from_pairs(pairs)`. Резолв — ОДИН раз на флаш, тот
+     же `corr_rules` уходит в `active_hit_spec` и в `evaluate_batch` каждого источника.
+   - иначе (builtin или `None`) → `engine.run_batch(..., ruleset_path=ruleset_path)`, `corr_rules = []`.
 2. `_build_matched_row_map(raw_results)` → `{row_id: [названия правил]}`.
-3. `hit_spec = correlation.active_hit_spec(ruleset_path)` (один раз на батч; `{rule_title:
+3. `hit_spec = correlation.active_hit_spec(ruleset_path, corr_rules=corr_rules)` (один раз на батч; `{rule_title:
    {поля}}` — какие поля денормализовать в `rule_hits.group_json`, см. `docs/spec/correlation.md`).
 4. `_split_events_by_source(all_events, source_label)` → группы `{label: [events]}`.
 5. Для каждой группы: `store.store_events(events, source_batch=label, matched_row_to_rules=..., hit_spec=hit_spec)`,
@@ -128,8 +129,9 @@ JSON-**объект**: голая строка/число/массив отбр�
 
 | Метод | Путь | Параметры | Поведение |
 |---|---|---|---|
-| `GET` | `/alerts` | `source_batch`, `rule_level`, `time_from`, `time_to`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400. `{"alerts": store.list_alerts(...), "total": store.count_alerts(...), "limit", "offset"}`. Элементы списка без ключа `mitre` |
-| `GET` | `/alerts/{alert_id}` | — | `store.get_alert(...)`; 404, если нет. Добавляет `alert["mitre"] = kb.enrich_techniques(alert["mitre_techniques"])` |
+| `GET` | `/alerts` | `source_batch`, `rule_level`, `time_from`, `time_to`, `incident=all\|in\|none` (иное → 422), `q`, `rule_title`, `sort_by`, `sort_dir`, `limit=100`, `offset=0` | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400. `{"alerts": store.list_alerts(...), "total": store.count_alerts(...), "limit", "offset"}`. Условия — один `store._alerts_where` на список и total. Элементы списка без `mitre`, с `incident_ids` |
+| `GET` | `/alerts/groups` | те же фильтры, кроме `rule_title`; `sort_by=rule\|alert_count\|event_count\|created_at` | `{"groups": [{rule_title, rule_level, alert_count, event_count, in_incident_count, last_created_at}], "total", "limit", "offset"}` (`store.group_alerts_by_rule`). Отображение «по правилу», не дедуп. Объявлена до `/alerts/{alert_id}` |
+| `GET` | `/alerts/{alert_id}` | — | `store.get_alert(...)`; 404, если нет. Несёт `incidents` (инциденты, куда входит алерт). Добавляет `alert["mitre"] = kb.enrich_techniques(alert["mitre_techniques"])` |
 
 У алерта нет статуса и нет ручки на его смену (`PATCH /alerts/{id}/status` убран вместе с
 `AlertStatusUpdate`/`Store.update_alert_status`/колонкой `alerts.status`) — триаж-статус
@@ -166,15 +168,20 @@ JSON-**объект**: голая строка/число/массив отбр�
 | `GET` | `/rulesets/rules` | `ruleset` (обяз.), `q`, `sort_by`, `sort_dir="asc"`, `limit=50`, `offset=0`, `only_main=false`, `level` (CSV), `status` (CSV) | `_check_paging`: `limit` вне `[1, 500]` / `offset < 0` → 400. `ruleset == "main"` → виртуальный список из `main_ruleset.resolve_with_sources()` (каждая строка несёт `source_ruleset`, `in_main`). Иначе `rules_catalog.search_rules(...)` с `in_main_fn`/`only_ids`. `_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400 |
 | `GET` | `/rulesets/rule` | `ruleset`, `rule_id` | `rules_catalog.get_rule(...)`; 404, если нет |
 | `POST` | `/rulesets/upload` | multipart: `file` (.yml/.yaml), `ruleset` \| `new_ruleset_name` | `rules_catalog.save_ruleset_yaml(...)`; `CatalogError`/`RuleValidationError`/`ValueListError` → 400. Пересборка зависимых правил (`_recompile_for_value_lists`). Ответ несёт `collisions`, `value_lists_imported`, `recompiled`, `errors` |
-| `DELETE` | `/rulesets` | `ruleset` | `rules_catalog.delete_custom_ruleset(...)` (`_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` + `main_ruleset.on_ruleset_deleted(ruleset)` |
+| `DELETE` | `/rulesets` | `ruleset`, `force=false` | `rules_catalog.delete_custom_ruleset(..., force=force)` (`_catalog_http`: `CatalogNotFound` → 404, `CatalogConflict` → 409 — на правила рулсета ссылаются корреляции других рулсетов, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` + `main_ruleset.on_ruleset_deleted(ruleset)` |
 
 ### Custom-правила
 
 | Метод | Путь | Тело | Поведение |
 |---|---|---|---|
 | `POST` | `/rules/custom` | `CustomRuleSubmit` | `201`; `rules_catalog.save_custom_rule(...)` (`RuleValidationError`/`CatalogError` → 400) + `engine.invalidate(target_path)`. Ответ несёт `ruleset_path` |
-| `PUT` | `/rules/custom/{rule_id}` | query `ruleset` (обяз.), тело `CustomRuleUpdate` | `rules_catalog.update_custom_rule(...)` (`RuleValidationError` → 400, `_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` |
-| `DELETE` | `/rules/custom/{rule_id}` | query `ruleset` (обяз.) | `rules_catalog.delete_custom_rule(...)` (`_catalog_http`: `CatalogNotFound` → 404, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` + `main_ruleset.on_rule_deleted(ruleset, rule_id)` |
+| `PUT` | `/rules/custom/{rule_id}` | query `ruleset` (обяз.), тело `CustomRuleUpdate` | `rules_catalog.update_custom_rule(...)` (`RuleValidationError` → 400, `_catalog_http`: `CatalogNotFound` → 404, `CatalogConflict` → 409 — смена `name`, на который ссылаются корреляции, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` |
+| `DELETE` | `/rules/custom/{rule_id}` | query `ruleset` (обяз.), `force=false` | `rules_catalog.delete_custom_rule(..., force=force)` (`_catalog_http`: `CatalogNotFound` → 404, `CatalogConflict` → 409 — на правило ссылаются корреляции, прочие `CatalogError` → 400) + `engine.invalidate(ruleset)` + `main_ruleset.on_rule_deleted(ruleset, rule_id)` |
+
+Ответ 409 каталога: `detail = {"message": ..., "references": [{ruleset, rule_id, title, refs}]}` —
+ссылающиеся корреляции, которые перестанут срабатывать. Повтор с `force=true` удаляет всё равно (у `PUT`
+параметра `force` нет — переименование `name` делается правкой ссылок). UI показывает список и по второму
+подтверждению повторяет запрос с `force=true` (`deleteWithReferenceCheck` в `index.html`).
 
 ### Основной рулсет
 
@@ -211,6 +218,7 @@ JSON-**объект**: голая строка/число/массив отбр�
 | Исключение | Код |
 |---|---|
 | `CatalogNotFound` (подкласс `CatalogError`) | 404 — запрошенного рулсета/правила нет |
+| `CatalogConflict` (подкласс `CatalogError`) | 409 — действие сломало бы корреляции, ссылающиеся на объект; `detail` объектом `{message, references}` |
 | `CatalogError` | 400 — объект есть, но действие недопустимо (встроенный рулсет как цель, кривой путь, взаимоисключающие параметры) |
 | `RuleValidationError` | 400 |
 | `ValueListError` | 400 (создание/правка), 409 (удаление используемого — через явную проверку) |

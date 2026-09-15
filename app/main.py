@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 try:
@@ -152,41 +152,41 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
     # app/rules/main_ruleset.py), False - грубее, только (rule_id, host) (built-in, только
     # batch-прогоны файлов). Путь пуст/None у /ingest/file без явного ruleset - там движковый
     # дефолт engine.default_ruleset_path, а он built-in.
-    if ruleset_path == main_ruleset.MAIN_RULESET_ID:
-        rules = main_ruleset.resolve()
-        raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
-            events_path=events_path, rules=rules, input_type=input_type,
-        )
-        dedup_by_content = True
-    elif ruleset_path and ruleset_path.startswith("custom_rulesets/"):
-        # Кастомные рулсеты гоняем по УЖЕ скомпилированному .manifest.json
-        # (rules_catalog.load_rules), а не пересборкой сырых .yml в RulesetHandler: только в
-        # манифесте плейсхолдеры value lists (%name% / |expand, см. app/rules/value_lists.py) уже
-        # развёрнуты - RulesetHandler, глядя на сырой .yml с %name%, молча уронил бы такое
-        # правило (0 правил в рулсете). Freshness манифеста держит mtime-кэш rules_catalog.
-        # Вместе с межрулсетными зависимостями корреляций (main_ruleset.resolve_for) - иначе
-        # корреляция, опирающаяся на базовое правило другого рулсета, в изолированном прогоне
-        # была бы мертва.
+    # Состав правил резолвится ОДИН раз на флаш и отдаётся и движку, и корреляциям
+    # (active_hit_spec/evaluate_batch через corr_rules): раньше резолв повторялся 3 + N раз
+    # (N - источников во флаше), и при правке контента посреди флаша движок и корреляции могли
+    # увидеть разный набор правил.
+    if ruleset_path == main_ruleset.MAIN_RULESET_ID or (
+        ruleset_path and ruleset_path.startswith("custom_rulesets/")
+    ):
+        # "main" - состав основного рулсета; custom - все правила рулсета. Оба - по УЖЕ
+        # скомпилированному .manifest.json (rules_catalog.load_rules), а не пересборкой сырых .yml
+        # в RulesetHandler: только в манифесте плейсхолдеры value lists (%name% / |expand, см.
+        # app/rules/value_lists.py) уже развёрнуты - RulesetHandler, глядя на сырой .yml с
+        # %name%, молча уронил бы такое правило. Вместе с межрулсетными зависимостями корреляций
+        # (main_ruleset.resolve_for) - иначе корреляция, опирающаяся на базовое правило другого
+        # рулсета, была бы мертва.
         try:
-            rules = [rule for _src, rule in main_ruleset.resolve_for(ruleset_path)]
+            pairs = main_ruleset.resolve_for(ruleset_path)
         except CatalogError as exc:
             raise _catalog_http(exc)
         raw_results, all_events, total_events, elapsed = engine.run_batch_with_rules(
-            events_path=events_path, rules=rules, input_type=input_type,
+            events_path=events_path, rules=[rule for _src, rule in pairs], input_type=input_type,
         )
+        corr_rules = correlation.correlation_rules_from_pairs(pairs)
         dedup_by_content = True
     else:
         raw_results, all_events, total_events, elapsed = engine.run_batch(
             events_path=events_path, input_type=input_type, ruleset_path=ruleset_path,
         )
+        corr_rules = []  # builtin корреляций не содержит
         dedup_by_content = False
 
     matched_map = _build_matched_row_map(raw_results)
     # Названия БАЗОВЫХ правил + поля, которые нужно денормализовать в rule_hits.group_json,
-    # хотя бы для одной активной correlation-записи этого ruleset_path - считается один раз на
-    # весь батч (дёшево, читает уже скомпилированные правила через кэш rules_catalog),
-    # передаётся в store_events (см. app/detection/correlation.py:active_hit_spec).
-    hit_spec = correlation.active_hit_spec(ruleset_path)
+    # хотя бы для одной активной correlation-записи этого ruleset_path, передаётся в
+    # store_events (см. app/detection/correlation.py:active_hit_spec).
+    hit_spec = correlation.active_hit_spec(ruleset_path, corr_rules=corr_rules)
     correlation_created = 0
     # link_specs (Этап 4) - evaluate_batch дописывает сюда по записи на каждый созданный/
     # обновлённый инцидент; привязка member-алертов идёт ПОСЛЕ store.upsert_alerts ниже
@@ -217,6 +217,7 @@ def _process_batch(events_path: str, input_type: str, ruleset_path: str | None, 
         correlation_created += correlation.evaluate_batch(
             store, ruleset_path=ruleset_path, source_batch=label,
             matched_events_by_title=matched_events_by_title, link_specs_out=link_specs,
+            corr_rules=corr_rules,
         )
 
     alerts = zircolite_results_to_alerts(
@@ -613,33 +614,63 @@ def delete_source(source_id: str) -> dict:
     return {"deleted": source_id}
 
 
+AlertIncidentFilter = Literal["all", "in", "none"]
+
+
 @app.get("/alerts")
 def list_alerts(
     source_batch: str | None = None,
     rule_level: str | None = None,
     time_from: str | None = None,
     time_to: str | None = None,
+    incident: AlertIncidentFilter = "all",
+    q: str | None = None,
+    rule_title: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
     """Ответ - обёртка {alerts, total, limit, offset} (как у /events и /incidents): без total
-    UI не мог нарисовать пейджер и молча показывал первые 100 алертов из скольких угодно."""
+    UI не мог нарисовать пейджер и молча показывал первые 100 алертов из скольких угодно.
+    incident - all/in/none (участие в инцидентах), q - поиск по правилу/хосту/сущностям,
+    rule_title - точное название (раскрытие группы "по правилу"). Строка несёт incident_ids."""
     _check_paging(limit, offset)
+    filters = dict(
+        source_batch=source_batch, rule_level=rule_level, time_from=time_from, time_to=time_to,
+        incident=incident, q=q, rule_title=rule_title,
+    )
     return {
-        "alerts": store.list_alerts(
-            source_batch=source_batch, rule_level=rule_level,
-            time_from=time_from, time_to=time_to, sort_by=sort_by, sort_dir=sort_dir,
-            limit=limit, offset=offset,
-        ),
-        "total": store.count_alerts(
-            source_batch=source_batch, rule_level=rule_level,
-            time_from=time_from, time_to=time_to,
-        ),
+        "alerts": store.list_alerts(**filters, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset),
+        "total": store.count_alerts(**filters),
         "limit": limit,
         "offset": offset,
     }
+
+
+@app.get("/alerts/groups")
+def list_alert_groups(
+    source_batch: str | None = None,
+    rule_level: str | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+    incident: AlertIncidentFilter = "all",
+    q: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """Режим "Группировать по правилу" вкладки Алерты - отображение, не дедуп: строка на
+    rule_title {rule_title, rule_level (макс.), alert_count, event_count, in_incident_count,
+    last_created_at}. Фильтры - как у /alerts; sort_by = rule|alert_count|event_count|created_at.
+    Объявлена ДО /alerts/{alert_id}, иначе "groups" съелся бы как alert_id."""
+    _check_paging(limit, offset)
+    groups, total = store.group_alerts_by_rule(
+        source_batch=source_batch, rule_level=rule_level, time_from=time_from, time_to=time_to,
+        incident=incident, q=q, sort_by=sort_by, sort_dir=sort_dir, limit=limit, offset=offset,
+    )
+    return {"groups": groups, "total": total, "limit": limit, "offset": offset}
 
 
 @app.get("/alerts/{alert_id}")

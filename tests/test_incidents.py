@@ -347,17 +347,66 @@ def test_link_alerts_to_incident_synthetic_id_for_incident_marked_correlation_is
     assert linked == 0
 
 
-def test_link_alerts_to_incident_does_not_steal_already_linked_alert(store):
-    """Алерт, уже привязанный к ДРУГОМУ инциденту (incident_id уже проставлен), не
-    перепривязывается - incident_id IS NULL в условии UPDATE."""
+def test_link_alerts_to_incident_shares_alert_between_incidents(store):
+    """Два сценария на одних событиях (напр. SCE_Recon_Scripted_Discovery и
+    SCE_TH_Recon_Discovery_Burst) - алерт входит в ОБА инцидента (incident_alerts, many-to-many).
+    Раньше второй инцидент оставался с 0 member-алертов. Повторная привязка к тому же инциденту
+    дубля не даёт."""
     inc1 = store.upsert_incidents([_incident(dedup="i1", severity="low")])[0][0]
     inc2 = store.upsert_incidents([_incident(dedup="i2", severity="low")])[0][0]
-    _, event_id = _alert_with_event(store, "a1", "b1", "HOST-A", "Failed Auth", "high")
+    alert_id, event_id = _alert_with_event(store, "a1", "b1", "HOST-A", "Failed Auth", "high")
 
     assert store.link_alerts_to_incident(inc1, "b1", [event_id]) == 1
+    assert store.link_alerts_to_incident(inc2, "b1", [event_id]) == 1
     assert store.link_alerts_to_incident(inc2, "b1", [event_id]) == 0
-    assert store.get_incident(inc1)["alert_count"] == 1
-    assert store.get_incident(inc2)["alert_count"] == 0
+    for inc in (inc1, inc2):
+        row = store.get_incident(inc)
+        assert row["alert_count"] == 1
+        assert row["severity"] == "high"
+        assert [a["alert_id"] for a in row["member_alerts"]] == [alert_id]
+
+    # Удаление источника снимает связи вместе с инцидентами и алертами.
+    store.delete_batch("b1")
+    conn = store._conn
+    assert conn.execute("SELECT COUNT(*) FROM incident_alerts").fetchone()[0] == 0
+
+
+def test_alerts_incident_filter_search_and_groups(store):
+    """Вкладка "Алерты": фильтр участия в инцидентах, поиск (в т.ч. кириллица в сущностях),
+    incident_ids в строках, группировка по правилу - всё на одних и тех же условиях WHERE."""
+    from app.models import Alert, Entities as E, SigmaRuleRef, Severity
+
+    inc_id = store.upsert_incidents([_incident(severity="low")])[0][0]
+    a_in, ev_in = _alert_with_event(store, "d1", "b1", "HOST-A", "Discovery Utility Execution", "low")
+    _alert_with_event(store, "d2", "b1", "HOST-B", "Discovery Utility Execution", "medium")
+    store.upsert_alerts([Alert(
+        dedup_key="u1", source_batch="b1", host="HOST-C",
+        rule=SigmaRuleRef(rule_id="r9", title="Failed Logon", level=Severity.high),
+        entities=E(users=["Иван"]), event_count=3, sample_events=[],
+    )])
+    store.link_alerts_to_incident(inc_id, "b1", [ev_in])
+
+    inside = store.list_alerts(incident="in")
+    assert [a["alert_id"] for a in inside] == [a_in]
+    assert inside[0]["incident_ids"] == [inc_id]
+    outside = store.list_alerts(incident="none")
+    assert len(outside) == 2 and all(a["incident_ids"] == [] for a in outside)
+    assert store.count_alerts(incident="none") == 2
+
+    assert {a["host"] for a in store.list_alerts(q="host-b")} == {"HOST-B"}
+    assert [a["host"] for a in store.list_alerts(q="ИВАН")] == ["HOST-C"]
+    assert store.count_alerts(q="discovery") == 2
+    assert store.count_alerts(rule_title="Discovery Utility Execution", incident="none") == 1
+
+    groups, total = store.group_alerts_by_rule(sort_by="alert_count", sort_dir="desc")
+    assert total == 2
+    top = groups[0]
+    assert (top["rule_title"], top["alert_count"], top["event_count"], top["in_incident_count"],
+            top["rule_level"]) == ("Discovery Utility Execution", 2, 2, 1, "medium")
+    assert store.group_alerts_by_rule(incident="in")[1] == 1
+
+    alert = store.get_alert(a_in)
+    assert [i["incident_id"] for i in alert["incidents"]] == [inc_id]
 
 
 def test_link_alerts_to_incident_groups_multiple_distinct_alerts(store):

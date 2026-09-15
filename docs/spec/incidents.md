@@ -45,7 +45,7 @@ correlation:
 на A в своём `rules:` (эскалация «то же самое случилось ещё раз») — **не помечай A**, помечай
 только B (терминальное звено). Иначе на одну и ту же историю заведутся ДВА разных инцидента
 (A — сам по себе, B — поверх него) вместо одного финального, а `incidents` не умеет ссылаться на
-`incidents` (только `alerts.incident_id`, обратная ссылка ровно одна) — U-образной иерархии не
+`incidents` (связи есть только инцидент → алерт, таблица `incident_alerts`) — U-образной иерархии не
 получится, получится дублирование. Непомеченное A при этом ведёт себя как обычная correlation:
 пишет `Alert` — тот и станет member-алертом финального инцидента B (см. ниже, цепочка по
 `event_id` резолвит такую ссылку через `alerts.dedup_key`, без похода в `events`).
@@ -100,9 +100,15 @@ correlation-правила (`store.evaluate_correlation_window` отдаёт и�
   не находится, без падения.
 
 `store.link_alerts_to_incident(incident_id, source_batch, event_ids)` резолвит оба вида в набор
-`alert_id`, затем одним `UPDATE ... WHERE incident_id IS NULL AND source_batch = ? AND alert_id
-IN (...)` проставляет `alerts.incident_id` и досчитывает `incidents.alert_count` + roll-up
-severity. `events` (кроме уже упомянутой колонки `alert_id`) не трогается.
+`alert_id`, затем одним `INSERT OR IGNORE INTO incident_alerts ... WHERE source_batch = ? AND
+alert_id IN (...)` пишет связи и досчитывает `incidents.alert_count` + roll-up severity по таблице
+связей. `events` (кроме уже упомянутой колонки `alert_id`) не трогается.
+
+Связь **many-to-many**: один алерт законно входит в несколько инцидентов — разные сценарии на одних
+событиях (напр. `SCE_Recon_Scripted_Discovery` и `SCE_TH_Recon_Discovery_Burst`). Раньше связь была
+колонкой `alerts.incident_id` с условием `incident_id IS NULL` — второй инцидент получал 0
+member-алертов. Старые БД не мигрируются — `siem.db` пересоздаётся. `delete_batch` чистит `incident_alerts` и по
+инцидентам источника, и по его алертам.
 
 Это заменило более раннюю версию (сопоставление по значению "сущности": `alerts.host IN (...)
 OR alerts.entities LIKE '%...%'`) — та работала, только пока `group-by` correlation-правила был

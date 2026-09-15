@@ -83,7 +83,21 @@ function Set-PrivateAcl([string]$Path) {
 function Remove-AgentService {
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if (-not $svc) { return }
-    if ($svc.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force; $svc.WaitForStatus('Stopped', '00:00:30') }
+    if ($svc.Status -ne 'Stopped') {
+        # Не Stop-Service: при зависшей остановке (служба уже StopPending или не принимает команду -
+        # Vector дожидается сброса буфера/ретраев sink-а) он падает с "Ошибка при остановке службы" и
+        # обрывает установку, оставив хост без агента. 1061 - служба не принимает команду сейчас,
+        # 1062 - уже не запущена.
+        Invoke-Native sc.exe @('stop', $ServiceName) @(0, 1061, 1062) | Out-Null
+        try { $svc.WaitForStatus('Stopped', '00:01:00') }
+        catch {
+            # Не остановилась за минуту - завершаем процесс службы. События не теряются: дисковый буфер
+            # и чекпоинты журнала переживают kill, возможны единичные повторы последних событий.
+            $procId = (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'").ProcessId
+            if ($procId) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
+            $svc.WaitForStatus('Stopped', '00:00:20')
+        }
+    }
     Invoke-Native sc.exe @('delete', $ServiceName) | Out-Null
 }
 
@@ -117,18 +131,30 @@ Write-Ok "источник '$SourceName'"
 if (-not $SkipAudit) {
     Write-Step "Политика аудита"
     # auditpol принимает только локализованные имена - GUID одинаковы в любой локали.
+    # Основа - базовая линия аудита Microsoft (Windows Security Baseline) для рабочих станций; значение -
+    # 'S'/'F'/'SF' (success/failure). Отличия от базовой линии осознанные: Sensitive Privilege Use выключен
+    # (шум без правил), Kerberos/SAM/Directory Service не включаем, пока в стенде нет контроллера домена.
     $enable = [ordered]@{
-        '{0CCE922B-69AE-11D9-BED3-505054503030}' = 'Process Creation (4688)'
-        '{0CCE9215-69AE-11D9-BED3-505054503030}' = 'Logon (4624/4625/4648)'
-        '{0CCE9216-69AE-11D9-BED3-505054503030}' = 'Logoff'
-        '{0CCE9217-69AE-11D9-BED3-505054503030}' = 'Account Lockout (4740)'
-        '{0CCE921B-69AE-11D9-BED3-505054503030}' = 'Special Logon (4672)'
-        '{0CCE923F-69AE-11D9-BED3-505054503030}' = 'Credential Validation (4776)'
-        '{0CCE9235-69AE-11D9-BED3-505054503030}' = 'User Account Management (4720/4726)'
-        '{0CCE9237-69AE-11D9-BED3-505054503030}' = 'Security Group Management (4728/4732)'
-        '{0CCE922F-69AE-11D9-BED3-505054503030}' = 'Audit Policy Change (4719)'
-        '{0CCE9211-69AE-11D9-BED3-505054503030}' = 'Security System Extension (4697)'
-        '{0CCE9227-69AE-11D9-BED3-505054503030}' = 'Other Object Access Events (4698)'
+        '{0CCE922B-69AE-11D9-BED3-505054503030}' = @('SF', 'Process Creation (4688)')
+        '{0CCE9215-69AE-11D9-BED3-505054503030}' = @('SF', 'Logon (4624/4625/4648)')
+        '{0CCE9216-69AE-11D9-BED3-505054503030}' = @('SF', 'Logoff')
+        '{0CCE9217-69AE-11D9-BED3-505054503030}' = @('SF', 'Account Lockout (4740)')
+        '{0CCE921B-69AE-11D9-BED3-505054503030}' = @('SF', 'Special Logon (4672)')
+        '{0CCE921C-69AE-11D9-BED3-505054503030}' = @('SF', 'Other Logon/Logoff (4778/4779 RDP, 4800/4801)')
+        '{0CCE923F-69AE-11D9-BED3-505054503030}' = @('SF', 'Credential Validation (4776)')
+        '{0CCE9235-69AE-11D9-BED3-505054503030}' = @('SF', 'User Account Management (4720/4726)')
+        '{0CCE9237-69AE-11D9-BED3-505054503030}' = @('SF', 'Security Group Management (4728/4732)')
+        '{0CCE922F-69AE-11D9-BED3-505054503030}' = @('SF', 'Audit Policy Change (4719)')
+        '{0CCE9232-69AE-11D9-BED3-505054503030}' = @('SF', 'MPSSVC Rule-Level Policy Change (4946-4948)')
+        '{0CCE9211-69AE-11D9-BED3-505054503030}' = @('SF', 'Security System Extension (4697)')
+        '{0CCE9210-69AE-11D9-BED3-505054503030}' = @('S',  'Security State Change (4608/4616)')
+        '{0CCE9212-69AE-11D9-BED3-505054503030}' = @('SF', 'System Integrity (5038/6281)')
+        '{0CCE9214-69AE-11D9-BED3-505054503030}' = @('SF', 'Other System Events')
+        '{0CCE9227-69AE-11D9-BED3-505054503030}' = @('SF', 'Other Object Access Events (4698)')
+        '{0CCE9224-69AE-11D9-BED3-505054503030}' = @('SF', 'File Share (5140)')
+        '{0CCE9244-69AE-11D9-BED3-505054503030}' = @('F',  'Detailed File Share (5145, только отказы)')
+        '{0CCE9245-69AE-11D9-BED3-505054503030}' = @('SF', 'Removable Storage (4663)')
+        '{0CCE9248-69AE-11D9-BED3-505054503030}' = @('S',  'Plug and Play Events (6416)')
     }
     # Шум без правил (замер на стенде): завершение процесса и использование конфиденциальных прав.
     $disable = [ordered]@{
@@ -136,7 +162,10 @@ if (-not $SkipAudit) {
         '{0CCE9228-69AE-11D9-BED3-505054503030}' = 'Sensitive Privilege Use (4673/4674)'
     }
     foreach ($g in $enable.Keys) {
-        Invoke-Native auditpol.exe @('/set', "/subcategory:$g", '/success:enable', '/failure:enable') | Out-Null
+        $mode = $enable[$g][0]
+        $s = if ($mode -match 'S') { 'enable' } else { 'disable' }
+        $f = if ($mode -match 'F') { 'enable' } else { 'disable' }
+        Invoke-Native auditpol.exe @('/set', "/subcategory:$g", "/success:$s", "/failure:$f") | Out-Null
     }
     foreach ($g in $disable.Keys) {
         Invoke-Native auditpol.exe @('/set', "/subcategory:$g", '/success:disable', '/failure:disable') | Out-Null
@@ -146,16 +175,16 @@ if (-not $SkipAudit) {
     $reg = @(
         @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit', 'ProcessCreationIncludeCmdLine_Enabled', 1),
         @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging', 'EnableScriptBlockLogging', 1),
-        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging', 'EnableModuleLogging', 1)
+        # Module logging (4103) выключен: правил на 4103 в контенте нет, а по объёму это первый EventID
+        # стенда. Явный 0, а не удаление - на хостах, где установщик раньше его включал.
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging', 'EnableModuleLogging', 0)
     )
     foreach ($r in $reg) {
         New-Item -Path $r[0] -Force | Out-Null
         New-ItemProperty -Path $r[0] -Name $r[1] -Value $r[2] -PropertyType DWord -Force | Out-Null
     }
-    $mn = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging\ModuleNames'
-    New-Item -Path $mn -Force | Out-Null
-    New-ItemProperty -Path $mn -Name '*' -Value '*' -PropertyType String -Force | Out-Null
-    Write-Ok "командная строка в 4688, ScriptBlock/Module logging"
+    Remove-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging\ModuleNames' -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Ok "командная строка в 4688, ScriptBlock logging (Module logging выключен)"
 
     $sizes = @{ 'Security' = 209715200; 'Microsoft-Windows-PowerShell/Operational' = 104857600; 'System' = 52428800 }
     foreach ($log in $sizes.Keys) { Invoke-Native wevtutil.exe @('sl', $log, "/ms:$($sizes[$log])") | Out-Null }

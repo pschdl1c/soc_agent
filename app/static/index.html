@@ -258,6 +258,12 @@
   tr.data-row { cursor: pointer; }
   tr.data-row:hover td { background: var(--surface-2); }
   tr.selected td { background: #1a2230; }
+  /* Группировка по правилу (Алерты) и member-алерты в карточке инцидента - отображение, не дедуп. */
+  tr.rule-group-row td { font-weight: 600; }
+  tr.child-row td { background: var(--surface-2); }
+  tr.child-row td.child-indent { padding-left: 26px; }
+  .caret { display: inline-block; width: 14px; color: var(--muted); }
+  .badge-alert-incident { background: #2a1520; color: var(--crit); cursor: pointer; }
 
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover { color: var(--text); }
@@ -429,6 +435,8 @@
      приходят в /rulesets/rules, но раньше нигде не показывались - понять, какое правило что
      делает, можно было только открыв каждое. */
   .badge-correlation { background: #1a2230; color: var(--accent); }
+  .badge-dependency { background: #1c2622; color: var(--muted); }
+  .in-main-btn:disabled { cursor: default; opacity: 0.6; }
   .badge-incident { background: #3a2e0c; color: var(--med); }
   .badge-tp { background: #2a1520; color: var(--crit); }
   .badge-fp { background: #16281f; color: var(--accent); }
@@ -754,6 +762,20 @@
           <span style="color:var(--muted)">—</span>
           <input type="datetime-local" id="alert-time-to" step="1" onchange="loadAlerts()">
         </span>
+        <label>Инцидент:</label>
+        <select id="alert-filter-incident" onchange="loadAlerts()">
+          <option value="all">все</option>
+          <option value="in">в инцидентах</option>
+          <option value="none">вне инцидентов</option>
+        </select>
+        <label>Поиск:</label>
+        <input type="text" id="alert-filter-query" placeholder="правило/хост/сущность"
+               oninput="onAlertSearchInput()" onkeydown="if(event.key==='Enter') loadAlerts();">
+        <label class="switch-wrap" title="Строка на правило со счётчиками; клик раскрывает алерты правила">
+          <input type="checkbox" id="alert-group-by-rule" onchange="loadAlerts()">
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+          Группировать по правилу
+        </label>
         <button type="button" class="ghost" onclick="loadAlerts()">Обновить</button>
         <button type="button" class="updates-badge" id="alerts-updates-badge" style="display:none;"
                 onclick="applyUpdates('alerts')"></button>
@@ -1543,7 +1565,18 @@ const ALERT_COLUMNS = [
   { key: "rule", label: "Правило" },
   { key: "host", label: "Хост" },
   { key: "event_count", label: "События" },
+  { key: null, label: "Инцидент" },
   { key: "created_at", label: "Создан" },
+];
+// Режим "Группировать по правилу" (GET /alerts/groups): те же колонки по месту, другое содержимое -
+// "Хост" -> число алертов группы, "Инцидент" -> сколько из них в инцидентах, "Создан" -> последний.
+const ALERT_GROUP_COLUMNS = [
+  { key: "rule", label: "" },
+  { key: null, label: "Правило" },
+  { key: "alert_count", label: "Алертов" },
+  { key: "event_count", label: "События" },
+  { key: null, label: "В инцидентах" },
+  { key: "created_at", label: "Последний" },
 ];
 
 // sort_by у GET /incidents: created_at/updated_at/alert_count/status/severity (см. app/main.py).
@@ -2015,14 +2048,41 @@ function eventCellHtml(colId, e) {
   return `<td title="${attr(raw)}">${escapeHtml(raw)}</td>`;
 }
 
+// Ошибка API несёт status и сырой detail: 409 каталога правил отдаёт detail объектом
+// {message, references}, и без этого пользователь видел "[object Object]".
 async function api(path, opts) {
   const res = await fetch(API + path, opts);
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail || detail; } catch (e) {}
-    throw new Error(detail);
+    const message = typeof detail === "string" ? detail
+      : (detail && detail.message) || JSON.stringify(detail);
+    const err = new Error(message);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
   return res.json();
+}
+
+// DELETE каталога правил с разбором 409 (на удаляемое ссылаются корреляции): показываем, какие
+// именно корреляции перестанут срабатывать, и по второму подтверждению повторяем с force=true.
+async function deleteWithReferenceCheck(path, params) {
+  try {
+    return await api(path + "?" + params.toString(), { method: "DELETE" });
+  } catch (e) {
+    const refs = e.status === 409 && e.detail && Array.isArray(e.detail.references) ? e.detail.references : null;
+    if (!refs) throw e;
+    const listed = refs.slice(0, 15).map(r => `  • ${r.title} (${r.ruleset})`).join("\n");
+    const more = refs.length > 15 ? `\n  …и ещё ${refs.length - 15}` : "";
+    const ok = confirm(
+      `На удаляемое ссылаются корреляции:\n${listed}${more}\n\n` +
+      "После удаления они перестанут срабатывать. Удалить всё равно?"
+    );
+    if (!ok) return null;
+    params.set("force", "true");
+    return api(path + "?" + params.toString(), { method: "DELETE" });
+  }
 }
 
 // ---------- Health: лёгкий периодический опрос + развёрнутая проверка по клику ----------
@@ -2780,28 +2840,105 @@ async function runValueListUpload() {
 
 function sevBar(level) { return `<span class="sev-bar sev-${level}"></span>`; }
 
-async function loadAlerts(offset = 0) {
-  alertsOffset = offset;
-  resetUpdatesBaseline("alerts");   // список перечитывается - гасим бейдж «есть новые» (см. pollUpdates)
-  const tbody = document.getElementById("alerts-tbody");
-  const emptyEl = document.getElementById("alerts-empty");
-  document.getElementById("alerts-head-row").innerHTML = ALERT_COLUMNS.map(c => thHtml("alerts", c)).join("");
+// Фильтры вкладки Алерты, общие для списка, групп и раскрытия группы (сервер строит по ним ОДИН
+// WHERE - store._alerts_where, так что счётчики групп сходятся с раскрытыми алертами).
+function alertFilterParams() {
   const params = new URLSearchParams();
   const batch = currentBatch();
   if (batch) params.set("source_batch", batch);
   const level = document.getElementById("alert-filter-level").value;
   if (level) params.set("rule_level", level);
   applyTimeParams("alert", params);
+  const incident = document.getElementById("alert-filter-incident").value;
+  if (incident && incident !== "all") params.set("incident", incident);
+  const q = document.getElementById("alert-filter-query").value.trim();
+  if (q) params.set("q", q);
+  return params;
+}
+
+let alertSearchTimer = null;
+function onAlertSearchInput() {
+  clearTimeout(alertSearchTimer);
+  alertSearchTimer = setTimeout(() => loadAlerts(0), 300);
+}
+
+// Ответ на устаревший запрос (пользователь печатает в поиске быстрее, чем приходят ответы)
+// не должен перерисовать таблицу поверх свежего - тот же приём, что eventsRequestSeq у Событий.
+let alertsRequestSeq = 0;
+// Раскрытые группы (rule_title) переживают перезагрузку списка - иначе автообновление
+// (pollUpdates) схлопывало бы то, что аналитик раскрыл.
+const expandedAlertGroups = new Set();
+const ALERT_GROUP_CHILD_LIMIT = 100;
+
+function fmtTime(s) { return (s || "").slice(0, 19).replace("T", " "); }
+
+// Склонение по числу: plural(3, "алерт", "алерта", "алертов") -> "алерта".
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+// Ячейка "Инцидент" строки алерта: один инцидент - сразу переход в него, несколько - открываем
+// карточку алерта, там список (блок "Входит в инциденты").
+function alertIncidentCell(a) {
+  const ids = a.incident_ids || [];
+  if (!ids.length) return '<span class="muted">—</span>';
+  if (ids.length === 1) {
+    return `<span class="badge badge-alert-incident" onclick="event.stopPropagation(); jumpToIncident('${attr(ids[0])}')">инцидент</span>`;
+  }
+  return `<span class="badge badge-alert-incident">${ids.length} ${plural(ids.length, "инцидент", "инцидента", "инцидентов")}</span>`;
+}
+
+function alertRowHtml(a, child = false) {
+  return `
+    <tr class="data-row${child ? " child-row" : ""}" data-id="${attr(a.alert_id)}" onclick="selectAlert('${attr(a.alert_id)}')">
+      <td>${sevBar(a.rule_level)}</td>
+      <td class="${child ? "child-indent" : ""}">${escapeHtml(a.rule_title)}</td>
+      <td>${escapeHtml(a.host)}</td>
+      <td>${a.event_count}</td>
+      <td>${alertIncidentCell(a)}</td>
+      <td>${fmtTime(a.created_at)}</td>
+    </tr>`;
+}
+
+function alertGroupRowHtml(g, idx) {
+  const open = expandedAlertGroups.has(g.rule_title);
+  return `
+    <tr class="data-row rule-group-row" data-group="${idx}" onclick="toggleAlertGroup(${idx})">
+      <td>${sevBar(g.rule_level)}</td>
+      <td><span class="caret">${open ? "▾" : "▸"}</span>${escapeHtml(g.rule_title)}</td>
+      <td>${g.alert_count}</td>
+      <td>${g.event_count}</td>
+      <td>${g.in_incident_count ? `${g.in_incident_count} из ${g.alert_count}` : '<span class="muted">—</span>'}</td>
+      <td>${fmtTime(g.last_created_at)}</td>
+    </tr>`;
+}
+
+let currentAlertGroups = [];
+
+async function loadAlerts(offset = 0) {
+  alertsOffset = offset;
+  resetUpdatesBaseline("alerts");   // список перечитывается - гасим бейдж «есть новые» (см. pollUpdates)
+  const seq = ++alertsRequestSeq;
+  const tbody = document.getElementById("alerts-tbody");
+  const emptyEl = document.getElementById("alerts-empty");
+  const grouped = document.getElementById("alert-group-by-rule").checked;
+  document.getElementById("alerts-head-row").innerHTML =
+    (grouped ? ALERT_GROUP_COLUMNS : ALERT_COLUMNS).map(c => thHtml("alerts", c)).join("");
+  const params = alertFilterParams();
   sortParams(alertsSort, params);
   params.set("limit", alertsLimit);
   params.set("offset", offset);
 
   try {
-    const res = await api("/alerts?" + params.toString());
-    const alerts = res.alerts || [];
+    const res = await api((grouped ? "/alerts/groups?" : "/alerts?") + params.toString());
+    if (seq !== alertsRequestSeq) return;
+    const rows = (grouped ? res.groups : res.alerts) || [];
     alertsTotal = res.total || 0;
     renderPager("alerts", offset, alertsLimit, alertsTotal);
-    if (alerts.length === 0) {
+    if (rows.length === 0) {
       // className/textContent сбрасываем явно - иначе тут остаётся "error-state"/текст ошибки
       // от ПРЕДЫДУЩЕГО неудачного запроса (catch ниже их выставляет, а тут никто не возвращал
       // обратно): пустой результат после ошибки визуально выглядел так, будто ошибка ещё жива.
@@ -2812,22 +2949,66 @@ async function loadAlerts(offset = 0) {
       return;
     }
     emptyEl.style.display = "none";
-    tbody.innerHTML = alerts.map(a => `
-      <tr class="data-row" data-id="${a.alert_id}" onclick="selectAlert('${a.alert_id}')">
-        <td>${sevBar(a.rule_level)}</td>
-        <td>${escapeHtml(a.rule_title)}</td>
-        <td>${escapeHtml(a.host)}</td>
-        <td>${a.event_count}</td>
-        <td>${a.created_at.slice(0,19).replace("T"," ")}</td>
-      </tr>
-    `).join("");
+    if (!grouped) {
+      tbody.innerHTML = rows.map(a => alertRowHtml(a)).join("");
+      return;
+    }
+    currentAlertGroups = rows;
+    tbody.innerHTML = rows.map((g, i) => alertGroupRowHtml(g, i)).join("");
+    await Promise.all(rows.map((g, i) => expandedAlertGroups.has(g.rule_title) ? renderAlertGroupChildren(i, seq) : null));
   } catch (e) {
+    if (seq !== alertsRequestSeq) return;
     tbody.innerHTML = "";
     emptyEl.style.display = "block";
     emptyEl.className = "error-state";
     emptyEl.textContent = "Ошибка загрузки: " + e.message;
     renderPager("alerts", 0, alertsLimit, 0);
   }
+}
+
+async function toggleAlertGroup(idx) {
+  const g = currentAlertGroups[idx];
+  if (!g) return;
+  if (expandedAlertGroups.has(g.rule_title)) {
+    expandedAlertGroups.delete(g.rule_title);
+    document.querySelectorAll(`#alerts-tbody tr[data-parent="${idx}"]`).forEach(tr => tr.remove());
+    const caret = document.querySelector(`#alerts-tbody tr[data-group="${idx}"] .caret`);
+    if (caret) caret.textContent = "▸";
+    return;
+  }
+  expandedAlertGroups.add(g.rule_title);
+  await renderAlertGroupChildren(idx, alertsRequestSeq);
+}
+
+// Алерты одной группы - обычный /alerts с теми же фильтрами + точный rule_title, вставляются
+// строками сразу под строкой группы.
+async function renderAlertGroupChildren(idx, seq) {
+  const g = currentAlertGroups[idx];
+  const groupRow = document.querySelector(`#alerts-tbody tr[data-group="${idx}"]`);
+  if (!g || !groupRow) return;
+  const params = alertFilterParams();
+  params.set("rule_title", g.rule_title);
+  sortParams(alertsSort, params);
+  params.set("limit", ALERT_GROUP_CHILD_LIMIT);
+  let html;
+  try {
+    const res = await api("/alerts?" + params.toString());
+    if (seq !== alertsRequestSeq) return;
+    const children = res.alerts || [];
+    html = children.map(a => alertRowHtml(a, true)).join("");
+    if ((res.total || 0) > children.length) {
+      html += `<tr class="child-row"><td></td><td class="child-indent muted" colspan="5">показаны ${children.length} из ${res.total} — уточните фильтр или поиск</td></tr>`;
+    }
+  } catch (e) {
+    if (seq !== alertsRequestSeq) return;
+    html = `<tr class="child-row"><td></td><td class="child-indent error-state" colspan="5">Ошибка: ${escapeHtml(e.message)}</td></tr>`;
+  }
+  document.querySelectorAll(`#alerts-tbody tr[data-parent="${idx}"]`).forEach(tr => tr.remove());
+  const tmp = document.createElement("tbody");
+  tmp.innerHTML = html;
+  Array.from(tmp.children).reverse().forEach(tr => { tr.dataset.parent = idx; groupRow.after(tr); });
+  const caret = groupRow.querySelector(".caret");
+  if (caret) caret.textContent = "▾";
 }
 
 function alertsPrev() { if (alertsOffset - alertsLimit >= 0) loadAlerts(alertsOffset - alertsLimit); }
@@ -2894,6 +3075,13 @@ async function selectAlert(id) {
       <div class="kv"><span>Пользователи</span><span>${escapeHtml((ent.users||[]).join(", ")) || "—"}</span></div>
       <div class="kv"><span>IP (src)</span><span>${escapeHtml((ent.src_ips||[]).join(", ")) || "—"}</span></div>
       <div class="kv"><span>Процессы</span><span>${escapeHtml((ent.processes||[]).join(", ")) || "—"}</span></div>
+      <p class="panel-title" style="margin-top:14px;">Входит в инциденты (${(a.incidents||[]).length})</p>
+      ${(a.incidents||[]).length ? `<div class="ctx-table-scroll"><table class="ctx-table"><tbody>${a.incidents.map(i => `
+        <tr class="data-row" onclick="jumpToIncident('${attr(i.incident_id)}')">
+          <td class="ctx-col-sev">${sevBar(i.severity)}</td>
+          <td class="ctx-wrap">${escapeHtml(i.correlation_rule_title || i.incident_id)}</td>
+          <td class="ctx-col-narrow"><span class="badge badge-${attr(i.status)}">${escapeHtml(i.status)}</span></td>
+        </tr>`).join("")}</tbody></table></div>` : '<p class="muted">не входит ни в один инцидент</p>'}
       <p class="panel-title" style="margin-top:14px;">Сэмпл событий (${a.sample_events.length})</p>
       <pre class="json-block">${escapeHtml(JSON.stringify(a.sample_events, null, 2))}</pre>
     `;
@@ -2914,6 +3102,53 @@ async function jumpToAlert(alertId) {
   switchTab("alerts");
   await loadAlerts();
   await selectAlert(alertId);
+}
+
+// Обратный переход: из списка/карточки алерта в карточку инцидента.
+async function jumpToIncident(incidentId) {
+  switchTab("incidents");
+  await loadIncidents();
+  await selectIncident(incidentId);
+}
+
+// Member-алерты в карточке инцидента, сгруппированные по правилу: строка "правило · N алертов ·
+// Σ событий · макс. severity", клик раскрывает отдельные алерты (десяток одинаковых whoami - одна
+// строка). Порядок групп - по первому появлению (member_alerts уже по created_at).
+const SEV_RANK = { critical: 5, high: 4, medium: 3, low: 2, informational: 1 };
+function memberAlertGroupsHtml(members, incidentId) {
+  const groups = new Map();
+  for (const a of members) {
+    if (!groups.has(a.rule_title)) groups.set(a.rule_title, []);
+    groups.get(a.rule_title).push(a);
+  }
+  let gi = 0;
+  return Array.from(groups, ([title, alerts]) => {
+    const id = `ma-${attr(incidentId)}-${gi++}`;
+    const sev = alerts.reduce((best, a) => (SEV_RANK[a.rule_level] || 0) > (SEV_RANK[best] || 0) ? a.rule_level : best, "informational");
+    const events = alerts.reduce((s, a) => s + (a.event_count || 0), 0);
+    const childRows = alerts.map(a => `
+      <tr class="data-row child-row" data-parent="${id}" style="display:none;" onclick="jumpToAlert('${attr(a.alert_id)}')">
+        <td class="ctx-col-sev">${sevBar(a.rule_level)}</td>
+        <td class="ctx-wrap child-indent">${escapeHtml(a.host)}</td>
+        <td class="ctx-col-host">${fmtTime(a.created_at)}</td>
+        <td class="ctx-col-narrow">${a.event_count}</td>
+      </tr>`).join("");
+    return `
+      <tr class="data-row rule-group-row" onclick="toggleMemberGroup('${id}', this)">
+        <td class="ctx-col-sev">${sevBar(sev)}</td>
+        <td class="ctx-wrap"><span class="caret">▸</span>${escapeHtml(title)}</td>
+        <td class="ctx-col-host">${alerts.length} ${plural(alerts.length, "алерт", "алерта", "алертов")}</td>
+        <td class="ctx-col-narrow">${events}</td>
+      </tr>${childRows}`;
+  }).join("");
+}
+
+function toggleMemberGroup(id, row) {
+  const rows = document.querySelectorAll(`tr[data-parent="${id}"]`);
+  const open = rows.length && rows[0].style.display === "none";
+  rows.forEach(tr => { tr.style.display = open ? "" : "none"; });
+  const caret = row.querySelector(".caret");
+  if (caret) caret.textContent = open ? "▾" : "▸";
 }
 
 // ---------- Incidents (Этап 4) ----------
@@ -3007,14 +3242,7 @@ async function selectIncident(id) {
     const mitre = renderMitreChips(inc.mitre, inc.mitre_techniques);
     const ent = inc.entities || {};
     const inv = inc.investigation;
-    const memberRows = (inc.member_alerts || []).map(a => `
-      <tr class="data-row" onclick="jumpToAlert('${a.alert_id}')">
-        <td class="ctx-col-sev">${sevBar(a.rule_level)}</td>
-        <td class="ctx-wrap">${escapeHtml(a.rule_title)}</td>
-        <td class="ctx-col-host">${escapeHtml(a.host)}</td>
-        <td class="ctx-col-narrow">${a.event_count}</td>
-      </tr>
-    `).join("");
+    const memberRows = memberAlertGroupsHtml(inc.member_alerts || [], inc.incident_id);
     content.innerHTML = `
       <h3>${sevBar(inc.severity)}${escapeHtml(inc.correlation_rule_title || "—")}</h3>
       <p class="muted">${escapeHtml(inc.title) || "без описания"} · type: ${escapeHtml(inc.incident_type)}</p>
@@ -3503,6 +3731,12 @@ function ruleKindBadges(r) {
   let out = "";
   if (r.correlation) out += ' <span class="badge badge-correlation" title="Correlation-правило: считает скользящее окно по срабатываниям других правил">корреляция</span>';
   if (r.incident) out += ' <span class="badge badge-incident" title="При срабатывании заводит инцидент вместо обычного алерта">инцидент</span>';
+  // Только в просмотре «Основного рулсета»: правило в main не добавлено, но исполняется, потому что
+  // на него ссылается включённая корреляция (rules_catalog.with_dependencies).
+  if (r.via_dependency) {
+    const by = (r.required_by || []).join(", ");
+    out += ` <span class="badge badge-dependency" title="${attr("Не добавлено в основной рулсет, исполняется как зависимость корреляции" + (by ? ": " + by : ""))}">зависимость</span>`;
+  }
   return out;
 }
 
@@ -3557,7 +3791,9 @@ async function loadSigmaRules(offset) {
         const rowRuleset = r.source_ruleset || ruleset;
         return `
         <tr class="data-row" data-id="${attr(r.id || "")}" onclick="selectSigmaRule('${escapeAttr(r.id || "")}', '${escapeAttr(rowRuleset)}')">
-          <td><button type="button" class="in-main-btn${r.in_main ? " active" : ""}" title="${r.in_main ? "Убрать из основного рулсета" : "Добавить в основной рулсет"}" onclick="event.stopPropagation(); toggleRuleInMain('${escapeAttr(rowRuleset)}','${escapeAttr(r.id || "")}', ${r.in_main ? "false" : "true"})">${r.in_main ? "✓" : "+"}</button></td>
+          <td>${r.via_dependency
+            ? `<button type="button" class="in-main-btn" disabled title="Исполняется как зависимость корреляции - включение управляется самой корреляцией">↳</button>`
+            : `<button type="button" class="in-main-btn${r.in_main ? " active" : ""}" title="${r.in_main ? "Убрать из основного рулсета" : "Добавить в основной рулсет"}" onclick="event.stopPropagation(); toggleRuleInMain('${escapeAttr(rowRuleset)}','${escapeAttr(r.id || "")}', ${r.in_main ? "false" : "true"})">${r.in_main ? "✓" : "+"}</button>`}</td>
           <td>${sevBar(r.level)}</td>
           <td>${escapeHtml(r.title || "")}${ruleKindBadges(r)}</td>
           <td>${escapeHtml(r.level || "")}</td>
@@ -4013,7 +4249,7 @@ async function runRulesetUpload() {
 async function deleteRuleset(path) {
   if (!path || !confirm("Удалить рулсет и все его правила из каталога?")) return;
   try {
-    await api("/rulesets?" + new URLSearchParams({ ruleset: path }).toString(), { method: "DELETE" });
+    if (!await deleteWithReferenceCheck("/rulesets", new URLSearchParams({ ruleset: path }))) return;
     await refreshRulesetOptions();
     loadSigmaRules(0);
   } catch (e) {
@@ -4025,7 +4261,7 @@ async function deleteCustomRule(ruleId, ruleset) {
   if (!confirm("Удалить это правило?")) return;
   try {
     const params = new URLSearchParams({ ruleset });
-    await api("/rules/custom/" + encodeURIComponent(ruleId) + "?" + params.toString(), { method: "DELETE" });
+    if (!await deleteWithReferenceCheck("/rules/custom/" + encodeURIComponent(ruleId), params)) return;
     document.getElementById("rule-detail-content").innerHTML =
       '<p class="muted">Выбери правило в списке слева, чтобы увидеть детали.</p>';
     await refreshRulesetOptions();

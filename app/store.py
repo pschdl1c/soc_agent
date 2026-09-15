@@ -222,6 +222,18 @@ CREATE TABLE IF NOT EXISTS investigations (
 CREATE INDEX IF NOT EXISTS idx_investigations_incident ON investigations(incident_id);
 CREATE INDEX IF NOT EXISTS idx_investigations_status   ON investigations(status);
 
+-- Member-алерты инцидентов: many-to-many. Один алерт законно входит в несколько инцидентов -
+-- разные сценарии на одних событиях (напр. SCE_Recon_Scripted_Discovery и
+-- SCE_TH_Recon_Discovery_Burst). Раньше связь была колонкой alerts.incident_id, которую
+-- проставлял только ПЕРВЫЙ инцидент, - второй оставался с 0 member-алертов. Заполняет
+-- store.link_alerts_to_incident, чистит delete_batch (по инцидентам И по алертам источника).
+CREATE TABLE IF NOT EXISTS incident_alerts (
+    incident_id TEXT NOT NULL,
+    alert_id TEXT NOT NULL,
+    PRIMARY KEY (incident_id, alert_id)
+);
+CREATE INDEX IF NOT EXISTS idx_incident_alerts_alert ON incident_alerts(alert_id);
+
 -- Служебные отметки о разовых операциях над данными (НЕ версия схемы - схема по-прежнему
 -- поддерживается только идемпотентными операциями _migrate). Нужна одна вещь: понять, что
 -- одноразовый бэкфилл уже отрабатывал на этом файле, и не перечитывать при каждом старте
@@ -294,15 +306,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_src_ip ON events(src_ip)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at)")
 
-    # alerts.incident_id (Этап 4) - обратная ссылка алерта на инцидент, к которому он привязан
-    # (store.link_alerts_to_incident). NULL у алертов, не входящих ни в один инцидент (обычный
-    # случай - инциденты только сценарные). Новая таблица incidents/investigations создаётся
-    # прямо в _SCHEMA (CREATE TABLE IF NOT EXISTS отрабатывает и на старой БД), миграции ей не
-    # нужно - здесь только КОЛОНКА на уже существующей alerts.
-    alerts_cols = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)")}
-    if "incident_id" not in alerts_cols:
-        conn.execute("ALTER TABLE alerts ADD COLUMN incident_id TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_incident ON alerts(incident_id)")
 
     # events.alert_id - какой алерт "поглотил" это событие (проставляется app/main.py:
     # _process_batch сразу после store.upsert_alerts, через store.link_events_to_alerts).
@@ -419,6 +422,63 @@ _INVESTIGATION_UPDATABLE = {
 }
 
 
+def _py_lower(value: Any) -> Any:
+    return value.lower() if isinstance(value, str) else value
+
+
+# Фильтр вкладки "Алерты" по участию в инцидентах (incident_alerts).
+ALERT_INCIDENT_FILTERS = ("all", "in", "none")
+
+
+def _alerts_where(
+    source_batch: str | None = None,
+    rule_level: str | None = None,
+    time_from: str | None = None,
+    time_to: str | None = None,
+    incident: str | None = None,
+    q: str | None = None,
+    rule_title: str | None = None,
+) -> tuple[str, list[Any]]:
+    """WHERE для list_alerts/count_alerts/group_alerts_by_rule - одно место, иначе пейджер и
+    группы разойдутся со списком. Все значения - bound-параметры.
+
+    incident: "in" - алерт входит хотя бы в один инцидент, "none" - ни в один, "all"/None - без
+    фильтра. q - подстрока (регистронезависимо, в т.ч. кириллица через py_lower) по названию
+    правила, хосту и любому значению entities (json_tree - значения уже раскодированы, в самом
+    JSON кириллица хранится \\u-экранированной). rule_title - точное название (раскрытие группы)."""
+    clauses = ["1=1"]
+    params: list[Any] = []
+    if source_batch:
+        clauses.append("source_batch = ?")
+        params.append(source_batch)
+    if rule_level:
+        clauses.append("rule_level = ?")
+        params.append(rule_level)
+    if time_from:
+        clauses.append("created_at >= ?")
+        params.append(time_from)
+    if time_to:
+        clauses.append("created_at <= ?")
+        params.append(time_to)
+    if rule_title:
+        clauses.append("rule_title = ?")
+        params.append(rule_title)
+    if incident and incident != "all":
+        if incident not in ALERT_INCIDENT_FILTERS:
+            raise ValueError(f"incident: ожидается одно из {', '.join(ALERT_INCIDENT_FILTERS)}")
+        exists = "EXISTS (SELECT 1 FROM incident_alerts ia WHERE ia.alert_id = alerts.alert_id)"
+        clauses.append(exists if incident == "in" else f"NOT {exists}")
+    needle = (q or "").strip().lower()
+    if needle:
+        clauses.append(
+            "(instr(py_lower(rule_title), ?) > 0 OR instr(py_lower(host), ?) > 0 OR EXISTS ("
+            "SELECT 1 FROM json_tree(alerts.entities) t "
+            "WHERE t.atom IS NOT NULL AND instr(py_lower(CAST(t.atom AS TEXT)), ?) > 0))"
+        )
+        params += [needle, needle, needle]
+    return " AND ".join(clauses), params
+
+
 def _order_clause(sort_by: str | None, sort_dir: str | None, columns: dict[str, str], default: str) -> str:
     """Строит безопасный ORDER BY только из whitelisted-выражений (для алертов)."""
     expr = columns.get(sort_by or "", None)
@@ -530,6 +590,10 @@ class Store:
         # query_only - страховка на уровне соединения: даже случайная попытка написать через
         # read_conn упадёт явной ошибкой, а не тихо проскочит мимо self._lock.
         self._read_conn.execute("PRAGMA query_only=ON")
+        # Регистронезависимый поиск по кириллице: встроенные LOWER()/LIKE SQLite понимают регистр
+        # только у ASCII. Нужен поиску вкладки "Алерты" (_alerts_where), где фильтр обязан
+        # остаться в SQL - иначе не сходятся пейджер и total.
+        self._read_conn.create_function("py_lower", 1, _py_lower, deterministic=True)
 
     # ------------------------------------------------------------------ Alerts
 
@@ -593,27 +657,25 @@ class Store:
         rule_level: str | None = None,
         time_from: str | None = None,
         time_to: str | None = None,
+        incident: str | None = None,
+        q: str | None = None,
+        rule_title: str | None = None,
         sort_by: str | None = None,
         sort_dir: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        query = "SELECT * FROM alerts WHERE 1=1"
-        params: list[Any] = []
-        if source_batch:
-            query += " AND source_batch = ?"
-            params.append(source_batch)
-        if rule_level:
-            query += " AND rule_level = ?"
-            params.append(rule_level)
-        if time_from:
-            query += " AND created_at >= ?"
-            params.append(time_from)
-        if time_to:
-            query += " AND created_at <= ?"
-            params.append(time_to)
+        """Список алертов (фильтры - см. _alerts_where). Каждая строка несёт incident_ids -
+        инциденты, в которые входит алерт (incident_alerts, many-to-many)."""
+        where, params = _alerts_where(
+            source_batch, rule_level, time_from, time_to, incident, q, rule_title,
+        )
         order = _order_clause(sort_by, sort_dir, _ALERT_SORT_COLUMNS, "ORDER BY created_at DESC")
-        query += f" {order} LIMIT ? OFFSET ?"
+        query = (
+            "SELECT alerts.*, (SELECT json_group_array(ia.incident_id) FROM incident_alerts ia "
+            "WHERE ia.alert_id = alerts.alert_id) AS incident_ids "
+            f"FROM alerts WHERE {where} {order} LIMIT ? OFFSET ?"
+        )
         params += [limit, offset]
 
         with self._read_lock:
@@ -621,6 +683,7 @@ class Store:
         for row in rows:
             row["mitre_techniques"] = json.loads(row["mitre_techniques"])
             row["entities"] = json.loads(row["entities"])
+            row["incident_ids"] = json.loads(row["incident_ids"] or "[]")
             row.pop("sample_events", None)
         return rows
 
@@ -630,25 +693,60 @@ class Store:
         rule_level: str | None = None,
         time_from: str | None = None,
         time_to: str | None = None,
+        incident: str | None = None,
+        q: str | None = None,
+        rule_title: str | None = None,
     ) -> int:
         """Сколько всего алертов подходит под фильтры - для пейджера вкладки "Алерты"
         (те же фильтры, что и у list_alerts, но без сортировки/лимита)."""
-        query = "SELECT COUNT(*) AS c FROM alerts WHERE 1=1"
-        params: list[Any] = []
-        if source_batch:
-            query += " AND source_batch = ?"
-            params.append(source_batch)
-        if rule_level:
-            query += " AND rule_level = ?"
-            params.append(rule_level)
-        if time_from:
-            query += " AND created_at >= ?"
-            params.append(time_from)
-        if time_to:
-            query += " AND created_at <= ?"
-            params.append(time_to)
+        where, params = _alerts_where(
+            source_batch, rule_level, time_from, time_to, incident, q, rule_title,
+        )
         with self._read_lock:
-            return int(self._read_conn.execute(query, params).fetchone()["c"])
+            return int(self._read_conn.execute(
+                f"SELECT COUNT(*) AS c FROM alerts WHERE {where}", params,
+            ).fetchone()["c"])
+
+    def group_alerts_by_rule(
+        self,
+        source_batch: str | None = None,
+        rule_level: str | None = None,
+        time_from: str | None = None,
+        time_to: str | None = None,
+        incident: str | None = None,
+        q: str | None = None,
+        sort_by: str | None = None,
+        sort_dir: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Группировка вкладки "Алерты" по правилу (отображение, НЕ дедуп): строка на rule_title
+        с числом алертов, суммой событий, максимальной severity, числом алертов в инцидентах и
+        временем последнего. Те же фильтры, что у list_alerts. Возврат - (группы, всего групп)."""
+        where, params = _alerts_where(source_batch, rule_level, time_from, time_to, incident, q)
+        sort_columns = {
+            "rule": "max_rank",
+            "alert_count": "alert_count",
+            "event_count": "event_count",
+            "created_at": "last_created_at",
+        }
+        order = _order_clause(sort_by, sort_dir, sort_columns, "ORDER BY last_created_at DESC")
+        query = (
+            f"SELECT rule_title, MAX({_SEVERITY_RANK_SQL}) AS max_rank, COUNT(*) AS alert_count, "
+            "SUM(event_count) AS event_count, MAX(created_at) AS last_created_at, "
+            "SUM(EXISTS (SELECT 1 FROM incident_alerts ia WHERE ia.alert_id = alerts.alert_id)) "
+            "AS in_incident_count "
+            f"FROM alerts WHERE {where} GROUP BY rule_title {order}, rule_title LIMIT ? OFFSET ?"
+        )
+        rank_to_level = {5: "critical", 4: "high", 3: "medium", 2: "low", 1: "informational"}
+        with self._read_lock:
+            rows = [dict(r) for r in self._read_conn.execute(query, [*params, limit, offset]).fetchall()]
+            total = int(self._read_conn.execute(
+                f"SELECT COUNT(DISTINCT rule_title) AS c FROM alerts WHERE {where}", params,
+            ).fetchone()["c"])
+        for row in rows:
+            row["rule_level"] = rank_to_level.get(row.pop("max_rank"), "informational")
+        return rows, total
 
     def list_alerts_by_entity(
         self,
@@ -700,9 +798,19 @@ class Store:
     def get_alert(self, alert_id: str) -> dict[str, Any] | None:
         with self._read_lock:
             row = self._read_conn.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,)).fetchone()
-        if row is None:
-            return None
+            if row is None:
+                return None
+            # Инциденты, в которые входит алерт - блок "Входит в инциденты" карточки.
+            incidents = [
+                dict(r) for r in self._read_conn.execute(
+                    "SELECT i.incident_id, i.correlation_rule_title, i.severity, i.status, i.created_at "
+                    "FROM incident_alerts ia JOIN incidents i ON i.incident_id = ia.incident_id "
+                    "WHERE ia.alert_id = ? ORDER BY i.created_at DESC",
+                    (alert_id,),
+                ).fetchall()
+            ]
         result = dict(row)
+        result["incidents"] = incidents
         result["mitre_techniques"] = json.loads(result["mitre_techniques"])
         result["entities"] = json.loads(result["entities"])
         result["sample_events"] = json.loads(result["sample_events"])
@@ -1395,8 +1503,10 @@ class Store:
         source_batch: str,
         event_ids: list[str],
     ) -> int:
-        """Привязывает уже сохранённые алерты к инциденту (проставляет alerts.incident_id) и
-        досчитывает incidents.alert_count + roll-up severity по привязанным member-алертам.
+        """Привязывает уже сохранённые алерты к инциденту (строки incident_alerts) и досчитывает
+        incidents.alert_count + roll-up severity по привязанным member-алертам. Алерт, уже
+        входящий в ДРУГОЙ инцидент, привязывается и к этому - связь many-to-many (два сценария на
+        одних событиях дают два инцидента, у обоих свои member-алерты).
 
         event_ids - ВСЕ event_id, реально вошедшие в выигрышное окно correlation-правила (см.
         app/detection/correlation.py:_evaluate_correlation_rule/evaluate_correlation_window) -
@@ -1453,13 +1563,15 @@ class Store:
 
             ph3 = ",".join("?" * len(alert_ids))
             cur = self._conn.execute(
-                f"UPDATE alerts SET incident_id = ? "
-                f"WHERE incident_id IS NULL AND source_batch = ? AND alert_id IN ({ph3})",
+                f"INSERT OR IGNORE INTO incident_alerts (incident_id, alert_id) "
+                f"SELECT ?, alert_id FROM alerts WHERE source_batch = ? AND alert_id IN ({ph3})",
                 (incident_id, source_batch, *alert_ids),
             )
             linked = cur.rowcount
             rows = self._conn.execute(
-                "SELECT rule_level FROM alerts WHERE incident_id = ?", (incident_id,)
+                "SELECT a.rule_level FROM incident_alerts ia JOIN alerts a ON a.alert_id = ia.alert_id "
+                "WHERE ia.incident_id = ?",
+                (incident_id,),
             ).fetchall()
             sev_row = self._conn.execute(
                 "SELECT severity FROM incidents WHERE incident_id = ?", (incident_id,)
@@ -1615,8 +1727,9 @@ class Store:
             result = self._incident_row(row)
             result["member_alerts"] = [
                 dict(r) for r in self._read_conn.execute(
-                    "SELECT alert_id, rule_title, rule_level, host, event_count, created_at "
-                    "FROM alerts WHERE incident_id = ? ORDER BY created_at ASC",
+                    "SELECT a.alert_id, a.rule_title, a.rule_level, a.host, a.event_count, a.created_at "
+                    "FROM incident_alerts ia JOIN alerts a ON a.alert_id = ia.alert_id "
+                    "WHERE ia.incident_id = ? ORDER BY a.created_at ASC",
                     (incident_id,),
                 ).fetchall()
             ]
@@ -1740,6 +1853,16 @@ class Store:
                 self._conn.execute(
                     f"DELETE FROM investigations WHERE incident_id IN ({placeholders})", incident_ids
                 )
+                self._conn.execute(
+                    f"DELETE FROM incident_alerts WHERE incident_id IN ({placeholders})", incident_ids
+                )
+            # Связи с алертами источника у инцидентов ДРУГИХ источников сейчас не возникают
+            # (привязка сужена по source_batch), но чистим и по алертам - не оставлять висячих ссылок.
+            self._conn.execute(
+                "DELETE FROM incident_alerts WHERE alert_id IN "
+                "(SELECT alert_id FROM alerts WHERE source_batch = ?)",
+                (source_batch,),
+            )
             incidents_deleted = self._conn.execute(
                 "DELETE FROM incidents WHERE source_batch = ?", (source_batch,)
             ).rowcount

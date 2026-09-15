@@ -144,19 +144,46 @@ Invoke-RestMethod "http://localhost:8000/events/group?group_by=EventID&source_ba
 
 **`Provider_Name`.** Агент шлёт поле `ProviderName`, а Zircolite у неотмапленных полей вырезает все
 не-alnum символы (`_NON_ALNUM_RE` в `streaming.py`), так что переименованием в `Provider_Name`
-делу не помочь — подчёркивание всё равно исчезнет. Правила SigmaHQ с `Provider_Name` адаптированы
-без него (роль играет guard `Channel`/`EventID`). Лечится своим файлом маппингов через
-`SIEM_ZIRCOLITE_CONFIG_PATH` — задача в `docs/NEXT_ITERATION.md` §1.
+делу не помочь — подчёркивание всё равно исчезнет. Своего маппинга не заводим (решено 2026-09-15):
+при адаптации SigmaHQ `Provider_Name` заменяется на `ProviderName`, если реально сужает детект, иначе
+убирается — роль играет guard `Channel`/`EventID` (CLAUDE.md §9).
 
-**Время Sysmon.** `event_time` берётся из `TimeCreated` — момента записи в журнал (микросекунды,
-UTC). У Sysmon 3 (сеть) запись в журнал отстаёт от собственного `UtcTime` события на секунды:
-сетевые события пишутся пачками. Для порядка «процесс → его соединение» в `temporal_ordered` это
-может значить. Задача в `docs/NEXT_ITERATION.md` §2.
+**Время Sysmon.** У Sysmon агент берёт `TimeCreated` из `UtcTime` самого события (запись в журнал у
+Sysmon 3 отстаёт на секунды) — проверено 2026-09-15, см. `docs/guide/windows-agent.md`.
 
-**Покрытие конфига Sysmon.** `artifacts/content/telemetry/sysmonconfig.xml` (sysmon-modular balanced
-+ свои дополнения) пишет ProcessCreate не для всех утилит: `hostname.exe` на стенде есть только в
-4688, хотя он в value list `recon_discovery_tools`, а process-правила контента — Sysmon-only.
-Сверка — `docs/NEXT_ITERATION.md` §2.
+**Покрытие конфига Sysmon (проверено 2026-09-15).** Все `.exe`, на которые смотрят process-правила
+Sysmon 1 контента (включая value lists), запущены на стенде с `/?` через `cmd /c ... & rem <маркер>`
+и сверены с событиями: 110 утилит, 39 системных процессов не запускались, 35 сторонних на ВМ нет,
+75 запущено. У 28 был только 4688:
+- **дыра**: `hostname`, `arp`, `getmac`, `driverquery`, `nltest` (include базы по `OriginalFileName`
+  не срабатывает), `auditpol`, `vaultcmd`, `reagentc`, `sdclt`, `wmic` — сначала закрыта своей
+  include-группой (после применения у всех десяти появился Sysmon 1), затем тем же днём решено
+  перевести ProcessCreate в exclude-режим (см. ниже), и отдельная группа стала не нужна;
+- **не дыра**: `bcdedit`/`wbadmin` конфиг пишет с `/set`/`delete` — ровно то, что нужно правилам;
+  `cmstp`/`control`/`pcalua`/`workfolders`/`wsl`/`mmc` правила ловят как дочерние Office/WinRM/Event
+  Viewer, такие запуски база включает по родителю; `atbroker`/`certreq`/`defrag`/`dfrgui`/`eventvwr`/
+  `finger`/`fsquirt`/`taskmgr`/`winver` — только «системный бинарь не из своего каталога», а запуск из
+  `\Temp\`/`\AppData\`/`C:\Users\Public\` база включает.
+
+Ограничение метода: утилиты, которые база включала только при определённой командной строке, с `/?`
+не писались — для них сверялись условия конфига, а не события. Конфиг применяется на ходу:
+`sysmon64 -c C:\tools\sysmonconfig.xml` (взводит `SCE_Evasion_Telemetry_Tampering`).
+
+**ProcessCreate в exclude-режиме (2026-09-15).** Include-группа ProcessCreate sysmon-modular удалена:
+Sysmon 1 пишется для всех процессов, кроме шума из exclude-группы — как у SwiftOnSecurity/Neo23x0.
+Причина — сама проверка выше: в include-режиме любое новое process-правило Sigma надо сверять с
+конфигом. Проверено тем же прогоном утилит после переустановки: Sysmon 1 есть у всех 75 запущенных
+(было 47 в include-режиме, 57 со своей include-группой). Объём сопоставим с 4688 (он и так пишет все процессы). Теги техник `RuleName` у Sysmon 1
+пропали — контент на них не опирается. Любой `ProcessCreate onmatch="include"` возвращает режим
+«только перечисленное» — при обновлении sysmon-modular его надо удалять.
+
+**Аудит — по базовой линии Microsoft (2026-09-15).** Установщик включает подкатегории Windows Security
+Baseline для рабочих станций, кроме осознанных отличий: Sensitive Privilege Use и Process Termination
+выключены (шум без правил), Kerberos/SAM/Directory Service не включаются до появления контроллера
+домена. Добавлены к прежнему набору: Other Logon/Logoff, File Share, Detailed File Share (отказы),
+MPSSVC Rule-Level Policy Change, Security State Change, System Integrity, Other System Events,
+Removable Storage, Plug and Play. PowerShell Module logging (4103) выключен — правил на 4103 в контенте
+нет, объём был первым на стенде; ScriptBlock (4104) остаётся.
 
 **Шум отфильтрован в агенте.** 4673/4674/5379 (`ignore_event_ids` в `deploy/windows/vector.toml`)
 до SIEM не доезжают — пропуски `EventRecordID` в Security из-за них ожидаемы. Подкатегории
@@ -168,7 +195,10 @@ UTC). У Sysmon 3 (сеть) запись в журнал отстаёт от с
 (`docs/spec/incidents.md`).
 
 **Объём informational-алертов.** Базовые правила сценариев пишут алерт на каждое срабатывание.
-Для member-алертов инцидента это правильно, но вкладку «Алерты» забивает быстро.
+Для member-алертов инцидента это правильно, но вкладку «Алерты» забивает быстро — разбирать через
+фильтр «Инцидент: в инцидентах / вне», поиск и «Группировать по правилу» (дедуп по служебным полям
+намеренно не делается).
 
-**Установка агента сама даёт инцидент.** Смена конфига Sysmon при установке взводит
-`SCE_Evasion_Telemetry_Tampering` — известное ложное срабатывание (`docs/NEXT_ITERATION.md` §3).
+**Установка агента сама даёт инциденты.** Действия установщика взводят `SCE_Evasion_Telemetry_Tampering`
+(`sysmon -c`), `SCE_Evasion_Log_Cleared` (`wevtutil sl`) и алерты «Audit Policy Tampering» (`auditpol /set`)
+— известные ложные срабатывания, подробно в `docs/guide/windows-agent.md`; доводка — CLAUDE.md §7 «Этап 4.5».

@@ -27,6 +27,8 @@
 | `ZIRCOLITE_CONFIG_PATH` | `SIEM_ZIRCOLITE_CONFIG_PATH` | `str` | `<BASE_DIR>/Zircolite/config/config.yaml` |
 | `DEFAULT_RULESET_PATH` | `SIEM_DEFAULT_RULESET_PATH` | `str` | `<BASE_DIR>/Zircolite/rules/rules_windows_merged.json` |
 | `UPLOADS_DIR` | `SIEM_UPLOADS_DIR` | `Path` | `<BASE_DIR>/data/uploads` |
+| `CUSTOM_RULESETS_DIR` | `SIEM_CUSTOM_RULESETS_DIR` | `Path` | `<BASE_DIR>/data/custom_rulesets` (именованные custom-рулсеты и `main_ruleset.json`, `app/rules/rules_catalog.py`) |
+| `VALUE_LISTS_DIR` | `SIEM_VALUE_LISTS_DIR` | `Path` | `<BASE_DIR>/data/value_lists` (списки значений, `app/rules/value_lists.py`) |
 | `KB_DB_PATH` | `SIEM_KB_DB_PATH` | `str` | `<BASE_DIR>/kb/kb.db` |
 | `LOG_LEVEL` | `SIEM_LOG_LEVEL` | `str` | `INFO` |
 | `HOST` | `SIEM_HOST` | `str` | `127.0.0.1` |
@@ -43,6 +45,10 @@
 - `INGEST_BATCH_SIZE` → `int(...)`.
 - `INGEST_FLUSH_INTERVAL` → `float(...)`.
 - Нечисловое значение соответствующей переменной окружения вызывает `ValueError` при импорте модуля.
+
+`CUSTOM_RULESETS_DIR`/`VALUE_LISTS_DIR` вместе с `DB_PATH` позволяют поднять изолированный экземпляр
+(свои правила, списки и БД на отдельном порту) — так гоняется `scripts/test_content.py`, не трогая
+рабочий контент.
 
 ## Семантика путей
 

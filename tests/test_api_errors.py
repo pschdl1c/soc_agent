@@ -90,6 +90,17 @@ def test_incident_status_accepts_lifecycle_values(api, incident_id, status):
     assert main.store.get_incident(incident_id)["status"] == status
 
 
+def test_alert_groups_route_and_incident_filter_validation(api):
+    """/alerts/groups не перехватывается ручкой /alerts/{alert_id}; неизвестное значение
+    incident - 422, а не молча игнорируемый фильтр."""
+    client, _main = api
+    r = client.get("/alerts/groups")
+    assert r.status_code == 200
+    assert set(r.json()) == {"groups", "total", "limit", "offset"}
+    assert client.get("/alerts", params={"incident": "bogus"}).status_code == 422
+    assert client.get("/alerts", params={"incident": "none", "q": "x"}).status_code == 200
+
+
 def test_incident_status_missing_incident_is_404(api):
     client, _main = api
     r = client.patch("/incidents/no-such-incident/status", json={"status": "closed"})
