@@ -58,15 +58,18 @@
 | `entities` | TEXT | NOT NULL, JSON-объект (`Entities.model_dump()`) |
 | `event_count` | INTEGER | NOT NULL |
 | `sample_events` | TEXT | NOT NULL, JSON-массив объектов |
-| `incident_id` | TEXT | NULL — обратная ссылка на инцидент (Этап 4, аддитивная миграция `_migrate`) |
 
 Колонки `status` больше нет (была `TEXT NOT NULL DEFAULT 'new'`) — триаж-статус остался только у
 `incidents.status`. Миграция под неё не заводилась (`_SCHEMA`/`_migrate` её никогда не создавали
 и не чистили) — БД, созданные ДО этого изменения (с колонкой `status` физически на диске), не
 поддерживаются; для перехода `siem.db` пересоздаётся с нуля (одноразовая dev-БД, `.gitignore`).
 
+Колонки `incident_id` у алерта тоже нет: связь алерта с инцидентом — отдельная таблица
+`incident_alerts` (many-to-many, см. ниже), потому что один алерт законно входит в несколько
+инцидентов.
+
 Индексы: `idx_alerts_dedup(dedup_key)`, `idx_alerts_level(rule_level)`,
-`idx_alerts_batch(source_batch)`, `idx_alerts_incident(incident_id)`.
+`idx_alerts_batch(source_batch)`.
 
 ### Таблица `events`
 
@@ -116,13 +119,19 @@ correlation-правил (для цепочек, см. `insert_correlation_hits`
 
 | Колонка | Тип | Ограничения |
 |---|---|---|
-| `event_id` | TEXT | NOT NULL; логическая ссылка на `events.event_id` (без FOREIGN KEY) для обычных попаданий, либо синтетический `corr:<title>:<dedup_key>:<anchor_time>` для попаданий correlation-правила |
+| `event_id` | TEXT | NOT NULL; логическая ссылка на `events.event_id` (без FOREIGN KEY) для обычных попаданий, либо синтетический `corr:<dedup_key>:<title>:<anchor_time>` для попаданий correlation-правила |
 | `rule_title` | TEXT | NOT NULL |
 | `source_batch` | TEXT | NOT NULL |
 | `event_time` | TEXT | NULL; та же **каноническая** форма, что и `events.event_time` — оба поля пишутся ОДНИМ значением в `store_events` |
 | `group_json` | TEXT | NULL, JSON-объект `{поле: str(значение)}` — денормализованные значения group-by (∪ `condition.field` у value_count) ЭТОГО попадания |
 
 PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_title, source_batch, event_time)`.
+
+В синтетическом `event_id` **`dedup_key` всегда второй `:`-сегмент** — формат разбирается
+`split(":", 2)` (`app/store.py:link_alerts_to_incident`,
+`app/detection/correlation.py:_split_synthetic_hit`): позиционно надёжны только первые два
+сегмента, `dedup_key` — hex без `:`, а `title` и `anchor_time` дальше разбираются по списку
+известных названий правил. Перестановка сегментов ломает оба разбора молча.
 
 Строка добавляется только если название правила входит в `hit_spec`, переданный в
 `store_events` (см. ниже). `event_time` канонизируется на запись, чтобы запрос окна использовал
@@ -153,6 +162,34 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 Таблица аддитивна: метки `source_batch` в `events`/`alerts` от файловых загрузок и старых
 стримов с этой таблицей не связаны.
 
+### Таблицы `incidents` / `investigations` / `incident_alerts` (Этап 4)
+
+Все три создаются `CREATE TABLE IF NOT EXISTS` в `_SCHEMA` (отрабатывает и на старой `siem.db` —
+как было для `sources`). Полная схема, инварианты и семантика — `docs/spec/incidents.md`.
+
+- `incidents` — `(incident_id PK, dedup_key UNIQUE, incident_type, title, description, severity,
+  status, source_batch, ruleset_path, correlation_rule_id, correlation_rule_title, group_key JSON,
+  member_rule_titles JSON, window_start, window_end, window_bucket, alert_count,
+  mitre_techniques JSON, entities JSON, sample_events JSON, created_at, updated_at)`.
+  Индексы: `idx_incidents_status`, `idx_incidents_type`, `idx_incidents_batch`, `idx_incidents_created`.
+- `investigations` — `(investigation_id PK, incident_id, status, verdict, rationale, confidence,
+  steps JSON, error, created_at, started_at, finished_at)`.
+  Индексы: `idx_investigations_incident`, `idx_investigations_status`.
+- `incident_alerts` — `(incident_id, alert_id)`, PRIMARY KEY по обеим колонкам, индекс
+  `idx_incident_alerts_alert(alert_id)`. Связь member-алертов с инцидентом, **many-to-many**:
+  один алерт законно входит в несколько инцидентов (разные сценарии на одних событиях —
+  например `SCE_Recon_Scripted_Discovery` и `SCE_TH_Recon_Discovery_Burst`). Заполняется
+  `link_alerts_to_incident`, чистится `delete_batch` — и по инцидентам источника, и по его
+  алертам.
+
+### Таблица `schema_meta`
+
+`(key TEXT PRIMARY KEY, value TEXT NOT NULL)` — отметки о разовых операциях **над данными**.
+Это **не версия схемы**: схема по-прежнему поддерживается только идемпотентными операциями
+`_migrate` (см. «Модель соединений» выше). Единственное назначение — понять, что одноразовый
+бэкфилл уже отрабатывал на этом файле, и не перечитывать всю `events` при каждом старте
+(`_backfill_event_time`).
+
 ## API `Store` — алерты
 
 ### `upsert_alerts(alerts: list[Alert]) -> int`
@@ -161,12 +198,56 @@ PRIMARY KEY `(event_id, rule_title)`. Индекс `idx_rule_hits_lookup(rule_ti
 увеличивается на `alert.event_count`, `sample_events` перезаписывается. Если нет — вставка.
 Возвращает число обработанных алертов.
 
-### `list_alerts(source_batch=None, rule_level=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> list[dict]`
+### `list_alerts(source_batch=None, rule_level=None, time_from=None, time_to=None, incident=None, q=None, rule_title=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> list[dict]`
 
 Фильтры комбинируются по AND. `time_from`/`time_to` сравниваются строково с `created_at`.
 `sort_by` ∈ {`rule` (по рангу severity), `host`, `event_count`, `created_at`}; неизвестное
 значение → `ORDER BY created_at DESC`. `sort_dir` — `asc`/`desc` (по умолчанию `desc`).
 В строках `mitre_techniques` и `entities` десериализуются из JSON; `sample_events` удаляется.
+Каждая строка несёт `incident_ids` — список инцидентов, в которые входит алерт (подзапрос по
+`incident_alerts`, many-to-many).
+
+Условия строит **один** приватный `_alerts_where` — общий для `list_alerts`, `count_alerts` и
+`group_alerts_by_rule`, иначе пейджер и группы разошлись бы со списком. Все значения —
+bound-параметры. Три фильтра сверх очевидных:
+
+| Фильтр | Значения | Семантика |
+|---|---|---|
+| `incident` | `in` / `none` / `all`, `None` | `in` — алерт входит хотя бы в один инцидент, `none` — ни в один, `all`/`None` — без фильтра |
+| `q` | подстрока | Регистронезависимо (в т.ч. кириллица — SQL-функция `py_lower`) по названию правила, хосту и **любому** значению `entities` (обход `json_tree`: значения там уже раскодированы, тогда как в самом JSON кириллица хранится `\u`-экранированной) |
+| `rule_title` | точное название | Раскрытие группы из `group_alerts_by_rule` |
+
+Фильтра по статусу нет — у алерта нет статуса (см. таблицу `alerts` выше).
+
+### `count_alerts(source_batch=None, rule_level=None, time_from=None, time_to=None, incident=None, q=None, rule_title=None) -> int`
+
+Сколько всего алертов подходит под фильтры — `total` для пейджера вкладки «Алерты». Те же
+фильтры и тот же `_alerts_where`, что у `list_alerts`, без сортировки и лимита.
+
+### `group_alerts_by_rule(source_batch=None, rule_level=None, time_from=None, time_to=None, incident=None, q=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> tuple[list[dict], int]`
+
+Группировка вкладки «Алерты» по правилу — **отображение, а не дедуп**. Строка на `rule_title`:
+`{rule_title, rule_level (максимальная severity в группе), alert_count, event_count (сумма),
+in_incident_count, last_created_at}`. Фильтры — те же, кроме `rule_title` (он и есть ключ
+группы). `sort_by` ∈ {`rule`, `alert_count`, `event_count`, `created_at`}. Возврат —
+`(группы, всего групп)`.
+
+### `list_alerts_by_entity(values: list[str], source_batch=None, limit=50) -> list[dict]`
+
+Алерты, в которых встречается хотя бы одно из `values` — история КОНКРЕТНОЙ сущности (хост,
+пользователь, IP, процесс либо произвольное значение `group_key` инцидента), а не просто
+последние алерты источника. Совпадение ищется в двух местах: колонка `host` и любое значение
+внутри `entities` (обход `json_tree` разом по всем спискам `Entities` — `users`/`hosts`/
+`src_ips`/`dst_ips`/`processes`, без необходимости знать категорию значения). Сравнение
+регистронезависимое: имена хостов и пользователей приходят от разных источников в разном
+регистре.
+
+Для `group-by`, который вообще не про «сущность» в смысле `app/fields.py` (DNS `QueryName`,
+путь ключа реестра), совпадений просто не будет — это честный пустой результат, а не ошибка.
+
+Метод даёт **показания для человека или агента** (секция `entity_history` карточки инцидента).
+Привязкой member-алертов он не занимается принципиально — та идёт цепочкой
+event → alert → incident по `event_id`, см. `link_alerts_to_incident`.
 
 ### `get_alert(alert_id: str) -> dict | None`
 
@@ -297,14 +378,25 @@ A3-оценка (см. `docs/spec/correlation.md` за подробным раз
 Записывает сработавшую корреляцию как обычное попадание в `rule_hits` (`INSERT OR IGNORE`,
 идемпотентно) — так родительская корреляция при цепочке (correlation ссылается на другую
 correlation) видит потомка тем же запросом, что и обычное базовое правило. `event_id` —
-синтетический `corr:<title>:<dedup_key>:<anchor_time>`.
+синтетический `corr:<dedup_key>:<title>:<anchor_time>` (порядок сегментов — см. таблицу
+`rule_hits` выше).
+
+### `fetch_hit_group_values(event_id: str, rule_title: str) -> dict[str, str] | None`
+
+`group_json` ОДНОГО попадания леджера, разобранный в `{поле: значение}`. `None`, если строки
+нет или `group_json` пуст. Поиск по первичному ключу, к `events` не ходит.
+
+Нужен разворачиванию синтетических попаданий цепочек: чтобы достать реальные события
+правила-предка, надо знать, по какому group-by-ключу оно тогда сработало — ключ лежит ровно
+здесь (`app/detection/correlation.py:_expand_synthetic_samples`).
 
 ### `delete_events_older_than(cutoff: str, chunk: int = 5000) -> int`
 
-Ретеншн `events` (Этап A) — удаляет строки с `ingested_at < cutoff` (НЕ `event_time`: тот
-сырой формат источника, может отсутствовать/быть в прошлом-будущем при replay исторических
-датасетов; `ingested_at` — собственное время приёма, монотонно растёт, надёжный ключ
-независимо от качества данных источника). Порциями по `chunk` строк, `self._lock` берётся и
+Ретеншн `events` (Этап A) — удаляет строки с `ingested_at < cutoff` (НЕ `event_time`: тот про
+время события У ИСТОЧНИКА — может отсутствовать или быть в прошлом/будущем при replay
+исторических датасетов, даже будучи канонизированным на записи; `ingested_at` — собственное
+время приёма, монотонно растёт, надёжный ключ независимо от качества данных источника; `cutoff`
+должен быть в ТОМ ЖЕ формате ISO UTC для корректного строкового сравнения). Порциями по `chunk` строк, `self._lock` берётся и
 отпускается на каждую порцию отдельно (не на весь проход) — не блокирует ingest-воркер надолго
 на многомиллионной таблице. Осиротевшие `rule_hits` (`event_id`, которого больше нет в
 `events`) чистятся одним проходом в конце. `alerts` не трогает. Вызывается периодически из
@@ -338,11 +430,11 @@ correlation) видит потомка тем же запросом, что и �
 |---|---|
 | `upsert_incidents(incidents: list[Incident]) -> list[tuple[str, bool]]` | Insert/update по `dedup_key` (бакет по `timespan`). На update: `severity = Severity.roll_up([старое, новое])`, `window_start = min`, `window_end = max`, обновляются `sample_events`/`entities`/`mitre_techniques`/`member_rule_titles`/`title`. `alert_count` не трогается. Возврат — `[(incident_id, was_new), ...]` в порядке входа. |
 | `link_events_to_alerts(event_id_to_alert_id: dict[str, str]) -> int` | `UPDATE events SET alert_id = ?` построчно (`executemany`). Зовётся `main.py:_process_batch` сразу после `upsert_alerts` — основа цепочки для `link_alerts_to_incident` ниже. Пустой словарь — no-op. |
-| `link_alerts_to_incident(incident_id, source_batch, event_ids: list[str]) -> int` | Резолвит `event_ids` (реальные `events.event_id` через колонку `events.alert_id`, синтетические `"corr:{dedup}:{title}:{time}"` через `alerts.dedup_key` — `dedup_key` всегда второй `":"`-сегмент) в набор `alert_id`, затем `UPDATE alerts SET incident_id` по `incident_id IS NULL AND source_batch = ? AND alert_id IN (...)`. `events` (кроме уже проставленного `alert_id`) не трогает. Досчитывает `incidents.alert_count` и roll-up `severity`. Временнóго сужения по `created_at` нет (см. «Известные ограничения» в `incidents.md`). Возврат — число привязанных алертов. Заменил старую версию по значению "сущности" (`host`/`entities LIKE`) — см. `docs/spec/incidents.md`. |
+| `link_alerts_to_incident(incident_id, source_batch, event_ids: list[str]) -> int` | Резолвит `event_ids` (реальные `events.event_id` через колонку `events.alert_id`, синтетические `"corr:{dedup}:{title}:{time}"` через `alerts.dedup_key` — `dedup_key` всегда второй `":"`-сегмент) в набор `alert_id`, затем одним `INSERT OR IGNORE INTO incident_alerts` по `source_batch = ? AND alert_id IN (...)` пишет связи. `events` (кроме уже проставленного `alert_id`) не трогает. Досчитывает `incidents.alert_count` и roll-up `severity` по таблице связей. Временнóго сужения по `created_at` нет (см. «Известные ограничения» в `incidents.md`). Возврат — число привязанных алертов. Заменил старую версию по значению "сущности" (`host`/`entities LIKE`) — см. `docs/spec/incidents.md`. |
 | `enqueue_investigation(incident_id, requeue_terminal=True) -> str | None` | Строка `queued`/`running` есть → `None`. `done`/`error` + `requeue_terminal` → сброс в `queued`, тот же id. Иначе INSERT новой. |
 | `list_incidents(status=None, incident_type=None, source_batch=None, severity=None, time_from=None, time_to=None, sort_by=None, sort_dir=None, limit=100, offset=0) -> list[dict]` | Фильтры по равенству + `time_from/to` по `created_at`. Whitelist сортировки `{created_at, updated_at, alert_count, status, severity}`. Без `sample_events`. Каждая строка несёт `investigation_status` (последняя строка расследования). |
 | `count_incidents(...те же фильтры...) -> int` | — |
-| `get_incident(incident_id) -> dict | None` | Полная строка (JSON распарсен) + `member_alerts` (облегчённые строки `alerts WHERE incident_id`) + `investigation` (последняя строка). |
+| `get_incident(incident_id) -> dict | None` | Полная строка (JSON распарсен) + `member_alerts` (облегчённые строки привязанных алертов — `JOIN incident_alerts`) + `investigation` (последняя строка). |
 | `update_incident_status(incident_id, status) -> bool` | Плюс `updated_at`. |
 | `list_pending_investigations(limit=20) -> list[dict]` | Строки `status='queued'`, FIFO по `created_at`. |
 | `get_investigation(incident_id) -> dict | None` | Последняя строка расследования инцидента. |
@@ -361,20 +453,6 @@ correlation) видит потомка тем же запросом, что и �
 | `authenticate_source(token) -> dict | None` | По `sha256(token)` ищет **активный** (`enabled=1`) источник. `None` при отсутствии токена / несовпадении / выключенном источнике. Обновляет `last_seen_at` не чаще раза в 60 с (`_SOURCE_LAST_SEEN_THROTTLE_S`). |
 
 Публичная строка источника: `{source_id, name, description, token_hint, enabled (bool), created_at, last_seen_at}`.
-
-### Таблицы `incidents` / `investigations` (Этап 4)
-
-Обе создаются `CREATE TABLE IF NOT EXISTS` в `_SCHEMA` (отрабатывает и на старой `siem.db` —
-как было для `sources`). Полная схема, инварианты и семантика — `docs/spec/incidents.md`.
-
-- `incidents` — `(incident_id PK, dedup_key UNIQUE, incident_type, title, severity, status,
-  source_batch, ruleset_path, correlation_rule_id, correlation_rule_title, group_key JSON,
-  member_rule_titles JSON, window_start, window_end, window_bucket, alert_count,
-  mitre_techniques JSON, entities JSON, sample_events JSON, created_at, updated_at)`.
-  Индексы: `idx_incidents_status`, `idx_incidents_type`, `idx_incidents_batch`, `idx_incidents_created`.
-- `investigations` — `(investigation_id PK, incident_id, status, verdict, rationale, confidence,
-  steps JSON, error, created_at, started_at, finished_at)`.
-  Индексы: `idx_investigations_incident`, `idx_investigations_status`.
 
 ## API `Store` — health
 

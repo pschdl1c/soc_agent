@@ -27,6 +27,7 @@
 | [`kb-builder.md`](kb-builder.md) | `scripts/build_kb.py` | Сборка `kb.db` из STIX-бандла, схема `kb.db` |
 | [`ingest-queue.md`](ingest-queue.md) | `app/ingest_queue.py` | Очередь потокового ingest, micro-batch flush |
 | [`http-api.md`](http-api.md) | `app/main.py` | HTTP-эндпоинты, оркестрация батча, аутентификация ingest |
+| [`content-pipeline.md`](content-pipeline.md) | `scripts/{content_lib,deploy_content,test_content}.py` | Деплой детект-контента из git, формат фикстур, прогон и покрытие |
 
 ## Соглашения
 

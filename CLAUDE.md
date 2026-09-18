@@ -73,7 +73,7 @@ Security-Datasets) и в каталоге загрузок `data/uploads/` (`SIE
 сборка поверх пинов `pyproject.toml`; `*.egg-info/` от editable-установки — в `.gitignore`.
 
 Тесты: `uv run pytest` (см. `tests/`, конфиг — `pyproject.toml` `[tool.pytest.ini_options]`).
-Линт: `uv run ruff check app tests scripts` — репозиторий пока НЕ ruff-чистый (~108 замечаний,
+Линт: `uv run ruff check app tests scripts` — репозиторий пока НЕ ruff-чистый (113 замечаний,
 почти всё однотипное: `B904` raise-from, `UP007` Optional, `UP017` `timezone.utc`), в CI ruff
 ещё не поднят; новый код пишем в стиле окружающего, разовую зачистку — отдельной задачей.
 HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зависимостях): starlette при этом
@@ -347,7 +347,7 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
     правила, не сработавшие ни в одном кейсе (базовые — по алертам, инцидентные — по инцидентам; тихие
     звенья через API не видны), код выхода 2 при дырах. Гонять на
     изолированном экземпляре (`SIEM_DB_PATH`/`SIEM_CUSTOM_RULESETS_DIR`/`SIEM_VALUE_LISTS_DIR`,
-    свой порт).
+    свой порт). Подробно — `docs/spec/content-pipeline.md`.
   - `deploy_content.ps1` / `deploy_content.sh` — тот же `deploy_content.py` без Python на хосте: запуск в
     одноразовом контейнере из образа `soc_agent:latest` (репозиторий смонтирован read-only, `localhost` в
     адресе подменяется на `host.docker.internal`). Своей логики не несут — только запуск.

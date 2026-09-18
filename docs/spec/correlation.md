@@ -166,10 +166,24 @@ best-effort в исходном порядке.
 
 ## Публичный интерфейс
 
-### `evaluate_batch(store, ruleset_path, source_batch, matched_events_by_title, link_specs_out=None) -> int`
+### `correlation_rules_from_pairs(pairs: list[tuple[str, dict]]) -> list[dict]`
+
+Активные correlation-правила из УЖЕ вычисленного `main_ruleset.resolve_for(...)`. Пары —
+`(ruleset_path, скомпилированное правило)`.
+
+Существует ради того, чтобы резолв состава считался **один раз на флаш**: `main.py:_process_batch`
+вызывает `resolve_for` единожды и передаёт полученные `corr_rules` и в `active_hit_spec`, и в
+`evaluate_batch` каждого источника. Иначе резолв повторялся бы `2 + N` раз (N — источников во
+флаше), и движок с корреляциями могли бы увидеть РАЗНЫЙ состав правил, если контент поменяли
+посреди флаша.
+
+### `evaluate_batch(store, ruleset_path, source_batch, matched_events_by_title, link_specs_out=None, corr_rules=None) -> int`
 
 Точка входа, вызывается из `app/main.py:_process_batch` после каждого `store.store_events(...)`.
 
+- `corr_rules` (необязателен) — готовый список активных correlation-правил от
+  `correlation_rules_from_pairs`. Если не передан, состав резолвится по `ruleset_path`
+  самостоятельно.
 - `link_specs_out` (Этап 4, необязателен) — если передан список, `evaluate_batch` дописывает в
   него по записи на каждый созданный/обновлённый инцидент: `{dedup_key, incident_id,
   source_batch, rule_titles, entity_values, window_start, window_end}`. `_process_batch` по этим
@@ -226,10 +240,12 @@ best-effort в исходном порядке.
 9. `store.upsert_correlation_alerts(alerts)` + `store.upsert_incidents(incidents)` (с
    `store.enqueue_investigation` на каждый) — один раз в конце по всем правилам батча.
 
-### `active_hit_spec(ruleset_path: str | None) -> dict[str, set[str]]`
+### `active_hit_spec(ruleset_path: str | None, corr_rules: list[dict] | None = None) -> dict[str, set[str]]`
 
-См. «`active_hit_spec` и разделение "base"/"correlation"» выше. Вызывается `app/main.py` до
-`store.store_events`, чтобы построить аргумент `hit_spec`.
+См. «`active_hit_spec` и разделение "base"/"correlation"» выше. Вызывается `app/main.py` один
+раз до цикла по источникам, чтобы построить аргумент `hit_spec` для `store.store_events`.
+`corr_rules` — тот же готовый список, что уходит в `evaluate_batch` (см.
+`correlation_rules_from_pairs`); без него состав резолвится по `ruleset_path` самостоятельно.
 
 ## Разбор `timespan`
 
@@ -365,4 +381,5 @@ best-effort в исходном порядке.
 - Импортирует: `hashlib`, `json`, `datetime`; `app/rules/{main_ruleset, rules_catalog}`;
   `app/fields.py`; `app/models.py` (`Alert`, `Entities`, `Incident`, `Severity`, `SigmaRuleRef`);
   `app/store.py` (`Store`); `app/timespan.py` (`parse_timespan`).
-- Импортируется: `app/main.py` (`evaluate_batch`, `active_hit_spec`).
+- Импортируется: `app/main.py` (`evaluate_batch`, `active_hit_spec`,
+  `correlation_rules_from_pairs`).
