@@ -22,8 +22,9 @@
 `docs/spec/incidents.md`. **Этап 4.5, детект-контент** (§9 + дорожная карта §7) закрыт по синтетике
 2026-09-16: контент (`artifacts/content/`) покрыт фикстурами на 100% базовых правил, задеплоен в
 Docker-экземпляр; телеметрия стенда — на эталонах (агент Vector, Sysmon в exclude-режиме ProcessCreate,
-аудит по базовой линии Microsoft). Остаётся живой прогон сценариев на win10-lab — по решению
-пользователя, отдельно (§7 «Этап 4.5»). AI-агента расследования ещё нет (этап 5).
+аудит по базовой линии Microsoft). Живой прогон на win10-lab (2026-09-19, стенд переехал на Hyper-V) —
+49 из 53 сценариев подтверждены на реальной ВМ, 10 из 11 доменов; `lateral` ждёт второй хост, детали и
+фиксы фикстур — `docs/guide/windows-vm-lab.md` §4. AI-агента расследования ещё нет (этап 5).
 
 ---
 
@@ -331,9 +332,31 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
     (генератор, не список в памяти) — 10⁷ строк голым списком кортежей исчерпывало бы память
     неприемлемо долго.
   - `build_agent_installer.py` — собирает `dist/install-soc-agent.ps1`: установщик агента на
-    Windows-хост (`deploy/windows/install-agent.ps1`: аудит, Sysmon, Vector службой, самопроверка)
-    со встроенными `deploy/windows/vector.toml` и `artifacts/content/telemetry/sysmonconfig.xml`.
-    Vector заменил Fluent Bit (проверен на стенде 2026-09-15), см. `docs/guide/windows-agent.md`.
+    Windows-хост (`dist/install-agent.ps1`: аудит, Sysmon, Vector службой, самопроверка) со
+    встроенными `dist/vector.toml` и `artifacts/content/telemetry/sysmonconfig.xml`. Vector
+    заменил Fluent Bit (проверен на стенде 2026-09-15), см. `docs/guide/windows-agent.md`.
+    **`dist/`** — единая папка для всех ВМ-скриптов (целиком в git): исходники-шаблоны
+    (`install-agent.ps1`, `vector.toml`, `run-lab-scenarios.template.ps1`) и собранные из них
+    файлы (`install-soc-agent.ps1`, `run-lab-scenarios.ps1`) лежат РЯДОМ под РАЗНЫМИ именами —
+    раньше исходник и результат были в разных папках (`deploy/windows/` vs `dist/`) под ОДНИМ
+    именем, при ручном переносе на ВМ их путали. Суффикс `.template.ps1` у несобранных шаблонов —
+    та же страховка (не совпадает с именем, которое просят скопировать в доках).
+  - `build_lab_runner.py` — собирает `dist/run-lab-scenarios.ps1`: гид по живому прогону сценариев
+    детект-контента (§7 «Этап 4.5», §9) на самой ВМ — читает `lab:`-секции всех фикстур
+    `artifacts/content/<domain>/tests/*.yml`, классифицирует каждую строку (`[RUN]` похоже на код —
+    выполнится через `Invoke-Expression`; `[NOTE]` — только печатается, включая случаи с
+    незаполненным `<плейсхолдером>` или пометкой «нужен второй хост»; `[DESTRUCTIVE]` — снят
+    точный префикс «Только на снимке ВМ:»/«Откат:», требует `-ConfirmDestructive`) и встраивает
+    результат в `dist/run-lab-scenarios.template.ps1` **base64-строкой, разбитой на короткие
+    (~200 симв.) строки массива**, не одним сырым UTF-8-литералом и не одной длинной строкой —
+    оба варианта на практике ломались при ручном переносе файла на ВМ (что именно на конкретной
+    ВМ это делает — не установлено, файл сделан устойчивым к этому классу порчи, не починена
+    первопричина). Сам шаблон и весь его код/сообщения — ASCII-only с той же целью (см. докстринг
+    файла и `run-lab-scenarios.template.ps1`); кириллица из фикстур (`lab:`-заметки) доезжает через
+    base64→UTF8 декод в рантайме, не через сырые байты `.ps1`-файла. На ВМ: печатает сценарий,
+    исполняет `[RUN]`-строки после подтверждения, поллит `GET /incidents?source_batch=...` до
+    появления ожидаемых `incident_type` из фикстуры → PASS/MISSING/UNEXPECTED. `-Domain`/
+    `-Scenario`/`-FromScenario` — волнами с резюме, `-ListOnly` — сухой прогон плана без сети.
   - `export_event_fields.py` — выгружает со стенда реальный набор полей по `Channel|EventID` в
     `artifacts/content/telemetry/event_fields.json` (схема для синтетики `test_content.py`); ключи,
     не встреченные в выгрузке, переносит из старого файла и помечает в `_legacy_keys`.
@@ -665,7 +688,7 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   `pivot_by_entity`, `lookup_mitre` (`app/kb.py:get_technique`/`enrich_techniques` — осталось
   обернуть) — пишутся вместе с агентом на Этапе 5.
 
-### Этап 4.5 — Детект-контент ✅ (по синтетике; живой прогон — отдельно)
+### Этап 4.5 — Детект-контент ✅ (синтетика + живой прогон 10 из 11 доменов)
 
 Пишется ДО агента: агенту нужны настоящие инциденты, а не заглушечные. Соглашения по написанию
 контента — **§9**, читать целиком перед первым правилом. Стенд и его результаты —
@@ -680,7 +703,7 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   `test_content.py --coverage` — 0 непокрытых правил (2026-09-16).
 - ✅ Движок под контент: межрулсетные ссылки `correlation.rules` + подтягивание зависимостей,
   тихие informational-звенья цепочек, `TimeCreated` как время события, `neq` (см. §8).
-- ✅ Агент Vector вместо Fluent Bit + подключение хоста одним скриптом (`deploy/windows/`,
+- ✅ Агент Vector вместо Fluent Bit + подключение хоста одним скриптом (`dist/`,
   `scripts/build_agent_installer.py`, `docs/guide/windows-agent.md`): аудит, Sysmon, агент службой;
   проверен на win10-lab (поля 7045/104/4648, время, недоступность SIEM, перезапуск, переустановка при
   зависшей службе). У Sysmon время события — `UtcTime` (VRL агента).
@@ -713,13 +736,20 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   `siem_value_lists` пересозданы с нуля, контент задеплоен (`deploy_content.py --prune`), старый
   тестовый контент из корня `artifacts/content/` удалён, `stream_correlation_test.py` переведён на
   `SCE_Auth_BruteForce`.
-- ⬜ Живой прогон сценариев на win10-lab (секции `lab:` фикстур) — когда решит пользователь, волнами; перед деструктивными
-  (impact, очистка журналов, credaccess) — снимок ВМ; для `lateral` нужен второй хост, для
-  `SCE_Exec_Office_Child_Network` — Office. Результат — в `windows-vm-lab.md`. Заодно проверить EID 10
-  к lsass, 17/18, 19–21, архивы и файлы-записки, и подтвердить поля: `_legacy_keys` в
-  `event_fields.json` (PowerShell 4100, Sysmon 8, Security 1100/4647/4662) и весь
-  `event_fields_manual.json` — выгрузку `export_event_fields.py` сливать, а не перезаписывать (скрипт
-  берёт только события текущей БД).
+- ✅ Живой прогон сценариев на win10-lab (2026-09-19, стенд переехал VirtualBox → Hyper-V — старый
+  давал ложные `MISSING` из-за NEM snail mode и прыжков часов, см. `windows-vm-lab.md`). Раннер
+  `dist/run-lab-scenarios.ps1` (гид по `lab:`-секциям фикстур) прогнал 49 из 53 сценариев: 10 из 11
+  доменов подтверждены живьём (PASS или ожидаемый SKIP manual-only — нет бинаря/C2 на стенде),
+  включая деструктивный `impact` (после отката на checkpoint `clean-after-agent`). По итогам
+  починены 5 фикстур (битый URL Sysinternals, ключ корреляции по процессу, файл-заглушка для
+  curl, докачка `rclone.exe`, устойчивость к недобитому процессу AnyDesk) и раннер (только
+  позитивные кейсы в `expected`, сверка по `updated_at`, разбор `-Domain a,b` через запятую) —
+  подробности и таблица по волнам в `windows-vm-lab.md` §4. **Не проверено**: `lateral` (нужен
+  второй хост), `SCE_Exec_Office_Child_Network` (нужен Office), телеметрия Sysmon 17/18
+  (именованные каналы) и 19–21 (WMI) — правил под них в контенте нет, проверять было нечего;
+  `_legacy_keys` в `event_fields.json` (PowerShell 4100, Sysmon 8, Security 1100/4647/4662) и
+  `event_fields_manual.json` не сверялись — выгрузку `export_event_fields.py` сливать, а не
+  перезаписывать (скрипт берёт только события текущей БД).
 
 ### Этап 5 — AI-агент расследования 🎯 главная цель ⬜
 - **Стек:** агент на **LangGraph**; «мозги» — любой **OpenAI-совместимый** провайдер через
@@ -829,7 +859,7 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   ступенью (порядок внутри неё не проверяется) — не возвращай строгий построчный проход: равные метки
   дают и другие источники, и секундные форматы. У Sysmon 3 `TimeCreated` отстаёт от `UtcTime` самого
   события на секунды (сетевые события пишутся пачками) — поэтому агент для канала Sysmon кладёт в
-  `TimeCreated` `UtcTime` самого события (VRL `deploy/windows/vector.toml`). Сервер про `UtcTime` не
+  `TimeCreated` `UtcTime` самого события (VRL `dist/vector.toml`). Сервер про `UtcTime` не
   знает — не ставь его в `TIME_FIELDS`: синтетика дополняет отсутствующие поля заглушкой `"-"`, и она
   стала бы временем события.
 - **Zircolite строит таблицу флаша из полей событий; поля, упомянутые правилами, но не пришедшие ни
@@ -850,7 +880,7 @@ HTTP-слой покрыт через `fastapi.testclient` (httpx в dev-зав�
   правила и текстом ошибки, не чаще раза в `SQL_ERROR_LOG_INTERVAL` (600 с) на правило. Штатный
   Zircolite глушит их на уровне debug и возвращает тот же `[]`, что и на «не сработало», — поэтому
   метод переопределён целиком, а не обёрнут.
-- **Формат событий Windows задаёт агент, а не сервер** (`deploy/windows/vector.toml`, VRL
+- **Формат событий Windows задаёт агент, а не сервер** (`dist/vector.toml`, VRL
   `sigma_fields`): поля `EventData`/`UserData` — на верхний уровень под именами `<Data Name>`, системные —
   в именах Fluent Bit (`EventID`, `Channel`, `Computer`, `ProviderName`, `EventRecordID`...), КРОМЕ
   `ExecutionProcessID`/`ExecutionThreadID` (у Fluent Bit были `ProcessID`/`ThreadID` и перетирали
@@ -1288,7 +1318,7 @@ Sysmon 13 — 27% (`svchost`, `TiWorker`), 4702 — 13% (задачи `UpdateOrc
 - Sysmon — sysmon-modular balanced, но ProcessCreate в exclude-режиме (include-группа удалена): Sysmon 1
   пишется для всех процессов, process-правило на любую утилиту работает без правки конфига. Не
   добавляй `ProcessCreate onmatch="include"` — это вернёт режим «только перечисленное».
-- Аудит — базовая линия Microsoft для рабочих станций (`deploy/windows/install-agent.ps1`), без Sensitive
+- Аудит — базовая линия Microsoft для рабочих станций (`dist/install-agent.ps1`), без Sensitive
   Privilege Use/Process Termination; PowerShell — только ScriptBlock (4104), Module logging (4103) выключен.
 - Правило на событие, которое эталон не пишет (другие типы Sysmon, подкатегория вне базовой линии, SACL),
   — осознанное дополнение конфига, а не молчаливая надежда. Разбор — `docs/guide/windows-vm-lab.md` §3.

@@ -50,7 +50,7 @@ EVENT_COUNT = 20
 
 
 def _event(host: str, ip: str, user: str, event_time: datetime) -> dict:
-    # Форма события агента Vector (deploy/windows/vector.toml): Computer, TimeCreated ISO UTC.
+    # Форма события агента Vector (dist/vector.toml): Computer, TimeCreated ISO UTC.
     return {
         "EventID": 4625,
         "Channel": "Security",

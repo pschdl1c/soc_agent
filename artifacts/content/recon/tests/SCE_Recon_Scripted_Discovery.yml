@@ -50,4 +50,7 @@ cases:
           NewProcessName: ['C:\Windows\System32\whoami.exe', 'C:\Windows\System32\ipconfig.exe', 'C:\Windows\System32\systeminfo.exe', 'C:\Windows\System32\net.exe', 'C:\Windows\System32\tasklist.exe']
         event: {EventID: 4688, Channel: Security, ParentProcessName: 'C:\Windows\System32\cmd.exe'}
 lab:
-  - 'cmd /c "whoami /all & ipconfig /all & systeminfo & net user & tasklist"'
+  # Семь РАЗЛИЧНЫХ Image: recon_scripted_discovery хочет 4 за 10 минут, th_recon_discovery_burst - 6
+  # за 30. Пяти утилит (как было) хватало только на первый инцидент, второй не взводился никогда.
+  # net user порождает ещё и net1.exe - он в правиле отфильтрован и в счёт не идёт.
+  - 'cmd /c "whoami /all & ipconfig /all & systeminfo & net user & tasklist & arp -a & netstat -an"'

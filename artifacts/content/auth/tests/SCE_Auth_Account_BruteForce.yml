@@ -38,5 +38,13 @@ cases:
       - repeat: 25
         step: 2
         event: {EventID: 4625, Channel: Security, LogonType: 3, IpAddress: 203.0.113.30, TargetUserName: admin}
+# Живьём этот сценарий не воспроизводится, и это не поломка теста. Он про 4625 БЕЗ адреса источника
+# (auth_failed_logon_no_address: IpAddress '-' или пусто), а `Start-Process -Credential` идёт через
+# CreateProcessWithLogonW и пишет в событие `::1` - проверено на стенде 2026-09-19:
+#   user=admin type=2 ip='::1' proc=svchost.exe -> Failed Logon With Source Address
+# Значит попадания уходят в правило «с адресом», и поднимается auth_bruteforce. Настоящий вход без
+# адреса - это ввод пароля на экране блокировки руками, скриптом его не сымитировать. Сам детект
+# «без адреса» покрыт синтетикой (кейсы выше), здесь ожидаем то, что стенд реально даёт.
+lab_expect: [auth_bruteforce]
 lab:
   - '1..22 | ForEach-Object { $p = ConvertTo-SecureString "Wrong$_" -AsPlainText -Force; try { Start-Process cmd.exe -Credential (New-Object pscredential "admin", $p) -ArgumentList "/c exit" -ErrorAction Stop } catch {} }'

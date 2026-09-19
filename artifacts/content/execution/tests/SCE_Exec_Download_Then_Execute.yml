@@ -32,5 +32,10 @@ cases:
       - at: 60
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Tool\tool.exe', ParentImage: 'C:\Windows\explorer.exe'}
 lab:
-  - 'certutil -urlcache -split -f https://live.sysinternals.com/whoami.exe C:\Users\Public\w.exe'
-  - 'C:\Users\Public\w.exe'
+  # Не whoami.exe: это встроенная утилита Windows, у Sysinternals её нет - URL отдавал 404,
+  # certutil честно сохранял страницу ошибки, и запуск падал с «file is corrupted». PsInfo печатает
+  # сводку и выходит (Strings без аргументов читал бы stdin и повис). `-accepteula` обязателен:
+  # первый запуск любой утилиты Sysinternals иначе показывает модальный диалог лицензии и
+  # блокирует раннер.
+  - 'certutil -urlcache -split -f https://live.sysinternals.com/PsInfo.exe C:\Users\Public\w.exe'
+  - 'C:\Users\Public\w.exe -accepteula'

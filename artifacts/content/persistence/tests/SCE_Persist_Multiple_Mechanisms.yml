@@ -39,6 +39,11 @@ cases:
       - at: 7200
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\sc.exe', CommandLine: 'sc create MaintSvc binPath= C:\Tools\maintsvc.exe', User: 'LAB\admin'}
 lab:
+  # Три РАЗНЫХ механизма, а не два: persist_multiple_mechanisms хочет 2 различных правила за час,
+  # th_persist_autostart_changes - 3 срабатывания за сутки. С двумя механизмами второй ожидаемый
+  # тип не взводился. Все три - Sysmon EID 1 по разным Image/CommandLine, одно событие в двух
+  # правилах не считается.
   - 'schtasks /create /tn LabMaint /tr C:\Windows\System32\notepad.exe /sc daily /st 03:00'
   - 'sc.exe create LabSvc binPath= C:\Windows\System32\notepad.exe start= demand'
-  - 'schtasks /delete /tn LabMaint /f; sc.exe delete LabSvc'
+  - 'powershell -Command "New-Service -Name LabSvc2 -BinaryPathName C:\Windows\System32\notepad.exe"'
+  - 'schtasks /delete /tn LabMaint /f; sc.exe delete LabSvc; sc.exe delete LabSvc2'

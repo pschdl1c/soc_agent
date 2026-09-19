@@ -50,5 +50,8 @@ cases:
       - event: {EventID: 4624, Channel: Security, LogonType: 3, IpAddress: 10.0.2.53, TargetUserName: admin, TargetUserSid: "S-1-5-21-1-2-3-500"}
       - at: 900
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\PSEXESVC.exe', OriginalFileName: psexesvc.exe, ParentImage: 'C:\Windows\System32\services.exe', User: 'NT AUTHORITY\СИСТЕМА'}
+# th_lateral_remote_service_task требует службы с именами impacket/CobaltStrike - обычный
+# psexec.exe из lab-строки их не создаёт, поднимается только lateral_psexec_inbound.
+lab_expect: [lateral_psexec_inbound]
 lab:
   - 'Нужен второй хост в Host-Only сети: psexec.exe \\<win10-lab> -u lab\admin -p <pass> cmd /c whoami'

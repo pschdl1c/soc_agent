@@ -8,5 +8,11 @@ cases:
     expect_incidents: []
     events:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Tools\rclone.exe', Description: Rsync for cloud storage, CommandLine: 'rclone.exe version', ParentImage: 'C:\Windows\System32\cmd.exe'}
+# rclone.exe на стенде нет - первая строка качает портативный бинарь с downloads.rclone.org и
+# кладёт его в C:\Users\Public (тот же путь, что в позитивном синтетическом кейсе выше, у Sysmon
+# реального бинаря Description тоже "Rsync for cloud storage" - оба селектора img/cli реальны).
+# Вторая строка запускает его через "& путь" (не голым именем) - иначе строка не попадает под
+# автозапуск раннера (build_lab_runner._CODE_START_RE не распознаёт путь как код).
 lab:
-  - 'rclone.exe copy C:\Windows\win.ini ftp:lab --ftp-host 127.0.0.1 --transfers 1 --contimeout 2s'
+  - '$z=''C:\Users\Public\rclone.zip''; Invoke-WebRequest -Uri https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile $z; Expand-Archive $z -DestinationPath C:\Users\Public\rclone -Force; Copy-Item (Get-ChildItem C:\Users\Public\rclone -Recurse -Filter rclone.exe)[0].FullName C:\Users\Public\rclone.exe -Force'
+  - '& "C:\Users\Public\rclone.exe" copy C:\Windows\win.ini ftp:lab --ftp-host 127.0.0.1 --transfers 1 --contimeout 2s'

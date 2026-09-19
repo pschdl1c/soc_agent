@@ -83,7 +83,7 @@ def main() -> None:
 
     doc: dict = {
         "_comment": (
-            f"Поля событий со стенда (источник '{args.source}', агент Vector, deploy/windows/vector.toml). "
+            f"Поля событий со стенда (источник '{args.source}', агент Vector, dist/vector.toml). "
             "Channel/EventID/Computer/TimeCreated есть всегда и не перечислены. Ключи из _legacy_keys "
             "стендом на Vector не подтверждены - перенесены из прежней выгрузки Fluent Bit"
             + (" с переименованием системных полей." if args.rename_legacy else ".")

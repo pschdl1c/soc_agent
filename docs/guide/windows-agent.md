@@ -2,7 +2,7 @@
 
 Хост подключается к SIEM одним файлом `install-soc-agent.ps1`: скрипт настраивает аудит, ставит
 Sysmon с конфигом проекта и запускает агент **Vector**, который шлёт события в `/ingest/stream`.
-Заменил ручную настройку Sysmon, аудита и Fluent Bit; стенд в VirtualBox (сеть, проверка
+Заменил ручную настройку Sysmon, аудита и Fluent Bit; стенд в Hyper-V (сеть, проверка
 детекта) — `windows-vm-lab.md`.
 
 ## Почему Vector, а не Fluent Bit
@@ -58,7 +58,7 @@ powershell -ExecutionPolicy Bypass -File C:\tools\install-soc-agent.ps1 -SiemUrl
 ## Формат событий
 
 Контракт `/ingest/stream` не менялся: плоский JSON, преобразование — VRL в
-`deploy/windows/vector.toml` (`transforms.sigma_fields`).
+`dist/vector.toml` (`transforms.sigma_fields`).
 
 - Поля `EventData`/`UserData` — на верхний уровень под своими именами. `UserData` Vector разбирает
   только в виде `<Data Name=...>`, а у System 104 / Security 1102 данные вложены

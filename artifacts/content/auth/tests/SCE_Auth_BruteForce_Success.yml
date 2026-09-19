@@ -50,7 +50,15 @@ cases:
       - at: 90
         event: {EventID: 4624, Channel: Security, LogonType: 5, IpAddress: 198.51.100.13, TargetUserName: СИСТЕМА, TargetUserSid: "S-1-5-18"}
 lab:
+  # Порог блокировки снимается ПЕРЕД перебором: свежая Windows 10 идёт с политикой «10 неудач -
+  # блокировка», и после 22 попыток успешный вход падал с «System error 1909: The referenced account
+  # is currently locked out» - сценарий не мог дойти до своей второй половины. Установщик агента тут
+  # ни при чём, он лишь включает аудит события 4740. Строка идемпотентна.
+  - 'net accounts /lockoutthreshold:0'
   - 'net user hacker P@ssw0rd123 /add'
-  - '1..12 | ForEach-Object { cmd /c "net use \\127.0.0.1\IPC$ /delete /y >nul 2>&1 & net use \\127.0.0.1\IPC$ /user:$env:COMPUTERNAME\hacker WrongPass$_" 2>$null | Out-Null }'
+  # 22 неудачи, а не 12: auth_bruteforce_success взводится и от дюжины (промежуточное звено -
+  # 10 за 5 минут), но auth_bruteforce требует 20 за те же 5 минут. С 12 попытками второй
+  # ожидаемый тип не поднимался никогда, и живой прогон вечно рапортовал MISSING.
+  - '1..22 | ForEach-Object { cmd /c "net use \\127.0.0.1\IPC$ /delete /y >nul 2>&1 & net use \\127.0.0.1\IPC$ /user:$env:COMPUTERNAME\hacker WrongPass$_" 2>$null | Out-Null }'
   - 'cmd /c "net use \\127.0.0.1\IPC$ /delete /y >nul 2>&1 & net use \\127.0.0.1\IPC$ /user:%COMPUTERNAME%\hacker P@ssw0rd123"'
   - 'net user hacker /delete'

@@ -1,8 +1,15 @@
 """Собирает самодостаточный установщик агента одним файлом: dist/install-soc-agent.ps1.
 
-Берёт deploy/windows/install-agent.ps1 и встраивает в него шаблон конфига Vector
-(deploy/windows/vector.toml) и конфиг Sysmon (artifacts/content/telemetry/sysmonconfig.xml, gzip+base64)
-на место строк-маркеров `# @@EMBED:<файл>@@`. На хост копируется только результат.
+Берёт dist/install-agent.ps1 и встраивает в него шаблон конфига Vector (dist/vector.toml) и конфиг
+Sysmon (artifacts/content/telemetry/sysmonconfig.xml, gzip+base64) на место строк-маркеров
+`# @@EMBED:<файл>@@`. На хост копируется только результат.
+
+Источник (install-agent.ps1, vector.toml) и собранный результат (install-soc-agent.ps1) нарочно в
+ОДНОЙ папке (dist/, целиком в git - см. .gitignore) и под РАЗНЫМИ именами: раньше источник жил в
+deploy/windows/, а результат - в dist/, оба назывались run-lab-scenarios.ps1 (см. соседний
+build_lab_runner.py) - при переносе на ВМ вручную путали, какой файл копировать. Здесь имена и так
+разные (install-agent.ps1 vs install-soc-agent.ps1), коллизии не было - но папка та же, ради
+единообразия с run-lab-scenarios.
 
 Запуск: uv run python scripts/build_agent_installer.py [--out dist/install-soc-agent.ps1]
 """
@@ -14,8 +21,8 @@ import gzip
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "deploy" / "windows" / "install-agent.ps1"
-VECTOR_TOML = ROOT / "deploy" / "windows" / "vector.toml"
+SOURCE = ROOT / "dist" / "install-agent.ps1"
+VECTOR_TOML = ROOT / "dist" / "vector.toml"
 SYSMON_XML = ROOT / "artifacts" / "content" / "telemetry" / "sysmonconfig.xml"
 
 

@@ -43,5 +43,8 @@ cases:
         event: {EventID: 4104, Channel: Microsoft-Windows-PowerShell/Operational, ScriptBlockText: 'Invoke-Mimikatz -Command "sekurlsa::logonpasswords"'}
       - at: 18000
         event: {EventID: 1102, Channel: Security, SubjectUserName: admin}
+# Второй позитивный кейс (lateral + privesc) на одном стенде не воспроизвести: lateral_psexec_inbound
+# требует второго хоста. Живьём достижим набор первого кейса - discovery, credential access, evasion.
+lab_expect: [cred_mimikatz, evasion_log_cleared, kc_discovery_then_credential_access, kc_multi_tactic_host, recon_scripted_discovery]
 lab:
   - 'Композиция лаб-команд нескольких доменов в пределах 4 часов'

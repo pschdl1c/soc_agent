@@ -27,4 +27,12 @@ cases:
         step: 20
         event: {EventID: 3, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\Agent\agent.exe', ProcessGuid: "${guid1}", Initiated: 1, DestinationIp: 198.51.100.77, DestinationPort: 443}
 lab:
-  - 'Copy-Item C:\Windows\System32\curl.exe C:\Users\Public\Music\svc.exe; 1..12 | ForEach-Object { C:\Users\Public\Music\svc.exe -s -m 3 http://example.com >$null; Start-Sleep 20 }'
+  # ОДИН процесс на 12 соединений, а не цикл из 12 запусков: корреляция ключуется по ProcessGuid
+  # (модель импланта, который сам стучится 10 раз за 10 минут), и у цикла счёт был по 1 на процесс -
+  # порог не брался никогда. `Connection: close` заставляет curl открывать новое TCP-соединение на
+  # каждый URL, иначе он переиспользует одно.
+  # Цель - сам SIEM ($SiemUrl - переменная раннера, Invoke-Expression исполняет строку в его
+  # области видимости): Sysmon пишет EID 3 только по УСТАНОВЛЕННОМУ соединению, а напрямую наружу
+  # стенд не ходит (интернет через прокси на хосте) - проверено, соединение к 1.1.1.1 не дало
+  # события вообще. Назначение на детект не влияет: правило смотрит на каталог образа.
+  - 'Copy-Item C:\Windows\System32\curl.exe C:\Users\Public\Music\svc.exe -Force; $u = 1..12 | ForEach-Object { "$SiemUrl/health?beacon=$_" }; & C:\Users\Public\Music\svc.exe -s -o NUL -m 3 -H "Connection: close" @u'

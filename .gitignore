@@ -45,6 +45,3 @@ custom_rulesets/
 
 # pytest
 .pytest_cache/
-
-# Собранный установщик агента (scripts/build_agent_installer.py)
-/dist/
