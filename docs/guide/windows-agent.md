@@ -106,7 +106,7 @@ win10-lab (Windows 10 22H2, VirtualBox), Vector 0.58.0, SIEM на хосте. К
 | Простой | ВМ без активности | условно закрыто; в логе агента видно срабатывание страховки из исправления #25194 (`Speculative timeout pull recovered events`) |
 
 Попутно найдено: `hostname.exe` Sysmon 1 не пишет (конфиг Sysmon; закрыто 2026-09-15, см.
-`docs/guide/windows-vm-lab.md` §3), у Sysmon 3 `TimeCreated` отстаёт от `UtcTime` события на секунды (исправлено в агенте:
+`docs/guide/windows-vm-lab.md` §4), у Sysmon 3 `TimeCreated` отстаёт от `UtcTime` события на секунды (исправлено в агенте:
 у Sysmon время берётся из `UtcTime`; проверено на стенде 2026-09-15 — у Sysmon 1/3/7/8/10/11/12/13/17/
 22/26/29 `TimeCreated` совпадает с `UtcTime` до миллисекунды, у Security/System время записи без изменений). Установка агента
 даёт известные ложные срабатывания от собственных действий установщика: инциденты

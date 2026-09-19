@@ -123,10 +123,7 @@ Set-ItemProperty $k ProxyOverride "192.168.56.*;<local>"
 
 Нужен расширенный сеанс (`Set-VMHost -EnableEnhancedSessionMode $true`, в диалоге подключения
 «Локальные ресурсы» — буфер оставить, **диски не отмечать**: проброс дисков даёт гостю запись в
-файловую систему хоста, а на этой ВМ гоняются `impact`-сценарии). Вставлять только **Ctrl+V**:
-правый клик даже в расширенном сеансе отрабатывает старым путём — посимвольной печатью через
-синтетическую клавиатуру, где теряются заглавные буквы (токен `Lr1mYnBI2s…` приезжает как
-`r1mn2s…`) и ломается раскладка.
+файловую систему хоста, а на этой ВМ гоняются `impact`-сценарии).
 
 Файлы — `Copy-VMFile` с хоста (drag-and-drop и общих папок в Hyper-V нет):
 
@@ -187,7 +184,7 @@ http://localhost:8000 --prune` (домены `artifacts/content/`, CLAUDE.md §9
 
 Команды эмуляции каждого сценария — секция `lab:` его фикстуры в
 `artifacts/content/<domain>/tests/`. Полный живой прогон всех сценариев волнами — раннер
-`dist/run-lab-scenarios.ps1` (собирается из фикстур `scripts/build_lab_runner.py`), см. §4.
+`dist/run-lab-scenarios.ps1` (собирается из фикстур `scripts/build_lab_runner.py`), см. §5.
 
 Быстрый дымовой тест вручную, в ВМ от администратора:
 
@@ -207,101 +204,148 @@ Invoke-RestMethod "http://localhost:8000/events/group?group_by=EventID&source_ba
 (Invoke-RestMethod "http://localhost:8000/incidents?source_batch=<источник>").incidents | Select-Object incident_type, severity, alert_count
 ```
 
-> `Invoke-RestMethod` в Windows PowerShell 5.1 показывает кириллицу из ответа кракозябрами
-> (`ÑÐ»ÑÐ¶Ð±Ð°`) — это ошибка декодирования на клиенте, в БД значение верное. Проверять через
-> браузер/UI или `curl.exe`.
+---
+
+## 3. Быстрый старт (ВМ уже настроена)
+
+Шпаргалка на каждый день, когда §0–§2 уже пройдены. Всё «с хоста» — PowerShell от администратора.
+
+**ВМ: запуск, остановка, состояние.**
+
+```powershell
+Get-VM win10-lab | Select-Object Name, State, Uptime, MemoryAssigned
+Start-VM -Name win10-lab
+vmconnect.exe localhost win10-lab
+Save-VM  -Name win10-lab              # заморозить состояние (быстрее выключения, часы потом отстают)
+Stop-VM  -Name win10-lab              # корректное выключение гостя; -Force — если завис
+```
+
+**Контрольные точки** (перед деструктивными сценариями — обязательно):
+
+```powershell
+Get-VMSnapshot -VMName win10-lab | Select-Object Name, CreationTime
+Checkpoint-VM  -VMName win10-lab -SnapshotName before-impact
+Restore-VMSnapshot -VMName win10-lab -Name clean-after-agent -Confirm:$false; Start-VM -Name win10-lab
+```
+
+После отката часы гостя отстают до ресинхронизации — не гнать сразу следующий сценарий.
+
+**Файлы в гостя** (только хост → гость; обратно — через буфер обмена):
+
+```powershell
+Copy-VMFile -Name win10-lab -FileSource Host -CreateFullPath -Force `
+  -SourcePath D:\__projects\soc_agent\dist\run-lab-scenarios.ps1 -DestinationPath C:\tools\run-lab-scenarios.ps1
+```
+
+**SIEM и артефакты на хосте:**
+
+```powershell
+docker compose up -d                                       # или uvicorn app.main:app --port 8000
+uv run python scripts/deploy_content.py http://localhost:8000 --prune   # контент в main
+uv run python scripts/build_agent_installer.py             # пересобрать dist/install-soc-agent.ps1
+uv run python scripts/build_lab_runner.py                  # пересобрать dist/run-lab-scenarios.ps1
+```
+
+**Агент в госте:**
+
+```powershell
+Get-Service soc-agent                                      # ждём Running
+Restart-Service soc-agent
+Get-ChildItem C:\ProgramData\soc-agent\logs\ | Select-Object -Last 1   # логи агента
+Test-NetConnection 192.168.56.1 -Port 8000                 # связь до SIEM
+```
+
+Новый токен после перевыпуска в UI — просто повторный запуск `install-soc-agent.ps1` с новым
+`-Token` (`docs/guide/windows-agent.md`).
+
+**Прогон сценариев в госте** (`-Source` — имя источника в UI, читает `/incidents`, токен не нужен):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\tools\run-lab-scenarios.ps1 -Source win10-lab -ListOnly
+.\run-lab-scenarios.ps1 -Source win10-lab -Domain recon,auth -Yes
+.\run-lab-scenarios.ps1 -Source win10-lab -FromScenario SCE_Exec_Download_Then_Execute
+.\run-lab-scenarios.ps1 -Source win10-lab -Domain impact -ConfirmDestructive   # только после Checkpoint-VM
+```
+
+**Что доехало — с хоста:** три `Invoke-RestMethod` из §2 (события по EventID, алерты по правилам,
+инциденты).
 
 ---
 
-## 3. Известные ограничения стенда
+## 4. Известные ограничения стенда
 
-**`Provider_Name`.** Агент шлёт поле `ProviderName`, а Zircolite у неотмапленных полей вырезает все
-не-alnum символы (`_NON_ALNUM_RE` в `streaming.py`), так что переименованием в `Provider_Name`
-делу не помочь — подчёркивание всё равно исчезнет. Своего маппинга не заводим (решено 2026-09-15):
-при адаптации SigmaHQ `Provider_Name` заменяется на `ProviderName`, если реально сужает детект, иначе
-убирается — роль играет guard `Channel`/`EventID` (CLAUDE.md §9).
+- **`Provider_Name` не доезжает.** Агент шлёт `ProviderName`, Zircolite вырезает не-alnum символы
+  у неотмапленных полей — переименование не спасёт. Своего маппинга не заводим (решено
+  2026-09-15): в правилах писать `ProviderName` либо убирать, роль играет guard (CLAUDE.md §9).
+- **Время Sysmon.** Агент кладёт в `TimeCreated` значение `UtcTime` самого события — запись в
+  журнал у Sysmon 3 отстаёт на секунды (`docs/guide/windows-agent.md`).
+- **ProcessCreate у Sysmon — в exclude-режиме** (2026-09-15): Sysmon 1 пишется для всех процессов,
+  кроме шума. Проверено прогоном 110 утилит из process-правил: Sysmon 1 есть у всех 75 запущенных
+  (в include-режиме было 47). Любой `ProcessCreate onmatch="include"` возвращает режим «только
+  перечисленное» — при обновлении sysmon-modular его надо удалять. Конфиг применяется на ходу:
+  `sysmon64 -c C:\tools\sysmonconfig.xml` (взводит `SCE_Evasion_Telemetry_Tampering`).
+- **Аудит — базовая линия Microsoft для рабочих станций**, кроме осознанных отличий: Sensitive
+  Privilege Use и Process Termination выключены, Kerberos/SAM/Directory Service — до появления
+  контроллера домена. PowerShell: ScriptBlock (4104) включён, Module logging (4103) выключен.
+- **Шум отфильтрован в агенте** — 4673/4674/5379 (`ignore_event_ids` в `dist/vector.toml`) до SIEM
+  не доезжают, пропуски `EventRecordID` в Security из-за них ожидаемы.
+- **Инциденты не заводятся сами** — только correlation-правилами с `correlation.incident`,
+  catch-all прохода по алертам нет by design (`docs/spec/incidents.md`).
+- **Объём informational-алертов.** Базовые правила пишут алерт на каждое срабатывание — вкладка
+  «Алерты» забивается быстро; разбирать фильтром «в инцидентах / вне», поиском и группировкой по
+  правилу.
+- **Установка агента сама даёт инциденты** — `SCE_Evasion_Telemetry_Tampering` (`sysmon -c`),
+  `SCE_Evasion_Log_Cleared` (`wevtutil sl`), «Audit Policy Tampering» (`auditpol /set`). Известные
+  ложные срабатывания, исключений под них не пишем (CLAUDE.md §9).
+- **`Start-Process -Credential` пишет в 4625 адрес `::1`, а не `'-'`** (идёт через
+  `CreateProcessWithLogonW`) — сценарий под «4625 без адреса» так не воспроизвести.
+- **Windows 10 блокирует учётку после 10 неудачных входов** — перед сценариями брутфорса
+  `net accounts /lockoutthreshold:0`, иначе успешный вход падает с «System error 1909».
+- **Sysmon пишет EID 3 только по УСТАНОВЛЕННОМУ соединению** — при выходе в интернет через прокси
+  (§0) сетевой сценарий должен целить в адрес, который реально примет соединение.
+- **Волны сценариев подряд дают сквозные срабатывания — это не ошибка.** Активность одной волны
+  попадает в окно корреляции соседней (и сама собой всплывают `kc_*`-инциденты); правило не может
+  связать поля разных событий, чтобы отличить совпадение от цепочки. Хочешь чистые отчёты — держи
+  паузу между волнами больше самого длинного задействованного окна.
 
-**Время Sysmon.** У Sysmon агент берёт `TimeCreated` из `UtcTime` самого события (запись в журнал у
-Sysmon 3 отстаёт на секунды) — проверено 2026-09-15, см. `docs/guide/windows-agent.md`.
+### Что реально приезжает со стенда (телеметрия 2026-09-15)
 
-**Покрытие конфига Sysmon (проверено 2026-09-15).** Все `.exe`, на которые смотрят process-правила
-Sysmon 1 контента (включая value lists), запущены на стенде с `/?` через `cmd /c ... & rem <маркер>`
-и сверены с событиями: 110 утилит, 39 системных процессов не запускались, 35 сторонних на ВМ нет,
-75 запущено. У 28 был только 4688:
-- **дыра**: `hostname`, `arp`, `getmac`, `driverquery`, `nltest` (include базы по `OriginalFileName`
-  не срабатывает), `auditpol`, `vaultcmd`, `reagentc`, `sdclt`, `wmic` — сначала закрыта своей
-  include-группой (после применения у всех десяти появился Sysmon 1), затем тем же днём решено
-  перевести ProcessCreate в exclude-режим (см. ниже), и отдельная группа стала не нужна;
-- **не дыра**: `bcdedit`/`wbadmin` конфиг пишет с `/set`/`delete` — ровно то, что нужно правилам;
-  `cmstp`/`control`/`pcalua`/`workfolders`/`wsl`/`mmc` правила ловят как дочерние Office/WinRM/Event
-  Viewer, такие запуски база включает по родителю; `atbroker`/`certreq`/`defrag`/`dfrgui`/`eventvwr`/
-  `finger`/`fsquirt`/`taskmgr`/`winver` — только «системный бинарь не из своего каталога», а запуск из
-  `\Temp\`/`\AppData\`/`C:\Users\Public\` база включает.
+Каналы: Security, System, Sysmon/Operational, PowerShell/Operational, Defender, WMI-Activity,
+TaskScheduler, Bits-Client. **Замер простоя** (20 мин без действий после установившегося фона):
+**~1500 событий/ч**, ни одного алерта. Доли: Sysmon 13 — 27% (`svchost`, `TiWorker`), 4702 — 13%
+(задачи `UpdateOrchestrator`), Sysmon 11 — 12%, 4688 — 12%, Sysmon 7 — 11% (Defender `MpCmdRun`,
+OneDrive), Sysmon 1 — 8%, 4957 — 5% (правила брандмауэра не применены), 4624 type 5 / 4672 SYSTEM /
+4799 `VSSVC` — по 2–3%. После загрузки разовые всплески: 4907 от `TiWorker` (сотни), 4945/4957 при
+старте брандмауэра — на установившемся фоне их нет или мало. Фильтрация шума при таком объёме не
+нужна.
 
-Ограничение метода: утилиты, которые база включала только при определённой командной строке, с `/?`
-не писались — для них сверялись условия конфига, а не события. Конфиг применяется на ходу:
-`sysmon64 -c C:\tools\sysmonconfig.xml` (взводит `SCE_Evasion_Telemetry_Tampering`).
+Колонка «правил» — сколько записей `rules_windows_merged.json` (4291 шт.) ссылается на этот
+EventID, как ориентир ценности; контент пишется по этой таблице (CLAUDE.md §9).
 
-**ProcessCreate в exclude-режиме (2026-09-15).** Include-группа ProcessCreate sysmon-modular удалена:
-Sysmon 1 пишется для всех процессов, кроме шума из exclude-группы — как у SwiftOnSecurity/Neo23x0.
-Причина — сама проверка выше: в include-режиме любое новое process-правило Sigma надо сверять с
-конфигом. Проверено тем же прогоном утилит после переустановки: Sysmon 1 есть у всех 75 запущенных
-(было 47 в include-режиме, 57 со своей include-группой). Объём сопоставим с 4688 (он и так пишет все процессы). Теги техник `RuleName` у Sysmon 1
-пропали — контент на них не опирается. Любой `ProcessCreate onmatch="include"` возвращает режим
-«только перечисленное» — при обновлении sysmon-modular его надо удалять.
+| EventID | приезжает | правил | замечание |
+|---|---|---:|---|
+| 4688 / Sysmon 1 | да | 1349 / 1350 | ядро process-контента; Sysmon 1 — все процессы минус exclude-шум (~117/ч в простое) |
+| Sysmon 13 / 11 | да, обильно | 261 / 211 | 13 — ~400/ч в простое (`svchost`, `TiWorker`); `CompatTelRunner` исключён в конфиге |
+| 4104 / 4103 | 4104 да, 4103 выключен установщиком | 166 / 33 | PowerShell ScriptBlock; 4103 (Module logging) — объём без правил в контенте |
+| 4624 / 4625 | да | 15 / 5 | только с фильтрами (белый список `LogonType`, отсечка машинных учёток) |
+| Sysmon 22 / 12 / 3 | да, мало | 29 / 57 / 55 | DNS, реестр, сеть |
+| 4697 / 7045 | да, мало | 22 / 48 | установка служб; 7045 с именованными полями |
+| System 104 / Security 1102 | да (104 проверен) | — | очистка журналов, поля из `UserData` |
+| Sysmon 7 / 10 / 16 / 17 / 26 / 29 | да (новый конфиг) | 114 / 25 / — / 19 / — / — | 10 — доступ к процессам (lsass), 17 — named pipe |
+| Sysmon 8 / 18 / 19–21 / 23 | не встречались | — / 19 / — / 13 | конфиг включает, активности на стенде не было |
+| Defender 5007, WMI-Activity 5857, Bits-Client | да | — | новые каналы |
+| 4946 / 4948, 4663, 6416, 4608, 5038 | да (базовая линия) | — | правила брандмауэра, съёмные носители, устройства, старт/целостность; 5140/5145/4778 — будут при общих папках/RDP |
+| 4702 / 4957 / 4799 | да, фон | — | обновление задач Windows, неприменённые правила брандмауэра, перечисление групп `VSSVC`; правил в контенте нет |
+| 4657 | **НЕТ** | 268 | требует SACL на ветках реестра, на практике не настраивают; Sysmon 13 закрывает то же |
+| 4673 / 4674 / 5379 | не доезжают | 1 / — / 3 | чистый шум (было ~19% объёма): отсекается в агенте (`ignore_event_ids`) |
+| 4689 | нет | 0 | подкатегория выключена установщиком |
 
-**Аудит — по базовой линии Microsoft (2026-09-15).** Установщик включает подкатегории Windows Security
-Baseline для рабочих станций, кроме осознанных отличий: Sensitive Privilege Use и Process Termination
-выключены (шум без правил), Kerberos/SAM/Directory Service не включаются до появления контроллера
-домена. Добавлены к прежнему набору: Other Logon/Logoff, File Share, Detailed File Share (отказы),
-MPSSVC Rule-Level Policy Change, Security State Change, System Integrity, Other System Events,
-Removable Storage, Plug and Play. PowerShell Module logging (4103) выключен — правил на 4103 в контенте
-нет, объём был первым на стенде; ScriptBlock (4104) остаётся.
-
-**Шум отфильтрован в агенте.** 4673/4674/5379 (`ignore_event_ids` в `dist/vector.toml`)
-до SIEM не доезжают — пропуски `EventRecordID` в Security из-за них ожидаемы. Подкатегории
-«Завершение процесса» (4689) и «Использование конфиденциальных прав» (4673/4674) выключены
-установщиком.
-
-**Инциденты не заводятся сами.** Таблица `incidents` заполняется только correlation-правилами
-с блоком `correlation.incident`; catch-all прохода по алертам нет by design
-(`docs/spec/incidents.md`).
-
-**Объём informational-алертов.** Базовые правила сценариев пишут алерт на каждое срабатывание.
-Для member-алертов инцидента это правильно, но вкладку «Алерты» забивает быстро — разбирать через
-фильтр «Инцидент: в инцидентах / вне», поиск и «Группировать по правилу» (дедуп по служебным полям
-намеренно не делается).
-
-**Установка агента сама даёт инциденты.** Действия установщика взводят `SCE_Evasion_Telemetry_Tampering`
-(`sysmon -c`), `SCE_Evasion_Log_Cleared` (`wevtutil sl`) и алерты «Audit Policy Tampering» (`auditpol /set`)
-— известные ложные срабатывания, подробно в `docs/guide/windows-agent.md`; доводка — CLAUDE.md §7 «Этап 4.5».
-
-**`Start-Process -Credential` пишет в 4625 адрес `::1`, а не `'-'`.** Идёт через
-`CreateProcessWithLogonW`, и попадания уходят в правило «с адресом», не «без адреса». Если
-сценарий написан под 4625 без адреса (настоящий случай — ввод пароля на экране блокировки
-руками), эмуляция через `Start-Process -Credential` его не воспроизведёт — придётся либо менять
-ожидание фикстуры (`lab_expect`), либо эмулировать иначе.
-
-**Свежая Windows 10 блокирует учётку после 10 неудачных входов.** Успешный вход в сценарии
-брутфорса после серии неудач может упасть с «System error 1909» — перед такими сценариями
-`net accounts /lockoutthreshold:0`.
-
-**Sysmon пишет EID 3 только по УСТАНОВЛЕННОМУ соединению.** Соединение к неотвечающему адресу
-не даёт события вовсе — если стенд ходит в интернет только через прокси на хосте (см. §0), любой
-сетевой сценарий должен целить в адрес, который реально примет соединение, а не в произвольный
-внешний IP.
-
-**Волны сценариев подряд дают сквозные срабатывания — это не ошибка.** Активность одной волны
-может попасть в окно корреляции соседней (например, успешный сетевой вход одной волны + создание
-службы другой волны укладываются в 2-минутное окно `th_lateral_remote_service_task` по
-`Computer`) — правило не может связать поля разных событий, чтобы отличить совпадение от цепочки,
-и это честное срабатывание, не FP-исключение (§9, разбор TP/FP — задача агента Этапа 5). Так же
-сами собой всплывают `kc_*`-инциденты. Хочешь чистые отчёты по волнам — держи паузу между ними
-больше самого длинного окна задействованных корреляций.
+Практический вывод: process / PowerShell / auth / registry / services / log clearing — пиши контент;
+Sysmon 10/17 доезжают, но FP-доводка правил на них — после живого прогона.
 
 ---
 
-## 4. Живой прогон детект-контента (2026-09-19)
+## 5. Живой прогон детект-контента (2026-09-19)
 
 Полный прогон всех сценариев `artifacts/content/*/tests/*.yml` через `dist/run-lab-scenarios.ps1`
 (гид по `lab:`-секциям фикстур, поллит `/incidents` до появления ожидаемых `incident_type`).
